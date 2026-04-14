@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic>=2
+pandas>=2.0.0
+numpy>=1.24.0
+holidays
+retry
+libsql-experimental
+git+https://github.com/egxlytics/egxpy.git
