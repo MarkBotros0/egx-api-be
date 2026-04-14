@@ -24,7 +24,7 @@ from app.core.composite import (
 router = APIRouter()
 
 _BATCH_MAX_SYMBOLS = 24
-_BATCH_BARS = 250
+_BATCH_BARS = 220
 _BATCH_WORKERS = 6
 # One slow upstream fetch must not hang the whole chunk — return partial
 # results once this budget is spent. Keep comfortably under Vercel's 30s.

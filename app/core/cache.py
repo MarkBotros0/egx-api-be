@@ -2,14 +2,16 @@
 Simple in-memory cache with TTL for serverless functions.
 
 Each warm container keeps its own cache. On cold start the cache is empty.
-Default TTL is 5 minutes — prevents hitting TradingView too often for the
-same data within a short window.
+Default TTL is 15 minutes — keeps dashboard/composite scores warm long
+enough that repeat visits within a session skip the slow upstream fetch.
+EGX trades Sun-Thu 10:00-14:30 Cairo time, so intraday data changes
+slowly relative to this window.
 """
 
 import time
 from typing import Any, Optional
 
-_DEFAULT_TTL = 300  # 5 minutes in seconds
+_DEFAULT_TTL = 900  # 15 minutes in seconds
 
 # Module-level dict: survives across requests in the same warm container
 _store: dict[str, tuple[float, Any]] = {}
