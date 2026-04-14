@@ -106,7 +106,19 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict) -> tuple:
             weights=weights,
         )
 
-        return symbol, {"score": comp["score"], "signal": comp["signal"]}
+        prev_close = float(close.iloc[-2]) if len(close) > 1 else current_price
+        change = current_price - prev_close
+        change_pct = (change / prev_close * 100) if prev_close else 0.0
+        sparkline = [float(x) for x in close.iloc[-30:].tolist()]
+
+        return symbol, {
+            "score": comp["score"],
+            "signal": comp["signal"],
+            "price": current_price,
+            "change": change,
+            "change_pct": change_pct,
+            "sparkline": sparkline,
+        }
 
     except Exception as e:
         return symbol, {"error": str(e)}
