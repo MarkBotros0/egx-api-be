@@ -4,7 +4,8 @@ GET /api/analysis — Fetch OHLCV data and compute all technical indicators for 
 Also supports ?mode=batch&symbols=A,B,C for lightweight composite-only batch scoring.
 """
 
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -25,6 +26,9 @@ router = APIRouter()
 _BATCH_MAX_SYMBOLS = 24
 _BATCH_BARS = 250
 _BATCH_WORKERS = 6
+# One slow upstream fetch must not hang the whole chunk — return partial
+# results once this budget is spent. Keep comfortably under Vercel's 30s.
+_BATCH_DEADLINE_S = 20.0
 
 
 def _compute_batch_one(symbol: str, interval: str, weights: dict) -> tuple:
@@ -155,19 +159,34 @@ def _handle_batch(symbols_str: str, interval: str):
             todo.append(sym)
 
     if todo:
-        with ThreadPoolExecutor(max_workers=_BATCH_WORKERS) as pool:
-            results = list(pool.map(
-                lambda s: _compute_batch_one(s, interval, weights),
-                todo,
-            ))
-
-        for sym, result in results:
-            ck = make_key("composite", sym, interval, w_hash)
-            set(ck, result)
-            if "error" in result:
-                errors.append({"symbol": sym, "error": result["error"]})
-            else:
-                scores[sym] = result
+        pool = ThreadPoolExecutor(max_workers=_BATCH_WORKERS)
+        try:
+            futures = {
+                pool.submit(_compute_batch_one, s, interval, weights): s
+                for s in todo
+            }
+            deadline = time.monotonic() + _BATCH_DEADLINE_S
+            for fut, sym in futures.items():
+                remaining = deadline - time.monotonic()
+                try:
+                    if remaining <= 0:
+                        raise FuturesTimeoutError()
+                    _sym, result = fut.result(timeout=remaining)
+                except FuturesTimeoutError:
+                    result = {"error": "upstream timeout"}
+                except Exception as e:
+                    result = {"error": str(e)}
+                # Don't cache timeouts — let the next request retry.
+                if result.get("error") != "upstream timeout":
+                    ck = make_key("composite", sym, interval, w_hash)
+                    set(ck, result)
+                if "error" in result:
+                    errors.append({"symbol": sym, "error": result["error"]})
+                else:
+                    scores[sym] = result
+        finally:
+            # Don't block on stuck threads — Vercel recycles the container.
+            pool.shutdown(wait=False)
 
     return {"scores": scores, "errors": errors}
 
