@@ -46,14 +46,11 @@ def get_portfolio():
         holdings = [_row_to_dict(r) for r in rows]
 
         settings = db.execute(
-            "SELECT key, value FROM settings WHERE key IN ('cash_available', 'currency')"
-        ).fetchall()
-        settings_dict = {r[0]: r[1] for r in settings}
+            "SELECT key, value FROM settings WHERE key = 'currency'"
+        ).fetchone()
+        currency = settings[0] if settings else "EGP"
 
-        cash = float(settings_dict.get("cash_available", "50000"))
-        currency = settings_dict.get("currency", "EGP")
-
-        return {"portfolio": holdings, "cash_available": cash, "currency": currency}
+        return {"portfolio": holdings, "cash_available": 0, "currency": currency}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -84,17 +81,12 @@ def add_holding(body: dict):
         stop_loss = float(body["stop_loss"]) if body.get("stop_loss") else None
 
         db = get_db()
-        cost = float(buy_price) * int(quantity)
         db.execute(
             """INSERT INTO portfolio (id, symbol, name, buy_price, buy_date, quantity, notes,
                sector, target_price, stop_loss, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (holding_id, symbol, name, float(buy_price), buy_date, int(quantity),
              notes, sector, target_price, stop_loss, now, now),
-        )
-        db.execute(
-            "UPDATE settings SET value = CAST(CAST(value AS REAL) - ? AS TEXT) WHERE key = 'cash_available'",
-            (cost,),
         )
         db.commit()
 
@@ -156,18 +148,7 @@ def update_holding(id: str = Query(...), body: dict = None):
         values.append(now)
         values.append(id)
 
-        old_cost = float(row[3]) * int(row[5])
-        new_buy_price = float(body["buy_price"]) if "buy_price" in body else float(row[3])
-        new_quantity = int(body["quantity"]) if "quantity" in body else int(row[5])
-        new_cost = new_buy_price * new_quantity
-        cost_diff = new_cost - old_cost
-
         db.execute(f"UPDATE portfolio SET {', '.join(set_clauses)} WHERE id = ?", values)
-        if cost_diff != 0:
-            db.execute(
-                "UPDATE settings SET value = CAST(CAST(value AS REAL) - ? AS TEXT) WHERE key = 'cash_available'",
-                (cost_diff,),
-            )
         db.commit()
 
         updated = db.execute(
@@ -189,18 +170,13 @@ def delete_holding(id: str = Query(...)):
     try:
         db = get_db()
         row = db.execute(
-            "SELECT id, buy_price, quantity FROM portfolio WHERE id = ?", (id,)
+            "SELECT id FROM portfolio WHERE id = ?", (id,)
         ).fetchone()
 
         if not row:
             raise HTTPException(status_code=404, detail=f"Holding not found: {id}")
 
-        cost = float(row[1]) * int(row[2])
         db.execute("DELETE FROM portfolio WHERE id = ?", (id,))
-        db.execute(
-            "UPDATE settings SET value = CAST(CAST(value AS REAL) + ? AS TEXT) WHERE key = 'cash_available'",
-            (cost,),
-        )
         db.commit()
         return {"deleted": id}
 

@@ -723,11 +723,7 @@ def get_portfolio_analysis():
             }
             for r in rows
         ]
-        settings = db.execute(
-            "SELECT value FROM settings WHERE key = 'cash_available'"
-        ).fetchone()
-        cash = float(settings[0]) if settings else 0
-        return _analyze(holdings, cash)
+        return _analyze(holdings, 0)
     except HTTPException:
         raise
     except Exception as e:
@@ -738,8 +734,7 @@ def get_portfolio_analysis():
 def post_portfolio_analysis(body: dict):
     try:
         holdings = body.get("portfolio", [])
-        cash = float(body.get("cash_available", 0))
-        return _analyze(holdings, cash)
+        return _analyze(holdings, 0)
     except HTTPException:
         raise
     except Exception as e:
