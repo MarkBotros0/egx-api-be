@@ -24,7 +24,7 @@ router = APIRouter()
 
 _BATCH_MAX_SYMBOLS = 24
 _BATCH_BARS = 250
-_BATCH_WORKERS = 6
+_BATCH_WORKERS = 12
 
 
 def _compute_batch_one(symbol: str, interval: str, weights: dict) -> tuple:
