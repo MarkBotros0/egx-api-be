@@ -161,10 +161,26 @@ def _handle_batch(symbols_str: str, interval: str):
     if todo:
         pool = ThreadPoolExecutor(max_workers=_BATCH_WORKERS)
         try:
-            futures = {
-                pool.submit(_compute_batch_one, s, interval, weights): s
-                for s in todo
-            }
+            def _cache_on_done(sym: str):
+                ck = make_key("composite", sym, interval, w_hash)
+                def _cb(f):
+                    try:
+                        _s, r = f.result()
+                        if "error" not in r:
+                            set(ck, r)
+                    except Exception:
+                        pass
+                return _cb
+
+            futures: dict = {}
+            for s in todo:
+                f = pool.submit(_compute_batch_one, s, interval, weights)
+                # Stragglers that finish AFTER we've returned still self-cache
+                # via this callback — a frontend retry a few seconds later hits
+                # a warm cache and fills in the '--' cards.
+                f.add_done_callback(_cache_on_done(s))
+                futures[f] = s
+
             deadline = time.monotonic() + _BATCH_DEADLINE_S
             for fut, sym in futures.items():
                 remaining = deadline - time.monotonic()
@@ -176,10 +192,6 @@ def _handle_batch(symbols_str: str, interval: str):
                     result = {"error": "upstream timeout"}
                 except Exception as e:
                     result = {"error": str(e)}
-                # Don't cache timeouts — let the next request retry.
-                if result.get("error") != "upstream timeout":
-                    ck = make_key("composite", sym, interval, w_hash)
-                    set(ck, result)
                 if "error" in result:
                     errors.append({"symbol": sym, "error": result["error"]})
                 else:
