@@ -7,22 +7,21 @@ HS256 signature verification will fail, so every client is forced back
 through /api/auth/login.
 """
 
+import hashlib
 import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import bcrypt
 import jwt
 from fastapi import Header, HTTPException, status
-from passlib.context import CryptContext
 
 
 AUTH_SECRET = os.environ.get("AUTH_SECRET", "")
 JWT_ALGORITHM = "HS256"
 TOKEN_LIFETIME_DAYS = 30
-
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 @dataclass
@@ -31,13 +30,20 @@ class CurrentUser:
     username: str
 
 
+def _prehash(password: str) -> bytes:
+    # SHA-256 → 32 bytes, comfortably under bcrypt's 72-byte input cap.
+    # Eliminates length errors for arbitrarily long passwords without
+    # silently truncating (which would collide different passwords).
+    return hashlib.sha256(password.encode("utf-8")).digest()
+
+
 def hash_password(password: str) -> str:
-    return _pwd_context.hash(password)
+    return bcrypt.hashpw(_prehash(password), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(password: str, password_hash: str) -> bool:
     try:
-        return _pwd_context.verify(password, password_hash)
+        return bcrypt.checkpw(_prehash(password), password_hash.encode("utf-8"))
     except Exception:
         return False
 
