@@ -9,8 +9,11 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core.auth import seed_users_from_env
+from app.core.db import get_db
 from app.core.json_encoding import NaNSafeJSONResponse
 from app.routers import (
+    auth,
     tickers,
     ohlcv,
     macro,
@@ -42,7 +45,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+try:
+    seed_users_from_env(get_db())
+except Exception as e:
+    # Never let a seeding failure crash the app — log and continue.
+    print(f"[auth] seed_users_from_env failed: {e}")
+
 for router_module in (
+    auth,
     tickers,
     ohlcv,
     macro,

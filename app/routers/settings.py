@@ -1,5 +1,5 @@
 """
-Settings endpoint — Manage app settings (cash_available, currency, etc.)
+Settings endpoint — Manage app settings (currency, risk_free_rate, composite weights, etc.)
 
 GET  /api/settings                   — All settings as key/value map
 PUT  /api/settings                   — Update a single setting {key, value}

@@ -6,4 +6,6 @@ numpy>=1.24.0
 holidays
 retry
 libsql-experimental
+pyjwt>=2.9.0
+passlib[bcrypt]>=1.7.4
 egxpy @ git+https://github.com/egxlytics/egxpy.git

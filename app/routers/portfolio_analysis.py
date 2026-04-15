@@ -1,15 +1,16 @@
 """
 /api/portfolio_analysis — Analyze a portfolio of stock holdings.
 
-GET  — Read holdings from Turso and analyze them
-POST — Accept holdings in request body (body: {portfolio: [...], cash_available: float})
+GET  — Read the current user's holdings from Turso and analyze them
+POST — Accept holdings in request body (body: {portfolio: [...]})
 """
 
 from datetime import date, datetime
 from typing import Optional, List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
 from app.core.macro_fetch import fetch_macro
 from app.core.composite import compute_composite, get_weights_from_db, DEFAULT_WEIGHTS
@@ -65,7 +66,7 @@ def _annualized_return(total_return_pct: float, days_held: int) -> float:
     return ((1 + total_return_pct / 100) ** (365 / days_held) - 1) * 100
 
 
-def _analyze(holdings, cash):
+def _analyze(holdings):
     if not holdings:
         raise HTTPException(status_code=400, detail="No holdings provided")
 
@@ -619,7 +620,7 @@ def _analyze(holdings, cash):
             stock_analyses.append({"symbol": symbol, "error": f"Analysis failed: {str(e)}"})
 
     # Portfolio-level metrics
-    total_portfolio_value = total_current_value + cash
+    total_portfolio_value = total_current_value
     total_pnl = total_current_value - total_invested
     total_pnl_pct = (total_current_value / total_invested - 1) * 100 if total_invested > 0 else 0
 
@@ -808,7 +809,6 @@ def _analyze(holdings, cash):
             "total_value": round(total_portfolio_value, 2),
             "total_invested": round(total_invested, 2),
             "total_current_value": round(total_current_value, 2),
-            "cash_available": round(cash, 2),
             "total_pnl": round(total_pnl, 2),
             "total_pnl_pct": round(total_pnl_pct, 2),
             "sector_allocation": sector_allocation,
@@ -838,12 +838,14 @@ def _analyze(holdings, cash):
 
 
 @router.get("/api/portfolio_analysis")
-def get_portfolio_analysis():
+def get_portfolio_analysis(user: CurrentUser = Depends(get_current_user)):
     try:
         db = get_db()
         rows = db.execute(
             "SELECT id, symbol, name, buy_price, buy_date, quantity, notes, sector, "
-            "target_price, stop_loss, created_at, updated_at FROM portfolio"
+            "target_price, stop_loss, created_at, updated_at FROM portfolio "
+            "WHERE user_id = ?",
+            (user.id,),
         ).fetchall()
         holdings = [
             {
@@ -853,7 +855,7 @@ def get_portfolio_analysis():
             }
             for r in rows
         ]
-        return _analyze(holdings, 0)
+        return _analyze(holdings)
     except HTTPException:
         raise
     except Exception as e:
@@ -861,10 +863,13 @@ def get_portfolio_analysis():
 
 
 @router.post("/api/portfolio_analysis")
-def post_portfolio_analysis(body: dict):
+def post_portfolio_analysis(
+    body: dict,
+    user: CurrentUser = Depends(get_current_user),
+):
     try:
         holdings = body.get("portfolio", [])
-        return _analyze(holdings, 0)
+        return _analyze(holdings)
     except HTTPException:
         raise
     except Exception as e:

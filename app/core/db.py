@@ -8,10 +8,7 @@ SQLite database and ensures the schema is initialized on first call.
 import os
 import libsql_experimental as libsql
 
-from app.core.constants import (
-    DEFAULT_CASH_AVAILABLE_EGP,
-    DEFAULT_RISK_FREE_RATE_PCT,
-)
+from app.core.constants import DEFAULT_RISK_FREE_RATE_PCT
 
 _conn = None
 
@@ -27,11 +24,56 @@ def get_connection():
     return conn
 
 
+def _portfolio_has_user_id(conn) -> bool:
+    rows = conn.execute("PRAGMA table_info(portfolio)").fetchall()
+    return any(r[1] == "user_id" for r in rows)
+
+
+def _watchlist_has_user_id(conn) -> bool:
+    rows = conn.execute("PRAGMA table_info(watchlist)").fetchall()
+    return any(r[1] == "user_id" for r in rows)
+
+
 def init_db(conn):
-    """Create tables if they don't exist."""
+    """Create tables if they don't exist.
+
+    When adding auth, any pre-auth `portfolio` / `watchlist` tables (which
+    lacked a `user_id` column) are dropped and recreated — the app shipped
+    as single-user, so there is no backfill path.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    # Drop legacy (pre-auth) portfolio / watchlist tables so we can recreate
+    # them with a NOT NULL user_id column.
+    try:
+        has_portfolio = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='portfolio'"
+        ).fetchone()
+        if has_portfolio and not _portfolio_has_user_id(conn):
+            conn.execute("DROP TABLE portfolio")
+    except Exception:
+        pass
+
+    try:
+        has_watchlist = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='watchlist'"
+        ).fetchone()
+        if has_watchlist and not _watchlist_has_user_id(conn):
+            conn.execute("DROP TABLE watchlist")
+    except Exception:
+        pass
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS portfolio (
             id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
             symbol TEXT NOT NULL,
             name TEXT NOT NULL,
             buy_price REAL NOT NULL,
@@ -45,6 +87,8 @@ def init_db(conn):
             updated_at TEXT NOT NULL
         )
     """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_user ON portfolio(user_id)")
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -62,10 +106,14 @@ def init_db(conn):
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS watchlist (
-            symbol TEXT PRIMARY KEY,
-            added_at TEXT NOT NULL
+            user_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            added_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, symbol)
         )
     """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)")
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS discovered_tickers (
             symbol TEXT PRIMARY KEY,
@@ -75,10 +123,6 @@ def init_db(conn):
             added_at TEXT NOT NULL
         )
     """)
-    conn.execute(
-        "INSERT OR IGNORE INTO settings (key, value) VALUES ('cash_available', ?)",
-        (str(DEFAULT_CASH_AVAILABLE_EGP),),
-    )
     conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('currency', 'EGP')")
     conn.execute(
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('risk_free_rate', ?)",

@@ -77,7 +77,6 @@ BB_SQUEEZE_RATIO = 0.7                     # Width below 70% of recent average =
 
 # === Default settings (DB seeds + fallbacks) ===
 
-DEFAULT_CASH_AVAILABLE_EGP = 50_000        # Initial portfolio cash row in settings
 DEFAULT_RISK_FREE_RATE_PCT = 25            # Egypt T-bill rate ~25% — high by global standards
 
 
