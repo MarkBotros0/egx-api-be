@@ -9,6 +9,11 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Query
 
 from app.core.cache import get, set, make_key
+from app.core.constants import (
+    COMPARE_DEFAULT_LOOKBACK_DAYS,
+    COMPARE_MAX_SYMBOLS,
+    COMPARE_MIN_SYMBOLS,
+)
 
 router = APIRouter()
 
@@ -48,14 +53,14 @@ def get_compare(
 ):
     try:
         syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
-        if len(syms) < 2:
-            raise HTTPException(status_code=400, detail="Need at least 2 symbols to compare")
-        if len(syms) > 10:
-            raise HTTPException(status_code=400, detail="Maximum 10 symbols for comparison")
+        if len(syms) < COMPARE_MIN_SYMBOLS:
+            raise HTTPException(status_code=400, detail=f"Need at least {COMPARE_MIN_SYMBOLS} symbols to compare")
+        if len(syms) > COMPARE_MAX_SYMBOLS:
+            raise HTTPException(status_code=400, detail=f"Maximum {COMPARE_MAX_SYMBOLS} symbols for comparison")
 
         interval = interval.capitalize()
         today = date.today()
-        start_date = _parse_date(start or "", today - timedelta(days=180))
+        start_date = _parse_date(start or "", today - timedelta(days=COMPARE_DEFAULT_LOOKBACK_DAYS))
         end_date = _parse_date(end or "", today)
 
         cache_key = make_key("compare", ",".join(syms), interval, str(start_date), str(end_date))

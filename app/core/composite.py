@@ -35,6 +35,13 @@ from __future__ import annotations
 import math
 from typing import Optional
 
+from app.core.constants import (
+    SCORE_BUY_MAX,
+    SCORE_HOLD_MAX,
+    SCORE_SELL_MAX,
+    SCORE_STRONG_SELL_MAX,
+)
+
 
 DEFAULT_WEIGHTS = {
     "trend": 25,
@@ -110,13 +117,13 @@ def normalize_weights(weights: dict) -> dict:
 
 def classify_signal(score: float) -> str:
     """Map a 0-100 composite score to a human-readable signal string."""
-    if score >= 80:
+    if score >= SCORE_BUY_MAX:
         return "Strong Buy"
-    if score >= 60:
+    if score >= SCORE_HOLD_MAX:
         return "Buy"
-    if score >= 40:
+    if score >= SCORE_SELL_MAX:
         return "Hold"
-    if score >= 20:
+    if score >= SCORE_STRONG_SELL_MAX:
         return "Sell"
     return "Strong Sell"
 

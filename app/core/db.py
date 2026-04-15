@@ -8,6 +8,11 @@ SQLite database and ensures the schema is initialized on first call.
 import os
 import libsql_experimental as libsql
 
+from app.core.constants import (
+    DEFAULT_CASH_AVAILABLE_EGP,
+    DEFAULT_RISK_FREE_RATE_PCT,
+)
+
 _conn = None
 
 
@@ -70,9 +75,15 @@ def init_db(conn):
             added_at TEXT NOT NULL
         )
     """)
-    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('cash_available', '50000')")
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('cash_available', ?)",
+        (str(DEFAULT_CASH_AVAILABLE_EGP),),
+    )
     conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('currency', 'EGP')")
-    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('risk_free_rate', '25')")
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('risk_free_rate', ?)",
+        (str(DEFAULT_RISK_FREE_RATE_PCT),),
+    )
     # Composite score category weights (must sum to 100 after normalization)
     conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weight_trend', '25')")
     conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weight_momentum', '25')")

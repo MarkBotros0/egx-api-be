@@ -8,6 +8,10 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from app.core.cache import get, set, make_key
+from app.core.constants import (
+    HISTORICAL_DEFAULT_LOOKBACK_DAYS,
+    HISTORICAL_MAX_SYMBOLS,
+)
 
 router = APIRouter()
 
@@ -31,12 +35,12 @@ def get_historical(
         syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
         if not syms:
             raise HTTPException(status_code=400, detail="No valid symbols provided")
-        if len(syms) > 20:
-            raise HTTPException(status_code=400, detail="Maximum 20 symbols allowed")
+        if len(syms) > HISTORICAL_MAX_SYMBOLS:
+            raise HTTPException(status_code=400, detail=f"Maximum {HISTORICAL_MAX_SYMBOLS} symbols allowed")
 
         interval = interval.capitalize()
         today = date.today()
-        start_date = _parse_date(start or "", today - timedelta(days=365))
+        start_date = _parse_date(start or "", today - timedelta(days=HISTORICAL_DEFAULT_LOOKBACK_DAYS))
         end_date = _parse_date(end or "", today)
 
         cache_key = make_key("historical", ",".join(syms), interval, str(start_date), str(end_date))

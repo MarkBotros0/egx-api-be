@@ -13,6 +13,28 @@ from fastapi import APIRouter, HTTPException
 from app.core.db import get_db
 from app.core.macro_fetch import fetch_macro
 from app.core.composite import compute_composite, get_weights_from_db, DEFAULT_WEIGHTS
+from app.core.constants import (
+    BIG_LOSS_PCT,
+    CONCENTRATION_CRITICAL_PCT,
+    CONCENTRATION_WARNING_PCT,
+    CORRELATION_HIGH_THRESHOLD,
+    CORRELATION_NEGATIVE_THRESHOLD,
+    CURRENT_DRAWDOWN_WARNING_PCT,
+    DEFAULT_RISK_FREE_RATE_PCT,
+    DIVERGENCE_LOOKBACK_PORTFOLIO,
+    MAX_DRAWDOWN_WARNING_PCT,
+    MONTE_CARLO_FORECAST_DAYS,
+    MONTE_CARLO_SIMULATIONS,
+    PORTFOLIO_FETCH_BARS_MAX,
+    PORTFOLIO_FETCH_BARS_MIN,
+    PROFIT_TARGET_PCT,
+    SCORE_BUY_MAX,
+    SCORE_STRONG_SELL_MAX,
+    SECTOR_ALERT_PCT,
+    STOCK_ALERT_PCT,
+    TRADING_DAYS_PER_YEAR,
+    VAR_PERCENTILE,
+)
 from app.core.indicators import (
     rsi as calc_rsi, sma as calc_sma, volatility as calc_volatility,
     daily_returns as calc_daily_returns, compute_beta, obv as calc_obv,
@@ -76,9 +98,9 @@ def _analyze(holdings, cash):
     try:
         db = get_db()
         rfr_row = db.execute("SELECT value FROM settings WHERE key = 'risk_free_rate'").fetchone()
-        risk_free_annual = float(rfr_row[0]) / 100 if rfr_row else 0.25
+        risk_free_annual = float(rfr_row[0]) / 100 if rfr_row else DEFAULT_RISK_FREE_RATE_PCT / 100
     except Exception:
-        risk_free_annual = 0.25
+        risk_free_annual = DEFAULT_RISK_FREE_RATE_PCT / 100
 
     try:
         weights = get_weights_from_db(get_db())
@@ -101,7 +123,7 @@ def _analyze(holdings, cash):
 
         try:
             days_held = _days_between(buy_date, today)
-            fetch_bars = min(max(200, days_held), 500)
+            fetch_bars = min(max(PORTFOLIO_FETCH_BARS_MIN, days_held), PORTFOLIO_FETCH_BARS_MAX)
             df = get_OHLCV_data(symbol, "EGX", "Daily", fetch_bars)
             if df is None or df.empty:
                 stock_analyses.append({"symbol": symbol, "error": "Could not fetch market data"})
@@ -202,8 +224,8 @@ def _analyze(holdings, cash):
                 bb_upper_series = bb_middle_series = bb_lower_series = None
 
             divergences_h = {
-                "rsi": detect_divergences(close, rsi_series, lookback=30) if rsi_series is not None else {},
-                "macd": detect_divergences(close, macd_line_series, lookback=30) if macd_line_series is not None else {},
+                "rsi": detect_divergences(close, rsi_series, lookback=DIVERGENCE_LOOKBACK_PORTFOLIO) if rsi_series is not None else {},
+                "macd": detect_divergences(close, macd_line_series, lookback=DIVERGENCE_LOOKBACK_PORTFOLIO) if macd_line_series is not None else {},
             }
 
             volume_price_h = volume_price_confirmation(close, df["volume"])
@@ -317,12 +339,12 @@ def _analyze(holdings, cash):
             if composite_h:
                 c_score = composite_h["score"]
                 c_signal = composite_h["signal"]
-                if c_score >= 80:
+                if c_score >= SCORE_BUY_MAX:
                     signals.append({"type": "strong_buy_composite", "severity": "opportunity", "symbol": symbol,
                         "message": f"{symbol} composite score is {c_score:.0f} — Strong Buy across multiple indicators.",
                         "explanation": "The composite score blends trend, momentum, volume, volatility, and divergence into one number. A score ≥80 means most categories are aligned bullishly — a high-conviction setup.",
                         "learn_concept": "composite_score"})
-                elif c_score <= 20:
+                elif c_score <= SCORE_STRONG_SELL_MAX:
                     signals.append({"type": "strong_sell_composite", "severity": "action_required", "symbol": symbol,
                         "message": f"{symbol} composite score is {c_score:.0f} — Strong Sell. Most indicators are bearish.",
                         "explanation": "When the composite score falls below 20, trend, momentum, volume, volatility, and divergence are all flashing bearish.",
@@ -467,13 +489,13 @@ def _analyze(holdings, cash):
                     "explanation": "Trading below the 50-day SMA suggests the stock's momentum has weakened.",
                     "learn_concept": "sma"})
 
-            if pnl_pct < -15:
+            if pnl_pct < BIG_LOSS_PCT:
                 signals.append({"type": "big_loss", "severity": "warning", "symbol": symbol,
                     "message": f"Your position in {symbol} has lost {abs(pnl_pct):.1f}%. Review if your original thesis still holds.",
-                    "explanation": "A 15%+ loss is significant. Ask yourself: has the reason you bought changed?",
+                    "explanation": f"A {abs(BIG_LOSS_PCT)}%+ loss is significant. Ask yourself: has the reason you bought changed?",
                     "learn_concept": "stop_loss"})
 
-            if pnl_pct > 20:
+            if pnl_pct > PROFIT_TARGET_PCT:
                 signals.append({"type": "profit_taking", "severity": "info", "symbol": symbol,
                     "message": f"{symbol} has gained {pnl_pct:.1f}%. Consider taking partial profits.",
                     "explanation": "Taking partial profits lets you secure gains while keeping upside exposure.",
@@ -497,22 +519,22 @@ def _analyze(holdings, cash):
 
     div_score = 100
     for sym, pct in stock_concentration.items():
-        if pct > 30:
-            div_score -= (pct - 30) * 2
+        if pct > CONCENTRATION_WARNING_PCT:
+            div_score -= (pct - CONCENTRATION_WARNING_PCT) * 2
     for sec, pct in sector_allocation.items():
-        if pct > 50:
-            div_score -= (pct - 50) * 1.5
+        if pct > CONCENTRATION_CRITICAL_PCT:
+            div_score -= (pct - CONCENTRATION_CRITICAL_PCT) * 1.5
     div_score = max(0, min(100, div_score))
 
     for sec, pct in sector_allocation.items():
-        if pct > 40:
+        if pct > SECTOR_ALERT_PCT:
             signals.append({"type": "sector_concentration", "severity": "warning", "symbol": None,
                 "message": f"{pct:.0f}% of your portfolio is in {sec}. Consider diversifying.",
                 "explanation": "Sector concentration risk means if something bad happens to one industry, a large chunk of your portfolio suffers.",
                 "learn_concept": "correlation"})
 
     for sym, pct in stock_concentration.items():
-        if pct > 35:
+        if pct > STOCK_ALERT_PCT:
             signals.append({"type": "stock_concentration", "severity": "warning", "symbol": sym,
                 "message": f"{sym} makes up {pct:.0f}% of your portfolio.",
                 "explanation": "Having more than 30-35% in a single stock is risky.",
@@ -542,15 +564,15 @@ def _analyze(holdings, cash):
             port_weights = {sym: stock_values.get(sym, 0) / total_current_value for sym in returns_df.columns}
             portfolio_daily = sum(returns_df[sym] * port_weights.get(sym, 0) for sym in returns_df.columns)
 
-            rf_daily = (1 + risk_free_annual) ** (1 / 252) - 1
+            rf_daily = (1 + risk_free_annual) ** (1 / TRADING_DAYS_PER_YEAR) - 1
             excess = portfolio_daily - rf_daily
 
             if excess.std() > 0:
-                sharpe_ratio = round(float(excess.mean() / excess.std() * np.sqrt(252)), 2)
+                sharpe_ratio = round(float(excess.mean() / excess.std() * np.sqrt(TRADING_DAYS_PER_YEAR)), 2)
 
             downside = excess[excess < 0]
             if len(downside) > 0 and downside.std() > 0:
-                sortino_ratio = round(float(excess.mean() / downside.std() * np.sqrt(252)), 2)
+                sortino_ratio = round(float(excess.mean() / downside.std() * np.sqrt(TRADING_DAYS_PER_YEAR)), 2)
 
             cumulative = (1 + portfolio_daily).cumprod()
             running_max = cumulative.cummax()
@@ -566,7 +588,7 @@ def _analyze(holdings, cash):
                 "current_drawdown": round(current_dd, 4),
             }
 
-            var_pct = float(np.percentile(portfolio_daily.values, 5))
+            var_pct = float(np.percentile(portfolio_daily.values, VAR_PERCENTILE))
             var_95_pct = round(var_pct, 4)
             var_95_egp = round(total_portfolio_value * abs(var_pct), 0)
             tail = portfolio_daily[portfolio_daily <= var_pct]
@@ -587,12 +609,12 @@ def _analyze(holdings, cash):
                     for j in range(i + 1, len(symbols_list)):
                         c = float(corr.iloc[i, j])
                         corr_values.append(c)
-                        if c > 0.7:
+                        if c > CORRELATION_HIGH_THRESHOLD:
                             signals.append({"type": "high_correlation", "severity": "warning", "symbol": None,
                                 "message": f"{symbols_list[i]} and {symbols_list[j]} are highly correlated ({c:.2f}).",
                                 "explanation": "High correlation means these stocks rise and fall together.",
                                 "learn_concept": "correlation"})
-                        elif c < -0.3:
+                        elif c < CORRELATION_NEGATIVE_THRESHOLD:
                             signals.append({"type": "negative_correlation", "severity": "info", "symbol": None,
                                 "message": f"{symbols_list[i]} and {symbols_list[j]} have negative correlation ({c:.2f}). Great for diversification.",
                                 "explanation": "Negatively correlated stocks tend to move in opposite directions.",
@@ -602,7 +624,7 @@ def _analyze(holdings, cash):
             mu = float(portfolio_daily.mean())
             sigma = float(portfolio_daily.std())
             if sigma > 0:
-                n_sims, n_days = 1000, 60
+                n_sims, n_days = MONTE_CARLO_SIMULATIONS, MONTE_CARLO_FORECAST_DAYS
                 sims = np.random.normal(mu, sigma, (n_sims, n_days))
                 paths = np.cumprod(1 + sims, axis=1)
                 p5  = np.percentile(paths, 5,  axis=0)
@@ -636,13 +658,13 @@ def _analyze(holdings, cash):
                     "explanation": f"With Egypt's T-bill rate at ~{risk_free_annual*100:.0f}%, you could earn guaranteed returns with zero risk.",
                     "learn_concept": "sharpe_ratio"})
 
-            if max_drawdown_info and max_drawdown_info["value"] < -0.20:
+            if max_drawdown_info and max_drawdown_info["value"] < -MAX_DRAWDOWN_WARNING_PCT:
                 signals.append({"type": "severe_drawdown", "severity": "action_required", "symbol": None,
                     "message": f"Your portfolio's max drawdown has been {max_drawdown_info['value']*100:.1f}%.",
-                    "explanation": "A drawdown over 20% means your portfolio lost more than a fifth of its value at some point.",
+                    "explanation": f"A drawdown over {int(MAX_DRAWDOWN_WARNING_PCT*100)}% means your portfolio lost more than that share of its value at some point.",
                     "learn_concept": "max_drawdown"})
 
-            if max_drawdown_info and max_drawdown_info["current_drawdown"] < -0.05:
+            if max_drawdown_info and max_drawdown_info["current_drawdown"] < -CURRENT_DRAWDOWN_WARNING_PCT:
                 signals.append({"type": "current_drawdown", "severity": "warning", "symbol": None,
                     "message": f"Your portfolio is currently in a {abs(max_drawdown_info['current_drawdown'])*100:.1f}% drawdown from its peak.",
                     "explanation": "Your portfolio value is below its recent high.",

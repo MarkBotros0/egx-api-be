@@ -11,7 +11,9 @@ slowly relative to this window.
 import time
 from typing import Any, Optional
 
-_DEFAULT_TTL = 900  # 15 minutes in seconds
+from app.core.constants import DEFAULT_CACHE_TTL_SECONDS
+
+_DEFAULT_TTL = DEFAULT_CACHE_TTL_SECONDS
 
 # Module-level dict: survives across requests in the same warm container
 _store: dict[str, tuple[float, Any]] = {}

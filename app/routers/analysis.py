@@ -11,6 +11,20 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from app.core.cache import get, set, make_key
+from app.core.constants import (
+    BATCH_BARS,
+    BATCH_DEADLINE_SECONDS,
+    BATCH_MAX_SYMBOLS,
+    BATCH_WORKERS,
+    BB_SQUEEZE_LOOKBACK_BARS,
+    BB_SQUEEZE_RATIO,
+    DIVERGENCE_LOOKBACK_BATCH,
+    DIVERGENCE_LOOKBACK_FULL,
+    INTERNAL_BARS_MIN,
+    TRADING_DAYS_PER_YEAR,
+    USER_BARS_MAX,
+    USER_BARS_MIN,
+)
 from app.core.db import get_db
 from app.core.indicators import (
     compute_all, support_resistance, fibonacci_levels, ma_crossovers,
@@ -23,19 +37,12 @@ from app.core.composite import (
 
 router = APIRouter()
 
-_BATCH_MAX_SYMBOLS = 24
-_BATCH_BARS = 220
-_BATCH_WORKERS = 6
-# One slow upstream fetch must not hang the whole chunk — return partial
-# results once this budget is spent. Keep comfortably under Vercel's 30s.
-_BATCH_DEADLINE_S = 20.0
-
 
 def _compute_batch_one(symbol: str, interval: str, weights: dict) -> tuple:
     try:
         from egxpy.download import get_OHLCV_data
 
-        df = get_OHLCV_data(symbol, "EGX", interval, _BATCH_BARS)
+        df = get_OHLCV_data(symbol, "EGX", interval, BATCH_BARS)
         if df is None or df.empty:
             return symbol, {"error": "no data"}
 
@@ -58,8 +65,8 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict) -> tuple:
             rsi_series = rsi(close)
             macd_line_series, _, _ = macd(close)
             divergences = {
-                "rsi": detect_divergences(close, rsi_series, lookback=30),
-                "macd": detect_divergences(close, macd_line_series, lookback=30),
+                "rsi": detect_divergences(close, rsi_series, lookback=DIVERGENCE_LOOKBACK_BATCH),
+                "macd": detect_divergences(close, macd_line_series, lookback=DIVERGENCE_LOOKBACK_BATCH),
             }
         except Exception:
             divergences = {"rsi": {}, "macd": {}}
@@ -74,16 +81,16 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict) -> tuple:
             bb_u = indicators.get("bollinger_upper") or []
             bb_l = indicators.get("bollinger_lower") or []
             bb_m = indicators.get("bollinger_middle") or []
-            if bb_u and bb_l and bb_m and len(bb_u) >= 130:
+            if bb_u and bb_l and bb_m and len(bb_u) >= BB_SQUEEZE_LOOKBACK_BARS:
                 widths = [
                     (u - l) / m if m else None
                     for u, l, m in zip(bb_u, bb_l, bb_m)
                 ]
-                widths_valid = [w for w in widths[-130:] if w is not None and w == w]
+                widths_valid = [w for w in widths[-BB_SQUEEZE_LOOKBACK_BARS:] if w is not None and w == w]
                 if widths_valid:
                     current_w = widths_valid[-1]
                     avg_w = sum(widths_valid) / len(widths_valid)
-                    bb_squeeze = current_w < avg_w * 0.7
+                    bb_squeeze = current_w < avg_w * BB_SQUEEZE_RATIO
         except Exception:
             bb_squeeze = False
 
@@ -132,8 +139,8 @@ def _handle_batch(symbols_str: str, interval: str):
     symbols = [s.strip().upper() for s in symbols_str.split(",") if s.strip()]
     if not symbols:
         raise HTTPException(status_code=400, detail="Missing required parameter: symbols")
-    if len(symbols) > _BATCH_MAX_SYMBOLS:
-        raise HTTPException(status_code=400, detail=f"Maximum {_BATCH_MAX_SYMBOLS} symbols per batch")
+    if len(symbols) > BATCH_MAX_SYMBOLS:
+        raise HTTPException(status_code=400, detail=f"Maximum {BATCH_MAX_SYMBOLS} symbols per batch")
 
     symbols = list(dict.fromkeys(symbols))
 
@@ -159,7 +166,7 @@ def _handle_batch(symbols_str: str, interval: str):
             todo.append(sym)
 
     if todo:
-        pool = ThreadPoolExecutor(max_workers=_BATCH_WORKERS)
+        pool = ThreadPoolExecutor(max_workers=BATCH_WORKERS)
         try:
             def _cache_on_done(sym: str):
                 ck = make_key("composite", sym, interval, w_hash)
@@ -181,7 +188,7 @@ def _handle_batch(symbols_str: str, interval: str):
                 f.add_done_callback(_cache_on_done(s))
                 futures[f] = s
 
-            deadline = time.monotonic() + _BATCH_DEADLINE_S
+            deadline = time.monotonic() + BATCH_DEADLINE_SECONDS
             for fut, sym in futures.items():
                 remaining = deadline - time.monotonic()
                 try:
@@ -223,7 +230,7 @@ def get_analysis(
         symbol = symbol.upper()
         exchange = exchange.upper()
         interval = interval.capitalize()
-        bars = min(max(bars, 30), 5000)
+        bars = min(max(bars, USER_BARS_MIN), USER_BARS_MAX)
 
         db = get_db()
         weights = get_weights_from_db(db)
@@ -237,7 +244,7 @@ def get_analysis(
         from egxpy.download import get_OHLCV_data
         import pandas as pd
 
-        internal_bars = max(bars, 400)
+        internal_bars = max(bars, INTERNAL_BARS_MIN)
         df = get_OHLCV_data(symbol, exchange, interval, internal_bars)
 
         if df is None or df.empty:
@@ -270,8 +277,8 @@ def get_analysis(
             "previous_close": float(close.iloc[-2]) if len(close) > 1 else None,
             "change": float(close.iloc[-1] - close.iloc[-2]) if len(close) > 1 else 0,
             "change_pct": float((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100) if len(close) > 1 else 0,
-            "high_52w": float(close.tail(min(252, len(close))).max()),
-            "low_52w": float(close.tail(min(252, len(close))).min()),
+            "high_52w": float(close.tail(min(TRADING_DAYS_PER_YEAR, len(close))).max()),
+            "low_52w": float(close.tail(min(TRADING_DAYS_PER_YEAR, len(close))).min()),
             "avg_volume": int(df_trimmed["volume"].tail(20).mean()),
         }
 
@@ -306,8 +313,8 @@ def get_analysis(
         rsi_series = rsi(close_full)
         macd_line_series, _, _ = macd(close_full)
         divergences = {
-            "rsi": detect_divergences(close_full, rsi_series, lookback=60),
-            "macd": detect_divergences(close_full, macd_line_series, lookback=60),
+            "rsi": detect_divergences(close_full, rsi_series, lookback=DIVERGENCE_LOOKBACK_FULL),
+            "macd": detect_divergences(close_full, macd_line_series, lookback=DIVERGENCE_LOOKBACK_FULL),
         }
 
         volume_price = volume_price_confirmation(close_full, df["volume"])
@@ -333,16 +340,16 @@ def get_analysis(
             bb_upper_full = indicators_full.get("bollinger_upper") or []
             bb_lower_full = indicators_full.get("bollinger_lower") or []
             bb_middle_full = indicators_full.get("bollinger_middle") or []
-            if (bb_upper_full and bb_lower_full and bb_middle_full and len(bb_upper_full) >= 130):
+            if (bb_upper_full and bb_lower_full and bb_middle_full and len(bb_upper_full) >= BB_SQUEEZE_LOOKBACK_BARS):
                 widths = [
                     (u - l) / m if m else None
                     for u, l, m in zip(bb_upper_full, bb_lower_full, bb_middle_full)
                 ]
-                widths_valid = [w for w in widths[-130:] if w is not None and w == w]
+                widths_valid = [w for w in widths[-BB_SQUEEZE_LOOKBACK_BARS:] if w is not None and w == w]
                 if widths_valid:
                     current_w = widths_valid[-1]
                     avg_w = sum(widths_valid) / len(widths_valid)
-                    bb_squeeze = current_w < avg_w * 0.7
+                    bb_squeeze = current_w < avg_w * BB_SQUEEZE_RATIO
         except Exception:
             bb_squeeze = False
 

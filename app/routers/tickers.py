@@ -12,13 +12,14 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from app.core.cache import get as cache_get, set as cache_set
+from app.core.constants import TICKERS_CACHE_TTL_SECONDS
 from app.core.db import get_db
 
 router = APIRouter()
 
 _tickers_cache = None
 _tickers_cache_ts = 0
-_TICKERS_TTL = 12 * 3600
+_TICKERS_TTL = TICKERS_CACHE_TTL_SECONDS
 
 _TV_SCAN_URL = "https://scanner.tradingview.com/egypt/scan"
 _TV_SEARCH = (
