@@ -83,16 +83,28 @@ def _fetch_live_tickers():
 
 
 def _merge_lists(live, static_list):
-    by_sym = {t["symbol"].upper(): t for t in static_list}
+    live_by_sym = {t["symbol"].upper(): t for t in live}
     merged = []
+    seen = set()
+    for s in static_list:
+        sym = s["symbol"].upper()
+        live_t = live_by_sym.get(sym)
+        merged.append({
+            "symbol": sym,
+            "name": (live_t or {}).get("name") or s["name"],
+            "sector": s.get("sector") or (live_t or {}).get("sector") or "Unknown",
+            "index": s.get("index") or "EGX",
+        })
+        seen.add(sym)
     for t in live:
         sym = t["symbol"].upper()
-        static = by_sym.get(sym)
+        if sym in seen:
+            continue
         merged.append({
             "symbol": sym,
             "name": t["name"],
-            "sector": (static or {}).get("sector") or t["sector"],
-            "index": (static or {}).get("index") or "EGX",
+            "sector": t.get("sector") or "Unknown",
+            "index": "EGX",
         })
     return merged
 
