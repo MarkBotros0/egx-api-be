@@ -84,12 +84,18 @@ def init_db(conn):
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('risk_free_rate', ?)",
         (str(DEFAULT_RISK_FREE_RATE_PCT),),
     )
-    # Composite score category weights (must sum to 100 after normalization)
-    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weight_trend', '25')")
-    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weight_momentum', '25')")
-    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weight_volume', '20')")
-    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weight_volatility', '15')")
-    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weight_divergence', '15')")
+    # Composite score category weights (must sum to 100 after normalization).
+    # Seeded with the "Beginner Safe" defaults — existing DBs with older seeds
+    # keep their stored values (INSERT OR IGNORE is a no-op) while fresh DBs
+    # and any newly-added category defaults to the Beginner Safe weight.
+    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weight_trend', '18')")
+    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weight_momentum', '15')")
+    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weight_volume', '12')")
+    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weight_volatility', '10')")
+    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weight_divergence', '8')")
+    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weight_quality', '12')")
+    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weight_risk_adjusted', '13')")
+    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weight_relative_strength', '12')")
     conn.commit()
 
 

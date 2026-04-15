@@ -43,6 +43,9 @@ from app.core.indicators import (
     macd as calc_macd, bollinger_bands as calc_bollinger,
     adx as calc_adx, mfi as calc_mfi,
     detect_divergences, volume_price_confirmation,
+    relative_strength as calc_relative_strength,
+    annualized_return as calc_annualized_return,
+    liquidity_score as calc_liquidity,
 )
 
 router = APIRouter()
@@ -81,6 +84,8 @@ def _analyze(holdings, cash):
     all_returns = {}
 
     egx30_returns = None
+    egx30_close = None
+    egx30_df = None
     try:
         egx30_cache_key = make_key("egx30", "EGX", "Daily", 300)
         egx30_df = cache_get(egx30_cache_key)
@@ -92,6 +97,7 @@ def _analyze(holdings, cash):
                 egx30_df = egx30_raw
         if egx30_df is not None:
             egx30_returns = calc_daily_returns(egx30_df["close"])
+            egx30_close = egx30_df["close"]
     except Exception:
         pass
 
@@ -101,11 +107,20 @@ def _analyze(holdings, cash):
         risk_free_annual = float(rfr_row[0]) / 100 if rfr_row else DEFAULT_RISK_FREE_RATE_PCT / 100
     except Exception:
         risk_free_annual = DEFAULT_RISK_FREE_RATE_PCT / 100
+    risk_free_rate_pct = risk_free_annual * 100
 
     try:
         weights = get_weights_from_db(get_db())
     except Exception:
         weights = dict(DEFAULT_WEIGHTS)
+
+    # Macro fetched once up-front — feeds both per-holding composite modulation
+    # and the portfolio-level macro_egx30 signal below.
+    macro_data = None
+    try:
+        macro_data = fetch_macro(get_db())
+    except Exception:
+        macro_data = None
 
     composite_scores_collected = []
 
@@ -254,6 +269,43 @@ def _analyze(holdings, cash):
                 "obv": _tolist(obv_series),
             }
 
+            # New per-holding extras for the 8-category composite
+            try:
+                last20 = close.iloc[-20:]
+                sma20_h = calc_sma(close, 20)
+                last20_sma = sma20_h.iloc[-20:]
+                paired = [(c, s) for c, s in zip(last20, last20_sma) if s == s]
+                trend_consistency_h = (sum(1 for c, s in paired if c > s) / len(paired)) if paired else None
+            except Exception:
+                trend_consistency_h = None
+
+            try:
+                window = close.tail(min(TRADING_DAYS_PER_YEAR, len(close)))
+                peak = float(window.max())
+                current_drawdown_h = (current_price - peak) / peak if peak > 0 else None
+            except Exception:
+                current_drawdown_h = None
+
+            ann_return_pct_h = calc_annualized_return(close, lookback=TRADING_DAYS_PER_YEAR)
+            try:
+                daily_vol = stock_rets.std()
+                volatility_ann_pct_h = float(daily_vol) * (TRADING_DAYS_PER_YEAR ** 0.5) * 100.0 if daily_vol == daily_vol else None
+            except Exception:
+                volatility_ann_pct_h = None
+
+            rs_h = None
+            try:
+                if egx30_close is not None:
+                    rs_h = calc_relative_strength(close, egx30_close, lookback=30)
+            except Exception:
+                rs_h = None
+
+            liquidity_h = None
+            try:
+                liquidity_h = calc_liquidity(df["volume"], index_membership=None, lookback=20)
+            except Exception:
+                liquidity_h = None
+
             try:
                 composite_h = compute_composite(
                     holding_indicators,
@@ -266,8 +318,19 @@ def _analyze(holdings, cash):
                         "price_rising_20d": price_rising,
                         "golden_cross_active": crossovers.get("current_signal") == "golden_cross"
                                                and (crossovers.get("days_since_cross") or 99) < 10,
+                        # multi_timeframe is omitted — weekly fetch per-holding is too costly for portfolio timeout.
+                        "multi_timeframe": None,
+                        "trend_consistency": trend_consistency_h,
+                        "current_drawdown_pct": current_drawdown_h,
+                        "annualized_return_pct": ann_return_pct_h,
+                        "volatility_annualized_pct": volatility_ann_pct_h,
+                        "atr_pct_of_price": atr_pct,
+                        "history_days": len(close),
+                        "risk_free_rate_pct": risk_free_rate_pct,
+                        "relative_strength": rs_h,
                     },
                     weights=weights,
+                    macro=macro_data,
                 )
             except Exception:
                 composite_h = None
@@ -501,6 +564,57 @@ def _analyze(holdings, cash):
                     "explanation": "Taking partial profits lets you secure gains while keeping upside exposure.",
                     "learn_concept": "stop_loss"})
 
+            # --- New signals from the 8-category engine ---
+
+            # Cash underperformer: annualized return < risk-free AND held >90 days
+            if days_held > 90 and ann_return < risk_free_rate_pct:
+                signals.append({"type": "cash_underperformer", "severity": "warning", "symbol": symbol,
+                    "message": f"{symbol} has returned {ann_return:.0f}% annualized — less than the {risk_free_rate_pct:.0f}% T-bill rate.",
+                    "explanation": "Holding this stock is earning you less than risk-free cash. Either your thesis needs to play out soon, or capital is better placed in T-bills.",
+                    "learn_concept": "risk_adjusted_return"})
+
+            # Relative strength — leader or laggard vs EGX30 over 30 days
+            if rs_h is not None and rs_h.get("alpha_pct") is not None:
+                alpha = rs_h["alpha_pct"]
+                if rs_h.get("leader"):
+                    signals.append({"type": "relative_strength_leader", "severity": "opportunity", "symbol": symbol,
+                        "message": f"{symbol} is outperforming EGX30 by {alpha:+.1f}% over 30 days — a market leader.",
+                        "explanation": "Stocks that lead the index tend to keep leading in the short-term. Institutional money is favouring this name.",
+                        "learn_concept": "relative_strength"})
+                elif rs_h.get("laggard"):
+                    signals.append({"type": "relative_strength_laggard", "severity": "warning", "symbol": symbol,
+                        "message": f"{symbol} is lagging EGX30 by {abs(alpha):.1f}% over 30 days.",
+                        "explanation": "Persistent laggards drag down a portfolio. Consider switching to a leader unless your thesis is long-term and patient.",
+                        "learn_concept": "relative_strength"})
+
+            # MFI extremes
+            if current_mfi is not None:
+                if current_mfi < 20:
+                    signals.append({"type": "mfi_extreme", "severity": "opportunity", "symbol": symbol,
+                        "message": f"{symbol} MFI is {current_mfi:.0f} — money has fled (possible bounce).",
+                        "explanation": "MFI is RSI weighted by volume. Below 20 means selling exhaustion; historically a reversal zone (not guaranteed).",
+                        "learn_concept": "mfi"})
+                elif current_mfi > 80:
+                    signals.append({"type": "mfi_extreme", "severity": "warning", "symbol": symbol,
+                        "message": f"{symbol} MFI is {current_mfi:.0f} — heavy buying may be exhausted.",
+                        "explanation": "MFI above 80 often marks short-term tops as the volume-backed rally runs out of buyers.",
+                        "learn_concept": "mfi"})
+
+            # ADX strong-trend info (direction from DI±)
+            if current_adx is not None and current_adx > 30 and current_plus_di is not None and current_minus_di is not None:
+                direction = "up" if current_plus_di > current_minus_di else "down"
+                signals.append({"type": "adx_strong_trend", "severity": "info", "symbol": symbol,
+                    "message": f"{symbol} is in a strong {direction}trend (ADX {current_adx:.0f}).",
+                    "explanation": "ADX above 30 means the current trend is strong and reliable — trend-following signals carry more weight right now.",
+                    "learn_concept": "adx"})
+
+            # Liquidity warning — thin volume
+            if liquidity_h and liquidity_h.get("thin"):
+                signals.append({"type": "low_liquidity_warning", "severity": "warning", "symbol": symbol,
+                    "message": f"{symbol} trades on thin volume (avg {liquidity_h['avg_volume']:,} shares/day).",
+                    "explanation": "Thin liquidity means wider bid/ask spreads and difficulty exiting the position quickly. A beginner should keep position sizes small here.",
+                    "learn_concept": "liquidity"})
+
         except Exception as e:
             stock_analyses.append({"symbol": symbol, "error": f"Analysis failed: {str(e)}"})
 
@@ -670,13 +784,7 @@ def _analyze(holdings, cash):
                     "explanation": "Your portfolio value is below its recent high.",
                     "learn_concept": "max_drawdown"})
 
-    macro_data = None
-    try:
-        db = get_db()
-        macro_data = fetch_macro(db)
-    except Exception:
-        pass
-
+    # macro_data was fetched at the top of _analyze (see earlier block)
     if macro_data:
         egx30 = macro_data.get("egx30", {})
         if egx30.get("value"):

@@ -5,13 +5,23 @@ Composite Score Engine
 Combines the individual technical indicators into a single 0-100 score that
 answers: "Should I buy, hold, or sell this stock right now?"
 
-The composite is a weighted average of 5 category sub-scores, each 0-100:
+The composite is a weighted average of 8 category sub-scores, each 0-100.
+Defaults below are the "Beginner Safe" preset — tilted toward stability, market
+leadership, and beating the Egyptian T-bill rate:
 
-  1. Trend       (default 25%) — SMA crossovers, ADX strength, DI+/DI-
-  2. Momentum    (default 25%) — RSI, MACD, Stochastic
-  3. Volume      (default 20%) — OBV trend, MFI, volume-price confirmation
-  4. Volatility  (default 15%) — Bollinger Band position, Bollinger squeeze
-  5. Divergence  (default 15%) — RSI divergence, MACD divergence
+  1. Trend             (default 18%) — SMA crossovers, ADX strength, DI+/DI-
+  2. Momentum          (default 15%) — RSI, MACD, Stochastic
+  3. Volume            (default 12%) — OBV trend, MFI, volume-price confirmation
+  4. Volatility        (default 10%) — Bollinger Band position, Bollinger squeeze
+  5. Divergence        (default  8%) — RSI divergence, MACD divergence
+  6. Quality           (default 12%) — trend consistency, multi-timeframe alignment
+  7. Risk-Adjusted     (default 13%) — annualized return vs T-bill, ATR stop context
+  8. Relative Strength (default 12%) — alpha vs EGX30 (30-day window)
+
+After the weighted sum, an optional MACRO MODULATION is applied: when the EGX30
+itself is in a bearish regime, bullish-leaning scores are dampened and bearish
+ones are reinforced (and vice versa). This prevents confidently-buying into a
+falling market. The modulation delta is returned as `macro_adjustment`.
 
 Signal thresholds:
    0-20  Strong Sell
@@ -43,20 +53,42 @@ from app.core.constants import (
 )
 
 
+# "Beginner Safe" default — tilts toward stable, leading, cash-beating stocks.
 DEFAULT_WEIGHTS = {
-    "trend": 25,
-    "momentum": 25,
-    "volume": 20,
-    "volatility": 15,
-    "divergence": 15,
+    "trend": 18,
+    "momentum": 15,
+    "volume": 12,
+    "volatility": 10,
+    "divergence": 8,
+    "quality": 12,
+    "risk_adjusted": 13,
+    "relative_strength": 12,
 }
 
-CATEGORY_ORDER = ["trend", "momentum", "volume", "volatility", "divergence"]
+CATEGORY_ORDER = [
+    "trend", "momentum", "volume", "volatility", "divergence",
+    "quality", "risk_adjusted", "relative_strength",
+]
 
 PRESETS = {
-    "balanced": {"trend": 25, "momentum": 25, "volume": 20, "volatility": 15, "divergence": 15},
-    "trend_follower": {"trend": 40, "momentum": 25, "volume": 15, "volatility": 15, "divergence": 5},
-    "reversal_hunter": {"trend": 15, "momentum": 25, "volume": 15, "volatility": 15, "divergence": 30},
+    # Beginner Safe == DEFAULT_WEIGHTS; kept here as an explicit preset too.
+    "beginner_safe":    {"trend": 18, "momentum": 15, "volume": 12, "volatility": 10,
+                         "divergence": 8, "quality": 12, "risk_adjusted": 13,
+                         "relative_strength": 12},
+    "balanced":         {"trend": 14, "momentum": 13, "volume": 12, "volatility": 12,
+                         "divergence": 12, "quality": 12, "risk_adjusted": 12,
+                         "relative_strength": 13},
+    "trend_follower":   {"trend": 30, "momentum": 15, "volume": 10, "volatility": 8,
+                         "divergence": 2, "quality": 15, "risk_adjusted": 5,
+                         "relative_strength": 15},
+    "reversal_hunter":  {"trend": 10, "momentum": 20, "volume": 15, "volatility": 15,
+                         "divergence": 25, "quality": 5, "risk_adjusted": 5,
+                         "relative_strength": 5},
+    # New preset: for cash-equivalent-conscious investors who care most about
+    # beating the 25% T-bill and preserving capital.
+    "income_defensive": {"trend": 15, "momentum": 8, "volume": 10, "volatility": 15,
+                         "divergence": 2, "quality": 20, "risk_adjusted": 25,
+                         "relative_strength": 5},
 }
 
 
@@ -397,17 +429,236 @@ def score_divergence(divergences: Optional[dict]) -> tuple:
     return _clamp(score), reasons
 
 
+def score_quality(multi_timeframe: Optional[dict],
+                  trend_consistency: Optional[float],
+                  current_drawdown_pct: Optional[float]) -> tuple:
+    """
+    Score the quality category (0-100).
+
+    Rewards stocks that trend smoothly (not whipsaws) and recover well from
+    drawdowns. A beginner benefits from holding "clean" trends — choppy stocks
+    are where over-trading losses come from.
+
+    Inputs:
+      - multi_timeframe: output of indicators.multi_timeframe_alignment(daily, weekly).
+                         Keys: daily_trend, weekly_trend, aligned, alignment_score.
+      - trend_consistency: float 0-1; fraction of the last 20 bars where close
+                           was above the 20-day SMA (higher = more consistent).
+      - current_drawdown_pct: float (negative number, e.g. -0.15 for -15%); how
+                              far the stock is below its recent peak.
+    """
+    if multi_timeframe is None and trend_consistency is None and current_drawdown_pct is None:
+        return None, []
+
+    score = 50.0
+    reasons = []
+
+    if multi_timeframe is not None:
+        daily = multi_timeframe.get("daily_trend", "sideways")
+        weekly = multi_timeframe.get("weekly_trend", "sideways")
+        aligned = multi_timeframe.get("aligned", False)
+        if aligned and daily == "up":
+            score += 20
+            reasons.append("Daily and weekly trends both up — high-quality uptrend")
+        elif aligned and daily == "down":
+            score -= 20
+            reasons.append("Daily and weekly trends both down — high-quality downtrend")
+        elif daily == "up" and weekly == "down":
+            score -= 10
+            reasons.append("Daily up but weekly down — rally against the larger trend")
+        elif daily == "down" and weekly == "up":
+            score += 5
+            reasons.append("Daily weak but weekly still up — pullback in an uptrend")
+
+    if trend_consistency is not None:
+        if trend_consistency >= 0.8:
+            score += 10
+            reasons.append(f"Price above SMA20 on {int(trend_consistency * 100)}% of last 20 days — steady uptrend")
+        elif trend_consistency <= 0.2:
+            score -= 10
+            reasons.append(f"Price below SMA20 on {int((1 - trend_consistency) * 100)}% of last 20 days — steady downtrend")
+
+    if current_drawdown_pct is not None:
+        dd_pct = current_drawdown_pct * 100 if abs(current_drawdown_pct) <= 1 else current_drawdown_pct
+        if dd_pct <= -30:
+            score -= 15
+            reasons.append(f"Severe drawdown ({dd_pct:.0f}% from peak) — quality impaired")
+        elif dd_pct <= -15:
+            score -= 8
+            reasons.append(f"Moderate drawdown ({dd_pct:.0f}% from peak)")
+        elif dd_pct >= -3:
+            score += 5
+            reasons.append("Near recent peak — strong quality")
+
+    return _clamp(score), reasons
+
+
+def score_risk_adjusted(annualized_return_pct: Optional[float],
+                        risk_free_rate_pct: float,
+                        volatility_annualized_pct: Optional[float],
+                        atr_pct_of_price: Optional[float],
+                        history_days: Optional[int]) -> tuple:
+    """
+    Score the risk-adjusted category (0-100).
+
+    This is the most important category for an Egyptian retail investor:
+    with T-bills paying ~25% annualized risk-free, any stock returning less
+    is LOSING real money vs cash. Also penalises stocks whose daily range
+    (ATR) is so wide that a reasonable stop-loss would be instantly hit.
+
+    Minimum-history gate: returns None if <120 trading days to avoid
+    misleading annualization. Caller's renormalization handles that.
+    """
+    if history_days is not None and history_days < 120:
+        return None, []
+    if annualized_return_pct is None:
+        return None, []
+
+    score = 50.0
+    reasons = []
+
+    excess = annualized_return_pct - risk_free_rate_pct
+    if excess >= 20:
+        score += 25
+        reasons.append(f"Ann. return {annualized_return_pct:.0f}% vs T-bill {risk_free_rate_pct:.0f}% — crushes cash")
+    elif excess >= 10:
+        score += 15
+        reasons.append(f"Ann. return {annualized_return_pct:.0f}% — comfortably beats T-bill")
+    elif excess >= 0:
+        score += 5
+        reasons.append(f"Ann. return {annualized_return_pct:.0f}% — marginally beats T-bill")
+    elif excess >= -10:
+        score -= 10
+        reasons.append(f"Ann. return {annualized_return_pct:.0f}% — UNDERPERFORMS T-bill {risk_free_rate_pct:.0f}%")
+    else:
+        score -= 20
+        reasons.append(f"Ann. return {annualized_return_pct:.0f}% — severely underperforms cash")
+
+    # Volatility penalty: very high annualized vol makes the return unstable
+    if volatility_annualized_pct is not None:
+        if volatility_annualized_pct > 60:
+            score -= 10
+            reasons.append(f"Annualized volatility {volatility_annualized_pct:.0f}% — very swingy")
+        elif volatility_annualized_pct < 20:
+            score += 5
+            reasons.append(f"Annualized volatility {volatility_annualized_pct:.0f}% — relatively calm")
+
+    # ATR context: if ATR is >5% of price, any stop-loss gets whipsawed
+    if atr_pct_of_price is not None:
+        if atr_pct_of_price > 5:
+            score -= 5
+            reasons.append(f"ATR is {atr_pct_of_price:.1f}% of price — stop-losses easily triggered")
+
+    return _clamp(score), reasons
+
+
+def score_relative_strength(rs: Optional[dict]) -> tuple:
+    """
+    Score the relative-strength category (0-100).
+
+    A stock outperforming EGX30 is a LEADER (institutional money preferring
+    it). A stock lagging is a LAGGARD. For a beginner, avoiding laggards
+    eliminates a huge class of losing trades.
+
+    Input: rs dict from indicators.relative_strength()
+      Keys: stock_return_pct, benchmark_return_pct, alpha_pct, leader, laggard.
+    """
+    if rs is None or rs.get("alpha_pct") is None:
+        return None, []
+
+    alpha = rs["alpha_pct"]
+    score = 50.0
+    reasons = []
+
+    if alpha >= 15:
+        score += 30
+        reasons.append(f"Leading EGX30 by {alpha:.1f}% (30d) — clear market leader")
+    elif alpha >= 5:
+        score += 15
+        reasons.append(f"Leading EGX30 by {alpha:.1f}% (30d)")
+    elif alpha >= -2:
+        reasons.append(f"Tracking EGX30 (alpha {alpha:+.1f}% over 30d)")
+    elif alpha >= -10:
+        score -= 15
+        reasons.append(f"Lagging EGX30 by {abs(alpha):.1f}% (30d)")
+    else:
+        score -= 30
+        reasons.append(f"Lagging EGX30 by {abs(alpha):.1f}% (30d) — significant laggard")
+
+    # Absolute return context
+    stock_ret = rs.get("stock_return_pct")
+    if stock_ret is not None:
+        if stock_ret < -10:
+            score -= 5
+            reasons.append(f"Also down {abs(stock_ret):.1f}% in absolute terms over 30d")
+        elif stock_ret > 10:
+            score += 5
+            reasons.append(f"Up {stock_ret:.1f}% in absolute terms over 30d")
+
+    return _clamp(score), reasons
+
+
+# ---------------------------------------------------------------------------
+# Macro modulation
+# ---------------------------------------------------------------------------
+
+def apply_macro_modulation(raw_score: float, macro: Optional[dict]) -> tuple:
+    """
+    Adjust the composite after weighting based on the broader EGX30 regime.
+
+    Regime is read from macro["egx30"]["trend"] in {bullish, bearish, sideways}.
+
+    Bullish: no change (1.0×).
+    Sideways: dampen bullish-side scores by 5%, reinforce bearish-side by 5%.
+    Bearish: dampen bullish-side scores by 15%, reinforce bearish-side by 15%.
+
+    Scores are pulled toward neutral (50) in bear markets — a stock must be
+    exceptional to still register a "Buy" in a falling market.
+
+    Returns (adjusted_score, delta, description).
+    """
+    if macro is None:
+        return raw_score, 0.0, None
+
+    egx30 = (macro.get("egx30") or {}) if isinstance(macro, dict) else {}
+    trend = (egx30.get("trend") or "").lower()
+
+    if trend == "bullish":
+        return raw_score, 0.0, None
+
+    if trend == "sideways":
+        dampen = 0.95
+        reinforce = 1.05
+        desc = "EGX30 sideways"
+    elif trend == "bearish":
+        dampen = 0.85
+        reinforce = 1.15
+        desc = "EGX30 bearish — scores pulled toward neutral"
+    else:
+        return raw_score, 0.0, None
+
+    if raw_score > 50:
+        adjusted = 50 + (raw_score - 50) * dampen
+    else:
+        adjusted = 50 - (50 - raw_score) * reinforce
+
+    adjusted = _clamp(adjusted)
+    delta = round(adjusted - raw_score, 1)
+    return adjusted, delta, desc
+
+
 # ---------------------------------------------------------------------------
 # Top-level orchestrator
 # ---------------------------------------------------------------------------
 
 def compute_composite(indicators: dict, extras: Optional[dict] = None,
-                      weights: Optional[dict] = None) -> dict:
+                      weights: Optional[dict] = None,
+                      macro: Optional[dict] = None) -> dict:
     """
     Compute the composite score from pre-computed indicator arrays and extras.
 
     Arguments:
-      indicators: dict produced by _indicators.compute_all (indicator_name -> list)
+      indicators: dict produced by indicators.compute_all (indicator_name -> list)
                   Expected keys: sma_20, sma_50, sma_200, rsi, macd_histogram,
                   bollinger_upper/lower/middle, stochastic_k, stochastic_d,
                   adx, plus_di, minus_di, mfi, obv.
@@ -419,15 +670,28 @@ def compute_composite(indicators: dict, extras: Optional[dict] = None,
                   - "golden_cross_active": bool
                   - "price_rising_20d": bool
                   - "obv_rising": bool
+                  # New (8-category) inputs:
+                  - "multi_timeframe": {"daily_trend", "weekly_trend", "aligned", ...}
+                  - "trend_consistency": float 0-1 (fraction of last 20 days above SMA20)
+                  - "current_drawdown_pct": float (negative, e.g. -0.12 for -12%)
+                  - "annualized_return_pct": float
+                  - "volatility_annualized_pct": float
+                  - "atr_pct_of_price": float
+                  - "history_days": int (for risk-adjusted min-history gate)
+                  - "risk_free_rate_pct": float (usually passed through from settings)
+                  - "relative_strength": output of indicators.relative_strength(...)
       weights:    dict {category: weight_percent}, default DEFAULT_WEIGHTS.
+      macro:      optional macro dict (from macro_fetch.get_macro()) — when
+                  provided, applies a post-hoc modulation based on EGX30 trend.
 
     Returns:
       {
-        "score": float 0-100,
+        "score": float 0-100,             (AFTER macro modulation)
         "signal": str,
-        "categories": {name: {"score": float|None, "weight": float,
-                              "weighted_contribution": float, "reasons": [str]}},
-        "weights": {name: float}   (the effective weights used, normalized)
+        "categories": {name: {...}},
+        "weights": {name: float},
+        "macro_adjustment": float | None,   (signed delta from raw to final score)
+        "macro_context": str | None,        (human-readable note, e.g. "EGX30 bearish")
       }
     """
     extras = extras or {}
@@ -476,6 +740,21 @@ def compute_composite(indicators: dict, extras: Optional[dict] = None,
     divergence_score, divergence_reasons = score_divergence(
         extras.get("divergences"),
     )
+    quality_score, quality_reasons = score_quality(
+        extras.get("multi_timeframe"),
+        extras.get("trend_consistency"),
+        extras.get("current_drawdown_pct"),
+    )
+    risk_adjusted_score, risk_adjusted_reasons = score_risk_adjusted(
+        extras.get("annualized_return_pct"),
+        float(extras.get("risk_free_rate_pct") or 25.0),
+        extras.get("volatility_annualized_pct"),
+        extras.get("atr_pct_of_price"),
+        extras.get("history_days"),
+    )
+    relative_strength_score, relative_strength_reasons = score_relative_strength(
+        extras.get("relative_strength"),
+    )
 
     category_raw = {
         "trend": (trend_score, trend_reasons),
@@ -483,6 +762,9 @@ def compute_composite(indicators: dict, extras: Optional[dict] = None,
         "volume": (volume_score, volume_reasons),
         "volatility": (volatility_score, volatility_reasons),
         "divergence": (divergence_score, divergence_reasons),
+        "quality": (quality_score, quality_reasons),
+        "risk_adjusted": (risk_adjusted_score, risk_adjusted_reasons),
+        "relative_strength": (relative_strength_score, relative_strength_reasons),
     }
 
     # Renormalize weights across categories that could be scored
@@ -496,11 +778,14 @@ def compute_composite(indicators: dict, extras: Optional[dict] = None,
                 name: {
                     "score": None,
                     "weight": weights[name],
+                    "effective_weight": 0.0,
                     "weighted_contribution": 0.0,
                     "reasons": reasons,
                 } for name, (s, reasons) in category_raw.items()
             },
             "weights": weights,
+            "macro_adjustment": None,
+            "macro_context": None,
         }
 
     composite = 0.0
@@ -525,11 +810,16 @@ def compute_composite(indicators: dict, extras: Optional[dict] = None,
 
     composite = _clamp(composite)
 
+    # Apply macro modulation (post-hoc multiplier, not a category)
+    final_score, macro_delta, macro_ctx = apply_macro_modulation(composite, macro)
+
     return {
-        "score": round(composite, 1),
-        "signal": classify_signal(composite),
+        "score": round(final_score, 1),
+        "signal": classify_signal(final_score),
         "categories": categories_out,
         "weights": weights,
+        "macro_adjustment": macro_delta if macro_ctx else None,
+        "macro_context": macro_ctx,
     }
 
 
@@ -539,8 +829,10 @@ def compute_composite(indicators: dict, extras: Optional[dict] = None,
 
 def get_weights_from_db(db) -> dict:
     """
-    Read the 5 weight_* rows from the settings table. Missing rows fall back
-    to DEFAULT_WEIGHTS. Non-numeric values fall back to their default.
+    Read weight_* rows from the settings table. Missing rows fall back to
+    DEFAULT_WEIGHTS per-key — so existing DBs with only the original 5 keys
+    will gracefully inherit defaults for new categories. Non-numeric values
+    also fall back to default.
     """
     try:
         rows = db.execute(

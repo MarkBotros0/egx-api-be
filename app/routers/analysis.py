@@ -30,15 +30,18 @@ from app.core.indicators import (
     compute_all, support_resistance, fibonacci_levels, ma_crossovers,
     compute_beta, daily_returns, sma, rsi, macd,
     detect_divergences, volume_price_confirmation, multi_timeframe_alignment,
+    relative_strength, annualized_return, atr,
 )
 from app.core.composite import (
     compute_composite, get_weights_from_db, weights_hash, DEFAULT_WEIGHTS,
 )
+from app.core.macro_fetch import fetch_macro
 
 router = APIRouter()
 
 
-def _compute_batch_one(symbol: str, interval: str, weights: dict) -> tuple:
+def _compute_batch_one(symbol: str, interval: str, weights: dict,
+                       macro: Optional[dict] = None) -> tuple:
     try:
         from egxpy.download import get_OHLCV_data
 
@@ -113,8 +116,13 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict) -> tuple:
                 "price_rising_20d": price_rising_20d,
                 "golden_cross_active": crossovers.get("current_signal") == "golden_cross"
                                         and (crossovers.get("days_since_cross") or 99) < 10,
+                # Batch keeps it lightweight — full 8-category breakdown lives
+                # on the stock detail page; only pass history so the risk-adjusted
+                # scorer's min-history gate triggers correctly.
+                "history_days": len(close),
             },
             weights=weights,
+            macro=macro,
         )
 
         prev_close = float(close.iloc[-2]) if len(close) > 1 else current_price
@@ -145,17 +153,31 @@ def _handle_batch(symbols_str: str, interval: str):
     symbols = list(dict.fromkeys(symbols))
 
     try:
-        weights = get_weights_from_db(get_db())
+        db = get_db()
+        weights = get_weights_from_db(db)
     except Exception:
+        db = None
         weights = dict(DEFAULT_WEIGHTS)
     w_hash = weights_hash(weights)
+
+    # Macro is shared across all batch symbols and TTL-cached per-hour
+    macro = None
+    if db is not None:
+        try:
+            macro = fetch_macro(db)
+        except Exception:
+            macro = None
+    macro_trend = ((macro or {}).get("egx30") or {}).get("trend") or "n/a"
+    # Include macro regime in the cache key so scores invalidate when the
+    # modulation changes (bullish → bearish flip).
+    macro_tag = str(macro_trend)
 
     scores = {}
     errors = []
     todo = []
 
     for sym in symbols:
-        ck = make_key("composite", sym, interval, w_hash)
+        ck = make_key("composite", sym, interval, w_hash, macro_tag)
         cached = get(ck)
         if cached is not None:
             if "error" in cached:
@@ -169,7 +191,7 @@ def _handle_batch(symbols_str: str, interval: str):
         pool = ThreadPoolExecutor(max_workers=BATCH_WORKERS)
         try:
             def _cache_on_done(sym: str):
-                ck = make_key("composite", sym, interval, w_hash)
+                ck = make_key("composite", sym, interval, w_hash, macro_tag)
                 def _cb(f):
                     try:
                         _s, r = f.result()
@@ -181,7 +203,7 @@ def _handle_batch(symbols_str: str, interval: str):
 
             futures: dict = {}
             for s in todo:
-                f = pool.submit(_compute_batch_one, s, interval, weights)
+                f = pool.submit(_compute_batch_one, s, interval, weights, macro)
                 # Stragglers that finish AFTER we've returned still self-cache
                 # via this callback — a frontend retry a few seconds later hits
                 # a warm cache and fills in the '--' cards.
@@ -361,6 +383,75 @@ def get_analysis(
         if len(close_full) >= 21:
             price_rising_20d = float(close_full.iloc[-1]) > float(close_full.iloc[-21])
 
+        # --- New extras for the 8-category composite ---
+
+        # Trend consistency: fraction of last 20 bars with close above SMA20
+        trend_consistency = None
+        try:
+            sma20 = sma(close_full, 20)
+            last20 = close_full.iloc[-20:]
+            last20_sma = sma20.iloc[-20:]
+            paired = [(c, s) for c, s in zip(last20, last20_sma) if s == s]
+            if paired:
+                trend_consistency = sum(1 for c, s in paired if c > s) / len(paired)
+        except Exception:
+            trend_consistency = None
+
+        # Current drawdown: price vs last-252-day peak (fraction, e.g. -0.15)
+        current_drawdown_pct = None
+        try:
+            window = close_full.tail(min(TRADING_DAYS_PER_YEAR, len(close_full)))
+            peak = float(window.max())
+            cur = float(close_full.iloc[-1])
+            if peak > 0:
+                current_drawdown_pct = (cur - peak) / peak
+        except Exception:
+            current_drawdown_pct = None
+
+        # Annualized return + annualized volatility
+        ann_return_pct = annualized_return(close_full, lookback=TRADING_DAYS_PER_YEAR)
+        volatility_annualized_pct = None
+        try:
+            daily_vol = daily_returns(close_full).std()
+            if daily_vol == daily_vol:  # not NaN
+                volatility_annualized_pct = float(daily_vol) * (TRADING_DAYS_PER_YEAR ** 0.5) * 100.0
+        except Exception:
+            volatility_annualized_pct = None
+
+        # ATR as % of price
+        atr_pct_of_price = None
+        try:
+            atr_series = atr(df["high"], df["low"], df["close"])
+            last_atr = float(atr_series.dropna().iloc[-1])
+            cur = float(close_full.iloc[-1])
+            if cur > 0:
+                atr_pct_of_price = last_atr / cur * 100.0
+        except Exception:
+            atr_pct_of_price = None
+
+        # Relative strength vs EGX30 (reusing egx30_df fetched above for beta)
+        rs = None
+        try:
+            if egx30_df is not None and "close" in egx30_df.columns:
+                rs = relative_strength(close_full, egx30_df["close"], lookback=30)
+        except Exception:
+            rs = None
+
+        # Risk-free rate (T-bill) — read from settings
+        risk_free_rate_pct = 25.0
+        try:
+            row = db.execute("SELECT value FROM settings WHERE key = 'risk_free_rate'").fetchone()
+            if row and row[0] is not None:
+                risk_free_rate_pct = float(row[0])
+        except Exception:
+            pass
+
+        # Macro context (cheap — TTL-cached)
+        try:
+            macro = fetch_macro(db)
+        except Exception:
+            macro = None
+
         composite = compute_composite(
             indicators_full,
             extras={
@@ -372,8 +463,19 @@ def get_analysis(
                 "price_rising_20d": price_rising_20d,
                 "golden_cross_active": crossovers.get("current_signal") == "golden_cross"
                                        and (crossovers.get("days_since_cross") or 99) < 10,
+                # New 8-category inputs
+                "multi_timeframe": multi_timeframe,
+                "trend_consistency": trend_consistency,
+                "current_drawdown_pct": current_drawdown_pct,
+                "annualized_return_pct": ann_return_pct,
+                "volatility_annualized_pct": volatility_annualized_pct,
+                "atr_pct_of_price": atr_pct_of_price,
+                "history_days": len(close_full),
+                "risk_free_rate_pct": risk_free_rate_pct,
+                "relative_strength": rs,
             },
             weights=weights,
+            macro=macro,
         )
 
         result = {

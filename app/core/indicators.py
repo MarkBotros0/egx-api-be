@@ -746,6 +746,147 @@ def compute_beta(stock_returns: pd.Series, market_returns: pd.Series) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Relative Strength vs Benchmark
+# ---------------------------------------------------------------------------
+
+def relative_strength(stock_close: pd.Series, benchmark_close: pd.Series,
+                      lookback: int = 30) -> dict:
+    """
+    Relative Strength — compares a stock's return vs a benchmark (e.g. EGX30)
+    over a rolling window.
+
+    alpha = stock_return - benchmark_return over the same window.
+      alpha > 0 → stock is LEADING the market (outperforming)
+      alpha < 0 → stock is LAGGING the market (underperforming)
+
+    Why it matters for a beginner: in any market, ~half the stocks underperform
+    the index. Buying laggards in a bull market is a common beginner trap.
+
+    Returns {
+        "stock_return_pct": float | None,
+        "benchmark_return_pct": float | None,
+        "alpha_pct": float | None,
+        "leader": bool,        (alpha > +5%)
+        "laggard": bool,       (alpha < -10%)
+    }
+    """
+    empty = {"stock_return_pct": None, "benchmark_return_pct": None,
+             "alpha_pct": None, "leader": False, "laggard": False}
+
+    if stock_close is None or benchmark_close is None:
+        return empty
+
+    aligned = pd.DataFrame({"s": stock_close, "b": benchmark_close}).dropna()
+    if len(aligned) < lookback + 1:
+        return empty
+
+    s = aligned["s"].iloc[-(lookback + 1):]
+    b = aligned["b"].iloc[-(lookback + 1):]
+
+    s_start, s_end = float(s.iloc[0]), float(s.iloc[-1])
+    b_start, b_end = float(b.iloc[0]), float(b.iloc[-1])
+    if s_start == 0 or b_start == 0:
+        return empty
+
+    stock_ret = (s_end / s_start - 1.0) * 100.0
+    bench_ret = (b_end / b_start - 1.0) * 100.0
+    alpha = stock_ret - bench_ret
+
+    return {
+        "stock_return_pct": round(stock_ret, 2),
+        "benchmark_return_pct": round(bench_ret, 2),
+        "alpha_pct": round(alpha, 2),
+        "leader": alpha > 5.0,
+        "laggard": alpha < -10.0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Annualized Return
+# ---------------------------------------------------------------------------
+
+def annualized_return(close: pd.Series, lookback: int = 252) -> float | None:
+    """
+    Annualized return over the last `lookback` trading days (default 252 ≈ 1y).
+
+    Formula: (end/start)^(252/days) - 1
+
+    Used to compare per-stock return vs the risk-free rate (T-bill ~25% in Egypt).
+    Returns None if insufficient history — caller must handle that.
+    """
+    if close is None or len(close.dropna()) < 30:
+        return None
+    series = close.dropna()
+    n = min(lookback, len(series))
+    window = series.iloc[-n:]
+    start, end = float(window.iloc[0]), float(window.iloc[-1])
+    if start <= 0:
+        return None
+    total = end / start
+    if total <= 0:
+        return None
+    # Annualize based on actual window length
+    ann = total ** (252.0 / n) - 1.0
+    return round(ann * 100.0, 2)
+
+
+# ---------------------------------------------------------------------------
+# Liquidity Score (index-aware)
+# ---------------------------------------------------------------------------
+
+# Typical EGX daily volume floors per index tier (shares/day).
+# Rough calibration — thin-liquidity stocks within their index are flagged.
+_INDEX_LIQ_FLOORS = {
+    "EGX30":   {"thin": 100_000,   "low": 500_000},
+    "EGX70":   {"thin": 50_000,    "low": 200_000},
+    "EGX100":  {"thin": 30_000,    "low": 100_000},
+    "NILEX":   {"thin": 5_000,     "low": 20_000},
+}
+
+def liquidity_score(volume: pd.Series, index_membership: str | None = None,
+                    lookback: int = 20) -> dict:
+    """
+    Classify liquidity for a stock using volume averaged over `lookback` days,
+    compared against index-appropriate thresholds.
+
+    Why index-aware: EGX30 constituents trade ~100x more volume than NILEX names.
+    A global threshold would flag almost every NILEX stock as illiquid.
+
+    Returns {
+        "avg_volume": int | None,
+        "classification": "thin" | "low" | "normal" | None,
+        "thin": bool,     (worth a warning for a beginner)
+    }
+    """
+    empty = {"avg_volume": None, "classification": None, "thin": False}
+    if volume is None or len(volume.dropna()) < lookback:
+        return empty
+
+    avg = float(volume.rolling(window=lookback).mean().iloc[-1])
+    if np.isnan(avg):
+        return empty
+
+    floors = _INDEX_LIQ_FLOORS.get((index_membership or "").upper(),
+                                   _INDEX_LIQ_FLOORS["EGX100"])
+
+    if avg < floors["thin"]:
+        classification = "thin"
+        thin = True
+    elif avg < floors["low"]:
+        classification = "low"
+        thin = False
+    else:
+        classification = "normal"
+        thin = False
+
+    return {
+        "avg_volume": int(avg),
+        "classification": classification,
+        "thin": thin,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Helper: compute all indicators at once
 # ---------------------------------------------------------------------------
 
