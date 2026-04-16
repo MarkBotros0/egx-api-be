@@ -85,7 +85,8 @@ def put_settings(body: dict, section: Optional[str] = Query(None)):
 
             for key, value in normalized.items():
                 db.execute(
-                    "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                    "INSERT INTO settings (key, value) VALUES (%s, %s) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                     (f"weight_{key}", str(value)),
                 )
             db.commit()
@@ -98,7 +99,11 @@ def put_settings(body: dict, section: Optional[str] = Query(None)):
             raise HTTPException(status_code=400, detail="Missing required fields: key and value")
 
         db = get_db()
-        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+        db.execute(
+            "INSERT INTO settings (key, value) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            (key, str(value)),
+        )
         db.commit()
         return {"key": key, "value": str(value)}
 

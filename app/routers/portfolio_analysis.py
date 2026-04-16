@@ -1,7 +1,7 @@
 """
 /api/portfolio_analysis — Analyze a portfolio of stock holdings.
 
-GET  — Read the current user's holdings from Turso and analyze them
+GET  — Read the current user's holdings from Postgres and analyze them
 POST — Accept holdings in request body (body: {portfolio: [...]})
 """
 
@@ -844,7 +844,7 @@ def get_portfolio_analysis(user: CurrentUser = Depends(get_current_user)):
         rows = db.execute(
             "SELECT id, symbol, name, buy_price, buy_date, quantity, notes, sector, "
             "target_price, stop_loss, created_at, updated_at FROM portfolio "
-            "WHERE user_id = ?",
+            "WHERE user_id = %s",
             (user.id,),
         ).fetchall()
         holdings = [

@@ -1,5 +1,5 @@
 """
-Portfolio CRUD — Manage stock holdings via Turso.
+Portfolio CRUD — Manage stock holdings via Postgres.
 
 GET    /api/portfolio          — List the current user's holdings
 POST   /api/portfolio          — Add a new holding for the current user
@@ -44,7 +44,7 @@ def get_portfolio(user: CurrentUser = Depends(get_current_user)):
         rows = db.execute(
             "SELECT id, symbol, name, buy_price, buy_date, quantity, notes, sector, "
             "target_price, stop_loss, created_at, updated_at FROM portfolio "
-            "WHERE user_id = ?",
+            "WHERE user_id = %s",
             (user.id,),
         ).fetchall()
         holdings = [_row_to_dict(r) for r in rows]
@@ -88,7 +88,7 @@ def add_holding(body: dict, user: CurrentUser = Depends(get_current_user)):
         db.execute(
             """INSERT INTO portfolio (id, user_id, symbol, name, buy_price, buy_date, quantity,
                notes, sector, target_price, stop_loss, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (holding_id, user.id, symbol, name, float(buy_price), buy_date, int(quantity),
              notes, sector, target_price, stop_loss, now, now),
         )
@@ -128,7 +128,7 @@ def update_holding(
         row = db.execute(
             "SELECT id, symbol, name, buy_price, buy_date, quantity, notes, sector, "
             "target_price, stop_loss, created_at, updated_at FROM portfolio "
-            "WHERE id = ? AND user_id = ?",
+            "WHERE id = %s AND user_id = %s",
             (id, user.id),
         ).fetchone()
 
@@ -149,16 +149,16 @@ def update_holding(
                     val = float(val)
                 if key == "quantity" and val is not None:
                     val = int(val)
-                set_clauses.append(f"{key} = ?")
+                set_clauses.append(f"{key} = %s")
                 values.append(val)
 
         now = datetime.utcnow().isoformat() + "Z"
-        set_clauses.append("updated_at = ?")
+        set_clauses.append("updated_at = %s")
         values.append(now)
         values.extend([id, user.id])
 
         db.execute(
-            f"UPDATE portfolio SET {', '.join(set_clauses)} WHERE id = ? AND user_id = ?",
+            f"UPDATE portfolio SET {', '.join(set_clauses)} WHERE id = %s AND user_id = %s",
             values,
         )
         db.commit()
@@ -166,7 +166,7 @@ def update_holding(
         updated = db.execute(
             "SELECT id, symbol, name, buy_price, buy_date, quantity, notes, sector, "
             "target_price, stop_loss, created_at, updated_at FROM portfolio "
-            "WHERE id = ? AND user_id = ?",
+            "WHERE id = %s AND user_id = %s",
             (id, user.id),
         ).fetchone()
 
@@ -186,14 +186,14 @@ def delete_holding(
     try:
         db = get_db()
         row = db.execute(
-            "SELECT id FROM portfolio WHERE id = ? AND user_id = ?",
+            "SELECT id FROM portfolio WHERE id = %s AND user_id = %s",
             (id, user.id),
         ).fetchone()
 
         if not row:
             raise HTTPException(status_code=404, detail=f"Holding not found: {id}")
 
-        db.execute("DELETE FROM portfolio WHERE id = ? AND user_id = ?", (id, user.id))
+        db.execute("DELETE FROM portfolio WHERE id = %s AND user_id = %s", (id, user.id))
         db.commit()
         return {"deleted": id}
 

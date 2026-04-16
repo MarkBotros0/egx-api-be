@@ -6,6 +6,8 @@ Data sources:
   - USD/EGP: via egxpy or public source (best-effort)
   - CBE interest rate: stored in settings table (manually updateable)
 
+Cached rows live in the Postgres `macro_data` table with a TTL checked on read.
+
 All scraping is wrapped in try/except — returns partial/null data, never crashes.
 """
 
@@ -22,7 +24,7 @@ from app.core.constants import (
 
 def fetch_macro(db):
     """
-    Fetch macro data, using Turso cache if fresh enough.
+    Fetch macro data, using the Postgres cache if fresh enough.
     Returns a dict with interest_rate, usd_egp, and egx30 data,
     or None if nothing is available.
     """
@@ -137,7 +139,7 @@ def _fetch_interest_rate(db):
 
 
 def _store_macro(db, data):
-    """Store macro data in Turso cache."""
+    """Store macro data in the Postgres cache."""
     try:
         now = datetime.utcnow().isoformat()
         for key, info in data.items():
@@ -147,7 +149,13 @@ def _store_macro(db, data):
             prev_val = info.get("monthly_change_pct") if key == "egx30" else info.get("previous_value")
             if val is not None:
                 db.execute(
-                    "INSERT OR REPLACE INTO macro_data (key, value, previous_value, change_pct, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO macro_data (key, value, previous_value, change_pct, updated_at) "
+                    "VALUES (%s, %s, %s, %s, %s) "
+                    "ON CONFLICT (key) DO UPDATE SET "
+                    "value = EXCLUDED.value, "
+                    "previous_value = EXCLUDED.previous_value, "
+                    "change_pct = EXCLUDED.change_pct, "
+                    "updated_at = EXCLUDED.updated_at",
                     (key, val, prev_val, change, now)
                 )
         db.commit()

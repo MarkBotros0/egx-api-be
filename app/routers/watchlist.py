@@ -1,5 +1,5 @@
 """
-Watchlist CRUD — Persist user's watched tickers in Turso.
+Watchlist CRUD — Persist user's watched tickers in Postgres.
 
 GET    /api/watchlist              — List the current user's watched symbols
 POST   /api/watchlist              — Add a symbol (body: {"symbol": "..."})
@@ -27,7 +27,7 @@ def get_watchlist(user: CurrentUser = Depends(get_current_user)):
     try:
         db = get_db()
         rows = db.execute(
-            "SELECT symbol FROM watchlist WHERE user_id = ? ORDER BY added_at ASC",
+            "SELECT symbol FROM watchlist WHERE user_id = %s ORDER BY added_at ASC",
             (user.id,),
         ).fetchall()
         return {"symbols": [r[0] for r in rows]}
@@ -48,7 +48,8 @@ def add_to_watchlist(
         now = datetime.utcnow().isoformat() + "Z"
         db = get_db()
         db.execute(
-            "INSERT OR IGNORE INTO watchlist (user_id, symbol, added_at) VALUES (?, ?, ?)",
+            "INSERT INTO watchlist (user_id, symbol, added_at) VALUES (%s, %s, %s) "
+            "ON CONFLICT (user_id, symbol) DO NOTHING",
             (user.id, symbol, now),
         )
         db.commit()
@@ -72,7 +73,7 @@ def remove_from_watchlist(
 
         db = get_db()
         db.execute(
-            "DELETE FROM watchlist WHERE user_id = ? AND symbol = ?",
+            "DELETE FROM watchlist WHERE user_id = %s AND symbol = %s",
             (user.id, symbol),
         )
         db.commit()

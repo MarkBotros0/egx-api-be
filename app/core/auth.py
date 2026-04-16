@@ -118,16 +118,16 @@ def seed_users_from_env(db) -> None:
 
         password_hash = hash_password(password)
         existing = db.execute(
-            "SELECT id FROM users WHERE username = ?", (username,)
+            "SELECT id FROM users WHERE username = %s", (username,)
         ).fetchone()
         if existing:
             db.execute(
-                "UPDATE users SET password_hash = ? WHERE username = ?",
+                "UPDATE users SET password_hash = %s WHERE username = %s",
                 (password_hash, username),
             )
         else:
             db.execute(
-                "INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                "INSERT INTO users (id, username, password_hash, created_at) VALUES (%s, %s, %s, %s)",
                 (str(uuid.uuid4()), username, password_hash, now),
             )
     db.commit()

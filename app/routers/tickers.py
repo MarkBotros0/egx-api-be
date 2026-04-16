@@ -179,9 +179,10 @@ def _validate_symbol(symbol: str):
             from datetime import datetime
             db = get_db()
             db.execute(
-                """INSERT OR IGNORE INTO discovered_tickers
+                """INSERT INTO discovered_tickers
                    (symbol, name, sector, index_name, added_at)
-                   VALUES (?, ?, 'Unknown', 'EGX', ?)""",
+                   VALUES (%s, %s, 'Unknown', 'EGX', %s)
+                   ON CONFLICT (symbol) DO NOTHING""",
                 (symbol, result["name"], datetime.utcnow().isoformat()),
             )
             db.commit()

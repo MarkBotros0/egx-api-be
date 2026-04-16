@@ -32,7 +32,7 @@ def login(body: LoginRequest):
     username = body.username.lower().strip()
     db = get_db()
     row = db.execute(
-        "SELECT id, username, password_hash FROM users WHERE username = ?",
+        "SELECT id, username, password_hash FROM users WHERE username = %s",
         (username,),
     ).fetchone()
     if not row or not verify_password(body.password, row[2]):
