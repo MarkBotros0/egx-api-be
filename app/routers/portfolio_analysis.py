@@ -14,6 +14,7 @@ from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
 from app.core.macro_fetch import fetch_macro
 from app.core.composite import compute_composite, get_weights_from_db, DEFAULT_WEIGHTS
+from app.core.levels import compute_key_levels, compute_entry_exit
 from app.core.constants import (
     BIG_LOSS_PCT,
     CONCENTRATION_CRITICAL_PCT,
@@ -202,6 +203,13 @@ def _analyze(holdings):
 
             sr = support_resistance(df["high"], df["low"], close)
             fib = fibonacci_levels(df["high"], df["low"])
+            key_levels_h = compute_key_levels(current_price, sr)
+            entry_exit_h = compute_entry_exit(
+                current_price, sr,
+                rsi_latest=current_rsi,
+                stoch_k_latest=current_stoch_k,
+                atr_latest=current_atr,
+            )
             dates_list = [str(idx)[:10] for idx in df.index]
             crossovers = ma_crossovers(sma_50, sma_200, dates_list)
             trend = "bullish" if crossovers["current_signal"] == "golden_cross" else \
@@ -393,6 +401,8 @@ def _analyze(holdings):
                 "composite_score": composite_h["score"] if composite_h else None,
                 "composite_signal": composite_h["signal"] if composite_h else None,
                 "composite_breakdown": composite_h["categories"] if composite_h else None,
+                "key_levels": key_levels_h,
+                "entry_exit": entry_exit_h,
             }
             stock_analyses.append(analysis)
 
@@ -504,6 +514,46 @@ def _analyze(holdings):
                         "message": f"{symbol} approaching resistance at {nearest_resistance['price']:.2f} EGP.",
                         "explanation": "Resistance levels are prices where the stock has historically been rejected.",
                         "learn_concept": "support_resistance"})
+
+            # Entry/exit zones add momentum confirmation on top of raw level
+            # proximity — "price near support AND RSI not overbought" is a
+            # stronger buy-zone cue than "price near support" alone.
+            ez = entry_exit_h.get("entry_zone") if entry_exit_h else None
+            if ez and ez.get("active"):
+                pr = ez.get("price_range") or {}
+                sl = ez.get("suggested_stop_loss")
+                conf = ez.get("confidence") or "low"
+                # High-confidence buy-zones are the rare confluence cue we
+                # want to surface aggressively; low-confidence zones are
+                # hints, not calls to action.
+                sev = "opportunity"
+                prefix = {"high": "HIGH-CONFIDENCE ", "medium": "", "low": "Possible "}[conf]
+                msg = (
+                    f"{prefix}entry zone on {symbol}: buy band "
+                    f"{pr.get('low', 0):.2f}–{pr.get('high', 0):.2f} EGP"
+                )
+                if sl is not None:
+                    msg += f", suggested stop-loss {sl:.2f}"
+                msg += f". Confidence: {conf}."
+                signals.append({"type": "entry_zone_active", "severity": sev, "symbol": symbol,
+                    "message": msg,
+                    "explanation": "Entry zones combine a tested support level with non-overbought momentum — a beginner-friendly way to time a buy. Always size your position and set a stop-loss before entering.",
+                    "learn_concept": "entry_exit_zones"})
+
+            xz = entry_exit_h.get("exit_zone") if entry_exit_h else None
+            if xz and xz.get("active"):
+                pr = xz.get("price_range") or {}
+                conf = xz.get("confidence") or "low"
+                sev = "warning" if conf in ("high", "medium") else "info"
+                prefix = {"high": "STRONG ", "medium": "", "low": "Possible "}[conf]
+                msg = (
+                    f"{prefix}exit zone on {symbol}: trim band "
+                    f"{pr.get('low', 0):.2f}–{pr.get('high', 0):.2f} EGP. Confidence: {conf}."
+                )
+                signals.append({"type": "exit_zone_active", "severity": sev, "symbol": symbol,
+                    "message": msg,
+                    "explanation": "Exit zones combine resistance with overbought momentum — a cue to trim, take partial profits, or tighten your stop-loss. Not always a full sell, especially in strong uptrends that break through resistance.",
+                    "learn_concept": "entry_exit_zones"})
 
             if beta is not None:
                 if beta > 1.3:

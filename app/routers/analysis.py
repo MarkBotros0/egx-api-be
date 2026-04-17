@@ -35,7 +35,22 @@ from app.core.indicators import (
 from app.core.composite import (
     compute_composite, get_weights_from_db, weights_hash, DEFAULT_WEIGHTS,
 )
+from app.core.levels import compute_key_levels, compute_entry_exit
 from app.core.macro_fetch import fetch_macro
+
+
+def _last_non_null(seq):
+    """Return the final non-None, non-NaN element of a list, or None."""
+    if not seq:
+        return None
+    for v in reversed(seq):
+        if v is None:
+            continue
+        # NaN check without numpy dependency
+        if isinstance(v, float) and v != v:
+            continue
+        return float(v)
+    return None
 
 router = APIRouter()
 
@@ -478,6 +493,20 @@ def get_analysis(
             macro=macro,
         )
 
+        # Key levels + entry/exit zones — consumed by the KeyLevelsCard /
+        # EntryExitCard on the stock detail page. Purely a presentation layer
+        # over support_resistance + RSI/Stochastic/ATR; doesn't alter the score.
+        rsi_latest = _last_non_null(indicators_full.get("rsi"))
+        stoch_k_latest = _last_non_null(indicators_full.get("stochastic_k"))
+        atr_latest = _last_non_null(indicators_full.get("atr"))
+        key_levels = compute_key_levels(float(close_full.iloc[-1]), sr)
+        entry_exit = compute_entry_exit(
+            float(close_full.iloc[-1]), sr,
+            rsi_latest=rsi_latest,
+            stoch_k_latest=stoch_k_latest,
+            atr_latest=atr_latest,
+        )
+
         result = {
             "symbol": symbol,
             "interval": interval,
@@ -494,6 +523,8 @@ def get_analysis(
             "volume_price": volume_price,
             "multi_timeframe": multi_timeframe,
             "bb_squeeze": bb_squeeze,
+            "key_levels": key_levels,
+            "entry_exit": entry_exit,
         }
 
         set(cache_key, result)
