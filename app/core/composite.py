@@ -431,7 +431,8 @@ def score_divergence(divergences: Optional[dict]) -> tuple:
 
 def score_quality(multi_timeframe: Optional[dict],
                   trend_consistency: Optional[float],
-                  current_drawdown_pct: Optional[float]) -> tuple:
+                  current_drawdown_pct: Optional[float],
+                  pe_ratio: Optional[float] = None) -> tuple:
     """
     Score the quality category (0-100).
 
@@ -446,8 +447,12 @@ def score_quality(multi_timeframe: Optional[dict],
                            was above the 20-day SMA (higher = more consistent).
       - current_drawdown_pct: float (negative number, e.g. -0.15 for -15%); how
                               far the stock is below its recent peak.
+      - pe_ratio: optional trailing P/E from the EGX P/E feed. Egypt context is
+                  tight (T-bills ~25%) so the bands are stricter than in
+                  developed markets. None → band is skipped entirely.
     """
-    if multi_timeframe is None and trend_consistency is None and current_drawdown_pct is None:
+    if (multi_timeframe is None and trend_consistency is None
+            and current_drawdown_pct is None and pe_ratio is None):
         return None, []
 
     score = 50.0
@@ -489,6 +494,25 @@ def score_quality(multi_timeframe: Optional[dict],
         elif dd_pct >= -3:
             score += 5
             reasons.append("Near recent peak — strong quality")
+
+    # P/E sub-component: reward cheap/fair P/E, penalize expensive or loss-making.
+    # Bands are shifted down for Egypt (T-bill ~25%). When pe_ratio is None the
+    # band is skipped — quality score still builds from the other inputs.
+    if pe_ratio is not None:
+        if pe_ratio < 0:
+            score -= 15
+            reasons.append("Company is loss-making (negative P/E)")
+        elif pe_ratio < 10:
+            score += 15
+            reasons.append(f"Very cheap on earnings (P/E {pe_ratio:.1f})")
+        elif pe_ratio < 20:
+            score += 8
+            reasons.append(f"Reasonably valued (P/E {pe_ratio:.1f})")
+        elif pe_ratio < 30:
+            reasons.append(f"Fully valued (P/E {pe_ratio:.1f})")
+        else:
+            score -= 10
+            reasons.append(f"Expensive on earnings (P/E {pe_ratio:.1f})")
 
     return _clamp(score), reasons
 
@@ -744,6 +768,7 @@ def compute_composite(indicators: dict, extras: Optional[dict] = None,
         extras.get("multi_timeframe"),
         extras.get("trend_consistency"),
         extras.get("current_drawdown_pct"),
+        pe_ratio=extras.get("pe_ratio"),
     )
     risk_adjusted_score, risk_adjusted_reasons = score_risk_adjusted(
         extras.get("annualized_return_pct"),

@@ -25,6 +25,7 @@ from app.routers import (
     intraday,
     analysis,
     portfolio_analysis,
+    pe,
 )
 
 app = FastAPI(
@@ -64,5 +65,6 @@ for router_module in (
     intraday,
     analysis,
     portfolio_analysis,
+    pe,
 ):
     app.include_router(router_module.router)

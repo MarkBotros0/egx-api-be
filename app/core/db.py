@@ -126,6 +126,27 @@ def init_db(db: _DB) -> None:
         )
     """)
 
+    # Scraped from egx.com.eg/en/MarketPECompanies.aspx. The page exposes only
+    # Company Name | P/E | DY%. No symbol is on the page — `symbol` here is the
+    # egxpy-compatible code resolved by name matching (see pe_fetch.match_symbol).
+    # A row with pe_ratio IS NULL means the page showed "0" (no data / loss-making).
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS pe_data (
+            symbol TEXT PRIMARY KEY,
+            company_name TEXT,
+            pe_ratio DOUBLE PRECISION,
+            dividend_yield DOUBLE PRECISION,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_pe_data_updated ON pe_data(updated_at)")
+
+    for key in ("pe_last_successful_fetch", "pe_last_attempt_status", "pe_unmatched_names"):
+        db.execute(
+            "INSERT INTO settings (key, value) VALUES (%s, '') ON CONFLICT (key) DO NOTHING",
+            (key,),
+        )
+
     db.execute(
         "INSERT INTO settings (key, value) VALUES ('currency', 'EGP') "
         "ON CONFLICT (key) DO NOTHING"

@@ -37,6 +37,7 @@ from app.core.composite import (
 )
 from app.core.levels import compute_key_levels, compute_entry_exit
 from app.core.macro_fetch import fetch_macro
+from app.core.pe_fetch import get_pe_for_symbol
 
 
 def _last_non_null(seq):
@@ -467,6 +468,13 @@ def get_analysis(
         except Exception:
             macro = None
 
+        # P/E from the nightly EGX scrape; None when no stored row.
+        pe_info = None
+        try:
+            pe_info = get_pe_for_symbol(db, symbol)
+        except Exception:
+            pe_info = None
+
         composite = compute_composite(
             indicators_full,
             extras={
@@ -488,6 +496,7 @@ def get_analysis(
                 "history_days": len(close_full),
                 "risk_free_rate_pct": risk_free_rate_pct,
                 "relative_strength": rs,
+                "pe_ratio": pe_info.get("pe_ratio") if pe_info else None,
             },
             weights=weights,
             macro=macro,
@@ -525,6 +534,7 @@ def get_analysis(
             "bb_squeeze": bb_squeeze,
             "key_levels": key_levels,
             "entry_exit": entry_exit,
+            "pe": pe_info,
         }
 
         set(cache_key, result)

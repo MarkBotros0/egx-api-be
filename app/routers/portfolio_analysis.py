@@ -15,6 +15,7 @@ from app.core.db import get_db
 from app.core.macro_fetch import fetch_macro
 from app.core.composite import compute_composite, get_weights_from_db, DEFAULT_WEIGHTS
 from app.core.levels import compute_key_levels, compute_entry_exit
+from app.core.pe_fetch import get_pe_for_symbol
 from app.core.constants import (
     BIG_LOSS_PCT,
     CONCENTRATION_CRITICAL_PCT,
@@ -315,6 +316,12 @@ def _analyze(holdings):
             except Exception:
                 liquidity_h = None
 
+            pe_info_h = None
+            try:
+                pe_info_h = get_pe_for_symbol(get_db(), symbol)
+            except Exception:
+                pe_info_h = None
+
             try:
                 composite_h = compute_composite(
                     holding_indicators,
@@ -337,6 +344,7 @@ def _analyze(holdings):
                         "history_days": len(close),
                         "risk_free_rate_pct": risk_free_rate_pct,
                         "relative_strength": rs_h,
+                        "pe_ratio": pe_info_h.get("pe_ratio") if pe_info_h else None,
                     },
                     weights=weights,
                     macro=macro_data,
@@ -403,6 +411,7 @@ def _analyze(holdings):
                 "composite_breakdown": composite_h["categories"] if composite_h else None,
                 "key_levels": key_levels_h,
                 "entry_exit": entry_exit_h,
+                "pe": pe_info_h,
             }
             stock_analyses.append(analysis)
 
@@ -665,6 +674,25 @@ def _analyze(holdings):
                     "message": f"{symbol} trades on thin volume (avg {liquidity_h['avg_volume']:,} shares/day).",
                     "explanation": "Thin liquidity means wider bid/ask spreads and difficulty exiting the position quickly. A beginner should keep position sizes small here.",
                     "learn_concept": "liquidity"})
+
+            # P/E signals — only fired when the EGX P/E scrape has a row for the symbol.
+            if pe_info_h and pe_info_h.get("pe_ratio") is not None:
+                pe = float(pe_info_h["pe_ratio"])
+                if pe < 0:
+                    signals.append({"type": "pe_loss_making", "severity": "warning", "symbol": symbol,
+                        "message": f"{symbol} is loss-making (P/E {pe:.1f}).",
+                        "explanation": "A negative P/E means the company isn't profitable right now. Earnings-based valuation doesn't apply — lean on trend, relative strength, and macro instead.",
+                        "learn_concept": "pe_ratio"})
+                elif pe < 10:
+                    signals.append({"type": "pe_undervalued", "severity": "opportunity", "symbol": symbol,
+                        "message": f"{symbol} P/E is {pe:.1f} — potentially undervalued on earnings.",
+                        "explanation": "A low P/E can indicate value, but it can also mean the market expects earnings to fall. Always combine with trend and relative strength before acting.",
+                        "learn_concept": "pe_ratio"})
+                elif pe > 30:
+                    signals.append({"type": "pe_overvalued", "severity": "warning", "symbol": symbol,
+                        "message": f"{symbol} P/E is {pe:.1f} — expensive vs earnings.",
+                        "explanation": "A high P/E means the market is paying a lot for each EGP of current earnings. Only justified by strong, confirmed growth expectations.",
+                        "learn_concept": "pe_ratio"})
 
         except Exception as e:
             stock_analyses.append({"symbol": symbol, "error": f"Analysis failed: {str(e)}"})
