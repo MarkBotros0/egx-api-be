@@ -39,6 +39,7 @@ from app.core.levels import compute_key_levels, compute_entry_exit
 from app.core.macro_fetch import fetch_macro
 from app.core.pe_fetch import get_pe_for_symbol
 from app.core.forecast import expected_move, monte_carlo_forecast
+from app.core.entry_price import compute_max_buy_price
 
 
 def _last_non_null(seq):
@@ -533,6 +534,18 @@ def get_analysis(
             atr_latest=atr_latest,
         )
 
+        # Max buy price — a single-number, beginner-friendly cap enforcing the
+        # support-proximity + risk:reward guardrails. Derived from the same
+        # support/resistance/ATR we already compute above.
+        max_buy = compute_max_buy_price(
+            current_price=float(close_full.iloc[-1]),
+            nearest_support=(key_levels or {}).get("nearest_support", {}).get("price")
+                if key_levels and key_levels.get("nearest_support") else None,
+            nearest_resistance=(key_levels or {}).get("nearest_resistance", {}).get("price")
+                if key_levels and key_levels.get("nearest_resistance") else None,
+            atr_value=atr_latest,
+        )
+
         result = {
             "symbol": symbol,
             "interval": interval,
@@ -553,6 +566,7 @@ def get_analysis(
             "entry_exit": entry_exit,
             "pe": pe_info,
             "forecast": forecast,
+            "max_buy_price": max_buy,
         }
 
         set(cache_key, result)
