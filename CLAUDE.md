@@ -327,6 +327,16 @@ Together those feed Risk-Adjusted (13%) and Quality (12%) — a quarter of the s
 
 **Monthly is inherently data-starved**: SMA50/SMA200 need 50/200 *months* (4/16 years) of history, and there is no higher timeframe to align against, so Quality and Trend are scored from fewer inputs there. Daily remains the best-supported view.
 
+### Removed: Max Buy Price
+
+`core/entry_price.py` and `MaxBuyPriceCard.tsx` used to compute "the highest price you should pay today" from two rules: within 5% of the nearest support, and reward-to-resistance at least 2x the risk to the stop.
+
+**It was removed because it systematically rejected breakouts.** Reward was computed as `nearest_resistance - current_price`, which is negative for any stock making new highs — so the strongest setups produced no computable reward and the card said "wait for a pullback". Measured across real EGX stocks: it said wait on **7 of 8** and never once said "OK to buy", contradicting the composite score's Buy rating on 4 of them. SWDY was trading 36% above its nearest resistance and the card wanted a pullback to 89.91 on a 126.60 stock scored 66 "Buy".
+
+It also anchored to pivot lows sitting a median ~15% below price against a 5% cap — fixing that anchor (using SMA50 / recent swing low) helped but could not fix the reward side, because computing reward above the market means inventing a price target, which this app deliberately does not do. And it duplicated the Entry Zone card's job with different maths, so the two could disagree.
+
+Do not reintroduce a single-number entry cap without solving the breakout case. The Entry Zone card (`core/levels.py`) is the supported surface for "is now a good time to buy, in what band, with what stop".
+
 ## Decision Framework for Beginners
 
 The Learn page's "How to Take a Decision" section and the in-app signals both follow the same 6-step flow. Keep any new guidance consistent with this flow — it is the single source of truth:
@@ -507,6 +517,7 @@ Synced to Turso via `/api/watchlist` and exposed through `WatchlistProvider` (wr
 - Multi-user authentication
 - External TA libraries (ta-lib, pandas-ta) — everything is from-scratch for learning
 - Per-stock composite score on the dashboard (StockCard accepts the prop but dashboard doesn't batch-fetch scores — out of scope)
+- A single "max buy price" number (removed — see *Removed: Max Buy Price*)
 
 ## Starting Points for Common Questions
 

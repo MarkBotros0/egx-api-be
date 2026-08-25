@@ -30,7 +30,6 @@ from app.core.constants import (
     SCORE_STRONG_SELL_MAX,
     STOP_LOSS_ATR_MULTIPLIER,
 )
-from app.core.entry_price import compute_max_buy_price
 from app.core.extras_builder import build_composite_extras
 from app.core.indicators import (
     _cluster_levels,
@@ -303,23 +302,36 @@ def test_small_drawdown_reads_as_near_peak():
 # Stop-loss convention — ONE number app-wide
 # ---------------------------------------------------------------------------
 
-def test_entry_zone_and_max_buy_agree_on_stop_loss():
+def test_entry_zone_stop_loss_uses_the_house_convention():
     """
-    The stock detail page renders EntryExitCard and MaxBuyPriceCard side by
-    side. They used 1.5x and 1.0x ATR respectively, showing two different
-    stop-losses for the same trade with no way to tell which to trust.
+    One stop-loss convention app-wide: STOP_LOSS_ATR_MULTIPLIER x ATR below
+    the nearest support. This used to be asserted against the Max Buy Price
+    card too, which showed a different multiplier on the same screen; that
+    card has since been removed (it rejected breakouts as "wait for a
+    pullback"), so the entry zone is now the single surface for this number.
     """
-    support, resistance, atr_val, price = 100.0, 130.0, 3.0, 102.0
+    support, atr_val, price = 100.0, 3.0, 102.0
     sr = {
         "supports": [{"price": support, "strength": 4}],
-        "resistances": [{"price": resistance, "strength": 3}],
+        "resistances": [{"price": 130.0, "strength": 3}],
     }
     zones = compute_entry_exit(price, sr, rsi_latest=45, stoch_k_latest=40, atr_latest=atr_val)
-    max_buy = compute_max_buy_price(price, support, resistance, atr_val)
 
     expected = round(support - STOP_LOSS_ATR_MULTIPLIER * atr_val, 2)
     assert zones["entry_zone"]["suggested_stop_loss"] == expected
-    assert max_buy["stop_loss"] == expected
+
+
+def test_max_buy_price_helper_is_gone():
+    """
+    The card systematically told the user to wait on breakouts: it computed
+    reward as (nearest_resistance - price), which is negative for a stock
+    making new highs, so the strongest setups were rejected. Removed rather
+    than tuned, because computing a reward above the market would mean
+    inventing a price target, which this app deliberately does not do.
+    """
+    import importlib
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("app.core.entry_price")
 
 
 # ---------------------------------------------------------------------------
