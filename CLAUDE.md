@@ -310,13 +310,24 @@ PRESETS = {
 
 Signal bands are **half-open with the lower bound inclusive**, applied AFTER macro modulation:
 
-| Score | Signal |
-|-------|--------|
-| < 20 | Strong Sell |
-| 20–39.99 | Sell |
-| 40–59.99 | Hold |
-| 60–79.99 | Buy |
-| ≥ 80 | Strong Buy |
+| Score | Label |
+|-------|-------|
+| < 20 | Very Weak |
+| 20–39.99 | Weak |
+| 40–59.99 | Neutral |
+| 60–79.99 | Strong |
+| ≥ 80 | Very Strong |
+
+**These describe CONDITION, not action — do not reinstate Buy/Sell.** They read
+Strong Buy / Buy / Hold / Sell / Strong Sell until 2026-08-26. A walk-forward
+backtest (`scripts/backtest.py`, 2007–2026, 36,818 symbol-dates) found the score
+cannot rank one stock above another: cross-sectional IC ≈ 0 and slightly
+negative, nine of ten score deciles had a median 21-day forward return of
+**exactly 0.00%**, and among liquid names the "Sell" bucket slightly
+**outperformed** the "Buy" bucket. An instruction the evidence contradicts is
+worse than none, and on the sell side it pointed the wrong way.
+`tests/test_fixes.py::test_labels_describe_condition_not_action` fails if the
+action words come back.
 
 `classify_signal` in `composite.py` is the canonical implementation. The frontend mirrors it via `scoreBand()` in `egx-api-fe/src/app/lib/constants.ts` — **every** colour, label and badge derives from that one function, so they cannot disagree at a boundary. The constants are named `SCORE_*_MAX` for historical reasons but each is really the *minimum* of the band above it; comparing with `<=` shifts every band down by one.
 
@@ -450,7 +461,7 @@ Do not reintroduce a single-number entry cap without solving the breakout case. 
 The Learn page's "How to Take a Decision" section and the in-app signals both follow the same 6-step flow. Keep any new guidance consistent with this flow — it is the single source of truth:
 
 1. **Check the macro.** What is the EGX30 trend? In bearish regimes, demand higher scores (≥ 70 instead of 60).
-2. **Check the composite score.** Below 60 = don't buy. Between 50–60 = Watchlist, revisit weekly.
+2. **Read the composite BREAKDOWN, not the number.** The category reasons are checkable facts; the blended score is not predictive (see the signal-band note). A low score is **not** a sell signal — historically the lowest-scoring EGX stocks bounced about as often as the highest.
 3. **Check Risk-Adjusted.** Is annualized return comfortably above the ~25% T-bill? If not, be sceptical.
 4. **Check Relative Strength.** Is the stock a leader (outperforming EGX30) or a laggard (underperforming by >10%)?
 5. **Set the stop-loss BEFORE buying.** The house convention is **1.5× ATR below the nearest support** (`STOP_LOSS_ATR_MULTIPLIER` in `core/constants.py`) — anchored to support, not to your entry price, so the number is objective and computable before you buy. `levels.compute_entry_exit`, `entry_price.compute_max_buy_price` and the `atr_stop` signal all use that one constant. Enter the value on the Portfolio add form.
@@ -474,10 +485,10 @@ Returned in `signals` array from portfolio_analysis. Sorted by priority:
 
 | Severity | Icon | Examples |
 |----------|------|----------|
-| `action_required` | `!!` | Stop-loss about to trigger, Death Cross, negative Sharpe, max drawdown > 20%, support broken, strong_sell_composite (score ≤ 20) |
-| `warning` | `!` | Sector/stock concentration, high correlation pairs, OBV bearish divergence, near resistance, big loss, sell_composite (score ≤ 40), **`cash_underperformer`** (held >90d, ann. return < T-bill), **`relative_strength_laggard`** (alpha < -10% vs EGX30), **`mfi_extreme`** at >80, **`low_liquidity_warning`** (thin volume relative to the stock's own index), **`exit_zone_active`** at medium/high confidence, **`pe_overvalued`** (P/E ≥ 25 — expensive vs the EGX median of ~12), **`pe_loss_making`** (diluted EPS < 0), **`pe_implausibly_low`** (P/E < 3 — one-off earnings or a collapsed price, NOT a bargain), **`dividend_yield_extreme`** (DY ≥ 15%) |
-| `opportunity` | `$` | Golden Cross, RSI/Stochastic oversold+bullish crossover, near support, target approaching, strong_buy_composite (score ≥ 80), divergence_bullish, **`relative_strength_leader`** (alpha > +5% vs EGX30), **`mfi_extreme`** at <20, **`entry_zone_active`** (price near support + momentum not overbought), **`pe_undervalued`** (P/E < 8) |
-| `info` | `i` | Beta context, ATR-based stop-loss suggestion, macro context, profit-taking reminder, buy_composite (score ≥ 60), **`adx_strong_trend`** (ADX > 30, direction from DI±), **`exit_zone_active`** at low confidence |
+| `action_required` | `!!` | Stop-loss about to trigger, Death Cross, negative Sharpe, max drawdown > 20%, support broken, — |
+| `warning` | `!` | Sector/stock concentration, high correlation pairs, OBV bearish divergence, near resistance, big loss, **`cash_underperformer`** (held >90d, ann. return < T-bill), **`relative_strength_laggard`** (alpha < -10% vs EGX30), **`mfi_extreme`** at >80, **`low_liquidity_warning`** (thin volume relative to the stock's own index), **`exit_zone_active`** at medium/high confidence, **`pe_overvalued`** (P/E ≥ 25 — expensive vs the EGX median of ~12), **`pe_loss_making`** (diluted EPS < 0), **`pe_implausibly_low`** (P/E < 3 — one-off earnings or a collapsed price, NOT a bargain), **`dividend_yield_extreme`** (DY ≥ 15%) |
+| `opportunity` | `$` | Golden Cross, RSI/Stochastic oversold+bullish crossover, near support, target approaching, divergence_bullish, **`relative_strength_leader`** (alpha > +5% vs EGX30), **`mfi_extreme`** at <20, **`entry_zone_active`** (price near support + momentum not overbought), **`pe_undervalued`** (P/E < 8) |
+| `info` | `i` | Beta context, ATR-based stop-loss suggestion, macro context, profit-taking reminder, **`very_strong_composite` / `strong_composite` / `weak_composite` / `very_weak_composite`** (condition readings — all `info` severity, never action_required, because the score is not predictive), **`adx_strong_trend`** (ADX > 30, direction from DI±), **`exit_zone_active`** at low confidence |
 
 New signal types added with the 8-category engine have their `learn_concept` anchors wired into the Learn page: `risk_adjusted_return`, `relative_strength`, `mfi`, `adx`, `liquidity`, `multi_timeframe`, `cash_underperformer`. Entry/exit zone signals use `entry_exit_zones`.
 

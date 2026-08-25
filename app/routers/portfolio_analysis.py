@@ -437,25 +437,31 @@ def _analyze(holdings):
                 # (lower bound inclusive), or a score of exactly 20 gets an
                 # "action required: Strong Sell" alert while its own badge
                 # in the same payload reads "Sell".
+                # These describe CONDITION, and their severity is `info`, not
+                # opportunity/action_required. The backtest found the score
+                # cannot rank stocks, so an "act now" framing on a condition
+                # reading was a promise the evidence does not support — and on
+                # the weak side it pointed the wrong way, since low-scored
+                # stocks historically bounced.
                 if c_score >= SCORE_BUY_MAX:
-                    signals.append({"type": "strong_buy_composite", "severity": "opportunity", "symbol": symbol,
-                        "message": f"{symbol} composite score is {c_score:.0f} — Strong Buy across multiple indicators.",
-                        "explanation": "The composite score blends 8 categories — trend, momentum, volume, volatility, divergence, quality, risk-adjusted return and relative strength — into one number. A score ≥80 means most categories are aligned bullishly — a high-conviction setup.",
+                    signals.append({"type": "very_strong_composite", "severity": "info", "symbol": symbol,
+                        "message": f"{symbol} scores {c_score:.0f} — nearly every category is aligned positively.",
+                        "explanation": "The composite blends 8 categories into one number describing the stock's present technical condition. A score ≥80 means most of them agree. It is a description, not a forecast: testing over 2007-2026 found no evidence that high scores precede better returns than low ones.",
                         "learn_concept": "composite_score"})
                 elif c_score < SCORE_STRONG_SELL_MAX:
-                    signals.append({"type": "strong_sell_composite", "severity": "action_required", "symbol": symbol,
-                        "message": f"{symbol} composite score is {c_score:.0f} — Strong Sell. Most indicators are bearish.",
-                        "explanation": "When the composite score falls below 20, nearly every category — trend, momentum, volume, quality, risk-adjusted return and relative strength — is flashing bearish.",
+                    signals.append({"type": "very_weak_composite", "severity": "info", "symbol": symbol,
+                        "message": f"{symbol} scores {c_score:.0f} — nearly every category is negative.",
+                        "explanation": "Below 20, almost every category is reading poorly. Note this is NOT an exit signal: over 2007-2026 the lowest-scoring stocks bounced about as often as the highest-scoring ones, so treat it as a description of current weakness rather than a reason to sell.",
                         "learn_concept": "composite_score"})
-                elif c_signal == "Buy":
-                    signals.append({"type": "buy_composite", "severity": "opportunity", "symbol": symbol,
-                        "message": f"{symbol} composite score is {c_score:.0f} — Buy signal from combined indicators.",
-                        "explanation": "Multiple indicators agree this stock is in a favorable state.",
+                elif c_signal == "Strong":
+                    signals.append({"type": "strong_composite", "severity": "info", "symbol": symbol,
+                        "message": f"{symbol} scores {c_score:.0f} — most indicators are reading positively.",
+                        "explanation": "Multiple categories currently describe this stock favourably. That is a statement about its condition today, not about where it goes next.",
                         "learn_concept": "composite_score"})
-                elif c_signal == "Sell":
-                    signals.append({"type": "sell_composite", "severity": "warning", "symbol": symbol,
-                        "message": f"{symbol} composite score is {c_score:.0f} — Sell signal from combined indicators.",
-                        "explanation": "Multiple indicators agree this stock is weakening.",
+                elif c_signal == "Weak":
+                    signals.append({"type": "weak_composite", "severity": "info", "symbol": symbol,
+                        "message": f"{symbol} scores {c_score:.0f} — most indicators are reading poorly.",
+                        "explanation": "Multiple categories currently describe this stock unfavourably. Check the breakdown for which ones, rather than acting on the number itself.",
                         "learn_concept": "composite_score"})
 
             for ind_name, div in (("RSI", divergences_h["rsi"]), ("MACD", divergences_h["macd"])):

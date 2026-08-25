@@ -86,20 +86,36 @@ def bench_close():
 @pytest.mark.parametrize(
     "score,expected",
     [
-        (0, "Strong Sell"),
-        (19.99, "Strong Sell"),
-        (20, "Sell"),          # exactly 20 is Sell, NOT Strong Sell
-        (39.99, "Sell"),
-        (40, "Hold"),
-        (59.99, "Hold"),
-        (60, "Buy"),           # exactly 60 is Buy, NOT Hold
-        (79.99, "Buy"),
-        (80, "Strong Buy"),
-        (100, "Strong Buy"),
+        (0, "Very Weak"),
+        (19.99, "Very Weak"),
+        (20, "Weak"),          # exactly 20 is Weak, NOT Very Weak
+        (39.99, "Weak"),
+        (40, "Neutral"),
+        (59.99, "Neutral"),
+        (60, "Strong"),        # exactly 60 is Strong, NOT Neutral
+        (79.99, "Strong"),
+        (80, "Very Strong"),
+        (100, "Very Strong"),
     ],
 )
 def test_classify_signal_boundaries(score, expected):
     assert classify_signal(score) == expected
+
+
+def test_labels_describe_condition_not_action():
+    """
+    The labels used to read Strong Buy / Buy / Hold / Sell / Strong Sell. The
+    backtest found the score cannot rank stocks — nine of ten deciles had a
+    median 21-day forward return of 0.00%, and among liquid names the "Sell"
+    bucket slightly beat the "Buy" bucket. An instruction the evidence
+    contradicts is worse than no instruction, so the labels now describe
+    condition. This test exists so nobody reinstates them casually.
+    """
+    labels = {classify_signal(s) for s in (0, 25, 50, 70, 90)}
+    forbidden = {"Buy", "Sell", "Strong Buy", "Strong Sell", "Hold"}
+    assert not (labels & forbidden), (
+        f"composite labels give trading instructions again: {labels & forbidden}"
+    )
 
 
 def test_band_constants_are_ordered():

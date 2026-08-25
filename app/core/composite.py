@@ -149,16 +149,31 @@ def normalize_weights(weights: dict) -> dict:
 
 
 def classify_signal(score: float) -> str:
-    """Map a 0-100 composite score to a human-readable signal string."""
+    """
+    Map a 0-100 composite score to a description of the stock's CONDITION.
+
+    These used to read "Strong Buy" / "Buy" / "Hold" / "Sell" / "Strong Sell".
+    A walk-forward backtest over 2007-2026 (scripts/backtest.py) showed the
+    score has no ability to rank one stock above another: the cross-sectional
+    information coefficient is ~0 and slightly negative, nine of ten score
+    deciles have a median 21-day forward return of exactly 0.00%, and among
+    liquid names the "Sell"-labelled stocks slightly OUTPERFORMED the "Buy"
+    ones. The instruction the old labels gave was not supported by evidence,
+    and on the sell side it pointed the wrong way.
+
+    The bands and the score are unchanged — only the claim is. The score is a
+    correct summary of a stock's present technical condition, so it now says
+    what it measures instead of what to do.
+    """
     if score >= SCORE_BUY_MAX:
-        return "Strong Buy"
+        return "Very Strong"
     if score >= SCORE_HOLD_MAX:
-        return "Buy"
+        return "Strong"
     if score >= SCORE_SELL_MAX:
-        return "Hold"
+        return "Neutral"
     if score >= SCORE_STRONG_SELL_MAX:
-        return "Sell"
-    return "Strong Sell"
+        return "Weak"
+    return "Very Weak"
 
 
 # ---------------------------------------------------------------------------
