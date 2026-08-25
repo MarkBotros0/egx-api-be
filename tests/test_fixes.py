@@ -1260,6 +1260,144 @@ def test_rows_with_no_fundamentals_are_not_stored():
     assert result["skipped_empty"] == 149
 
 
+# ---------------------------------------------------------------------------
+# Fundamentals history — the point-in-time record
+# ---------------------------------------------------------------------------
+
+def _fundamental(symbol="COMI", **kw):
+    row = {"symbol": symbol, "company_name": "x", "pe_ratio": 10.0,
+           "dividend_yield": 3.0, "loss_making": False, "eps_ttm": 20.0,
+           "dps_annual": 6.0, "book_value_per_share": 70.0, "close": 200.0}
+    row.update(kw)
+    return row
+
+
+def test_history_logs_fundamentals_not_price_ratios():
+    """
+    P/E, P/B and dividend yield all divide by PRICE, so they move every day.
+    Logging them would be ~99% price noise. EPS, DPS and book value move
+    quarterly, and any ratio is reconstructable from them plus a historical
+    close — verified against the live feed, where close/eps reproduces the
+    reported P/E exactly.
+    """
+    import app.core.pe_fetch as pf
+
+    cols = pf.TV_COLUMNS
+    assert "earnings_per_share_diluted_ttm" in cols
+    assert "book_value_per_share_fq" in cols
+    assert set(pf._HISTORY_FIELDS) == {
+        "eps_ttm", "dps_annual", "book_value_per_share", "loss_making"
+    }
+    # The ratios must NOT drive a history append.
+    assert "pe_ratio" not in pf._HISTORY_FIELDS
+    assert "dividend_yield" not in pf._HISTORY_FIELDS
+
+
+def test_unchanged_fundamentals_do_not_append():
+    """
+    Appending nightly regardless would grow ~107k rows a year to record
+    quarterly events. Only a real change is an event.
+    """
+    import app.core.pe_fetch as pf
+
+    prev = {"eps_ttm": 20.0, "dps_annual": 6.0,
+            "book_value_per_share": 70.0, "loss_making": False}
+    # Price moved a long way; no fundamental did.
+    assert pf._changed(prev, _fundamental(close=999.0, pe_ratio=50.0)) is False
+
+
+def test_changed_earnings_append():
+    import app.core.pe_fetch as pf
+
+    prev = {"eps_ttm": 20.0, "dps_annual": 6.0,
+            "book_value_per_share": 70.0, "loss_making": False}
+    assert pf._changed(prev, _fundamental(eps_ttm=23.5)) is True
+    assert pf._changed(prev, _fundamental(dps_annual=7.0)) is True
+    assert pf._changed(prev, _fundamental(loss_making=True)) is True
+    # First-ever observation always logs.
+    assert pf._changed(None, _fundamental()) is True
+
+
+def test_gaining_or_losing_a_value_is_a_change():
+    """None -> a number is a real event, and so is the reverse."""
+    import app.core.pe_fetch as pf
+
+    prev = {"eps_ttm": None, "dps_annual": 6.0,
+            "book_value_per_share": 70.0, "loss_making": False}
+    assert pf._changed(prev, _fundamental(eps_ttm=20.0)) is True
+    assert pf._changed({**prev, "eps_ttm": 20.0}, _fundamental(eps_ttm=None)) is True
+
+
+def test_float_jitter_does_not_append():
+    """
+    The feed re-derives these each night and the last decimal wobbles. Logging
+    that would defeat the append-on-change design.
+    """
+    import app.core.pe_fetch as pf
+
+    prev = {"eps_ttm": 20.0, "dps_annual": 6.0,
+            "book_value_per_share": 70.0, "loss_making": False}
+    assert pf._changed(prev, _fundamental(eps_ttm=20.0 + 1e-9)) is False
+
+
+def test_point_in_time_reader_asks_for_the_right_row():
+    """
+    The table is useless without this: reading the LATEST row (which is what the
+    change-detection query does) would hand a backtest today's earnings for a
+    2024 date. The read must be bounded by observed_at <= as_of and take the
+    most recent one at or before it.
+    """
+    import app.core.pe_fetch as pf
+
+    class _RecordingDB(_FakeDB):
+        def fetchone(self):
+            return ("2024-03-01", 20.0, 6.0, 70.0, False)
+
+    db = _RecordingDB()
+    got = pf.get_fundamentals_at(db, "comi", "2024-06-30")
+
+    sql, params = db.statements[-1]
+    assert "observed_at <= %s" in sql, "reader is not bounded by the as-of date"
+    assert "ORDER BY observed_at DESC" in sql and "LIMIT 1" in sql
+    assert params == ("COMI", "2024-06-30"), "symbol must be upper-cased"
+    assert got["eps_ttm"] == 20.0 and got["observed_at"] == "2024-03-01"
+    # Ratios are deliberately absent — they must be derived from the close on
+    # the evaluated date, not read back.
+    assert "pe_ratio" not in got and "dividend_yield" not in got
+
+
+def test_point_in_time_reader_returns_none_before_first_observation():
+    import app.core.pe_fetch as pf
+
+    class _EmptyDB(_FakeDB):
+        def fetchone(self):
+            return None
+
+    assert pf.get_fundamentals_at(_EmptyDB(), "COMI", "2019-01-01") is None
+
+
+def test_history_append_failure_does_not_fail_the_refresh():
+    """
+    The current-value feed is what the app serves; history is for later
+    analysis. A broken history table must not take the read path down with it.
+    """
+    import app.core.pe_fetch as pf
+
+    class _HistoryBrokenDB(_FakeDB):
+        def execute(self, sql, params=None):
+            if "fundamentals_history" in sql:
+                raise RuntimeError("relation does not exist")
+            return super().execute(sql, params)
+
+    rows = [_fundamental(symbol=f"SYM{i}") for i in range(150)]
+    db = _HistoryBrokenDB()
+    result = pf.refresh_pe_data(db, rows=rows)
+
+    assert result["success"] is True
+    assert result["count"] == 150
+    assert result["history_rows_appended"] == 0
+
+
 def test_absurd_pe_is_dropped_at_ingest():
     """
     The live EGX maximum is ~2756. The reason string renders the raw number,

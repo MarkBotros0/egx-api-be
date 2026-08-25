@@ -146,6 +146,43 @@ def init_db(db: _DB) -> None:
     db.execute("ALTER TABLE pe_data ADD COLUMN IF NOT EXISTS loss_making BOOLEAN")
     db.execute("CREATE INDEX IF NOT EXISTS idx_pe_data_updated ON pe_data(updated_at)")
 
+    # Append-only change log of the PRICE-INDEPENDENT fundamentals.
+    #
+    # `pe_data` is a current-value read model: every refresh overwrites it, so
+    # yesterday's numbers are destroyed nightly and no point-in-time question
+    # can ever be answered. Without this table the valuation bands can never be
+    # validated, because scoring a stock in the past with today's P/E is
+    # look-ahead bias severe enough to manufacture any result you like.
+    #
+    # It stores EPS / DPS / book value rather than P/E, P/B and dividend yield.
+    # Those three ratios all divide by PRICE, so they move every single day and
+    # a log of them would be ~99% price noise. Verified against the live feed:
+    # close / eps_ttm reproduces the reported P/E exactly. The ratio at any past
+    # date is therefore reconstructable as (historical close from egxpy) / (the
+    # fundamental in force on that date), which is both smaller to store and
+    # more correct than logging the ratio itself.
+    #
+    # Rows are appended ONLY when a fundamental actually changes — these move
+    # quarterly, so this stays small. `observed_at` is when WE saw the change,
+    # not when the company reported it; the cron cadence bounds that lag to a
+    # day. Point-in-time read: latest row for the symbol with observed_at <= X.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS fundamentals_history (
+            id BIGSERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            eps_ttm DOUBLE PRECISION,
+            dps_annual DOUBLE PRECISION,
+            book_value_per_share DOUBLE PRECISION,
+            loss_making BOOLEAN,
+            close_at_observation DOUBLE PRECISION
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fundamentals_history_symbol_time "
+        "ON fundamentals_history(symbol, observed_at DESC)"
+    )
+
     for key in ("pe_last_successful_fetch", "pe_last_attempt_status"):
         db.execute(
             "INSERT INTO settings (key, value) VALUES (%s, '') ON CONFLICT (key) DO NOTHING",

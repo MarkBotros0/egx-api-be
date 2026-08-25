@@ -570,6 +570,48 @@ pe_data    (symbol PK, company_name, pe_ratio, dividend_yield, loss_making,
 `init_db`. There is no migration framework — every statement there is
 idempotent, so new columns land on the next cold start of any process.
 
+### fundamentals_history — the point-in-time record
+
+```sql
+fundamentals_history (id, symbol, observed_at, eps_ttm, dps_annual,
+                      book_value_per_share, loss_making, close_at_observation)
+```
+
+`pe_data` is a **current-value read model**: every refresh overwrites it, so
+yesterday's numbers are destroyed nightly. This table is the append-only log
+that makes historical questions answerable at all. Without it the valuation
+bands can never be validated, because scoring a past date with today's P/E is
+look-ahead bias severe enough to manufacture any result.
+
+**It stores fundamentals, not ratios — deliberately.** P/E, P/B and dividend
+yield all divide by PRICE, so they move every single day and a log of them would
+be ~99% price noise. Verified against the live feed: `close / eps_ttm`
+reproduces the reported P/E exactly. EPS, DPS and book value move quarterly, so
+the log stays tiny, and any ratio is reconstructable at a past date as
+`(historical close from egxpy) / (the fundamental in force then)`.
+
+It also reaches further than `pe_data` does: **book value per share covers 60%
+of EGX stocks against P/E's 22%**, because banks and real estate dominate this
+market and both are conventionally valued on book. First seed: 182 symbols.
+
+**Rules:**
+- Rows append **only when a fundamental actually changes**
+  (`pe_fetch._changed`, relative-tolerance float compare so the feed's nightly
+  last-decimal jitter doesn't append). Verified live: 182 rows on the first run,
+  **0** on an immediate second run with identical data.
+- **Read historical values through `get_fundamentals_at(db, symbol, as_of)`** —
+  latest row with `observed_at <= as_of` — or `get_fundamentals_asof_all(db,
+  as_of)` for a whole date in one query. Never use `get_pe_for_symbol` to
+  evaluate a past date; it returns today's snapshot. `_latest_history` is for
+  change detection only.
+- History failures are swallowed: the current-value feed is what the app serves
+  and must not go down with the log.
+
+**Two caveats:** `observed_at` is when *we* observed the change, not when the
+company reported it — the nightly cron bounds that lag to a day. And there is no
+history before 2026-08-25, so anything validating the valuation bands can only
+run forward from then.
+
 Connection singleton in `_db.py` with lazy init. `get_db()` returns the ready connection.
 
 ## Caching Strategy

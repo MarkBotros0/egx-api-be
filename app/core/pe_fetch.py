@@ -39,13 +39,25 @@ from typing import Optional
 from app.core.tradingview import scan
 
 # Positional column request. `d` in each returned row aligns to this order.
+#
+# The last four are PRICE-INDEPENDENT fundamentals kept for the history log.
+# P/E, P/B and dividend yield all divide by price, so they move daily and a
+# history of them would be mostly price noise; EPS / DPS / book value move
+# quarterly and let any of the ratios be reconstructed at a past date.
 TV_COLUMNS = [
     "name",                            # bare symbol, e.g. "COMI"
     "description",                     # company name, for display only
     "price_earnings_ttm",
     "dividends_yield",                 # the only DY column that carries data
     "earnings_per_share_diluted_ttm",  # sign gives loss_making
+    "dps_common_stock_prim_issue_fy",  # annual DPS (the ttm variant is ~3% covered)
+    "book_value_per_share_fq",         # ~60% covered — widest fundamental we get
+    "close",
 ]
+
+# Fields whose change triggers a new history row. Deliberately excludes the
+# ratios and the close: those move every day.
+_HISTORY_FIELDS = ("eps_ttm", "dps_annual", "book_value_per_share", "loss_making")
 
 # Above this, a P/E carries no information beyond "barely profitable" — and
 # the reason string would render "P/E 2756.0", which reads as a broken app.
@@ -109,6 +121,11 @@ def fetch_fundamentals_rows() -> list:
             # 0.0 is preserved deliberately — it means "pays nothing".
             "dividend_yield": _clean_float(d[3], maximum=DY_SANITY_MAX),
             "loss_making": (eps < 0) if eps is not None else None,
+            # Price-independent fundamentals, for the history log.
+            "eps_ttm": eps,
+            "dps_annual": _clean_float(d[5]),
+            "book_value_per_share": _clean_float(d[6]),
+            "close": _clean_float(d[7]),
         })
     return out
 
@@ -176,6 +193,8 @@ def refresh_pe_data(db, rows: Optional[list] = None) -> dict:
         )
         written += 1
 
+    appended = _append_fundamentals_history(db, rows, now)
+
     _write_setting(db, "pe_last_successful_fetch", now)
     _write_setting(db, "pe_last_attempt_status", "ok")
 
@@ -184,7 +203,86 @@ def refresh_pe_data(db, rows: Optional[list] = None) -> dict:
         "count": written,
         "total_rows": len(rows),
         "skipped_empty": skipped,
+        "history_rows_appended": appended,
     }
+
+
+def _latest_history(db) -> dict:
+    """
+    Most recent history row per symbol: {symbol: {field: value}}.
+
+    One query rather than one per symbol — the refresh handles ~293 symbols and
+    per-symbol reads would dominate its runtime.
+    """
+    try:
+        rows = db.execute(
+            "SELECT DISTINCT ON (symbol) symbol, eps_ttm, dps_annual, "
+            "book_value_per_share, loss_making "
+            "FROM fundamentals_history ORDER BY symbol, observed_at DESC"
+        ).fetchall()
+    except Exception:
+        return {}
+    return {
+        r[0]: {"eps_ttm": r[1], "dps_annual": r[2],
+               "book_value_per_share": r[3], "loss_making": r[4]}
+        for r in rows
+    }
+
+
+def _changed(previous: Optional[dict], row: dict) -> bool:
+    """Has any price-independent fundamental moved since the last observation?"""
+    if previous is None:
+        return True
+    for field in _HISTORY_FIELDS:
+        old, new = previous.get(field), row.get(field)
+        if old is None or new is None:
+            if old is not new:      # one side gained or lost a value
+                return True
+            continue
+        if isinstance(old, bool) or isinstance(new, bool):
+            if bool(old) != bool(new):
+                return True
+            continue
+        # Float compare with a relative tolerance: the feed re-derives these
+        # and the last decimal jitters. Logging that jitter would defeat the
+        # point of an append-on-change design.
+        if abs(float(old) - float(new)) > max(1e-9, abs(float(old)) * 1e-6):
+            return True
+    return False
+
+
+def _append_fundamentals_history(db, rows: list, now: str) -> int:
+    """
+    Append a row per symbol whose fundamentals changed since we last looked.
+
+    Append-only and change-triggered: EPS, DPS and book value move quarterly,
+    so this stays small, while `pe_data` keeps being overwritten in place for
+    the read path. Failures here must NOT fail the refresh — the current-value
+    feed is what the app serves; history is for later analysis.
+    """
+    previous = _latest_history(db)
+    appended = 0
+    for row in rows:
+        if all(row.get(f) is None for f in _HISTORY_FIELDS):
+            continue
+        if not _changed(previous.get(row["symbol"]), row):
+            continue
+        try:
+            db.execute(
+                """
+                INSERT INTO fundamentals_history
+                    (symbol, observed_at, eps_ttm, dps_annual,
+                     book_value_per_share, loss_making, close_at_observation)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (row["symbol"], now, row.get("eps_ttm"), row.get("dps_annual"),
+                 row.get("book_value_per_share"), row.get("loss_making"),
+                 row.get("close")),
+            )
+            appended += 1
+        except Exception:
+            continue
+    return appended
 
 
 def get_pe_for_symbol(db, symbol: str) -> Optional[dict]:
@@ -202,6 +300,65 @@ def get_pe_for_symbol(db, symbol: str) -> Optional[dict]:
         "dividend_yield": row[2],
         "loss_making": row[3],
         "fetched_at": row[4],
+    }
+
+
+def get_fundamentals_at(db, symbol: str, as_of: str) -> Optional[dict]:
+    """
+    The fundamentals in force for `symbol` on date `as_of` (ISO string).
+
+    This is the whole reason `fundamentals_history` exists. Scoring a stock in
+    the past with TODAY's P/E is look-ahead bias severe enough to manufacture
+    any backtest result you like, so anything evaluating a historical date must
+    read through here rather than through `get_pe_for_symbol`.
+
+    Returns the latest observation at or before `as_of`, or None if we had not
+    yet observed the symbol then. Ratios are NOT stored (they divide by price
+    and would be mostly price noise) — derive them from the close on the date
+    you are evaluating:  pe = close_then / eps_ttm.
+    """
+    try:
+        row = db.execute(
+            "SELECT observed_at, eps_ttm, dps_annual, book_value_per_share, "
+            "loss_making FROM fundamentals_history "
+            "WHERE symbol = %s AND observed_at <= %s "
+            "ORDER BY observed_at DESC LIMIT 1",
+            (symbol.upper(), as_of),
+        ).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return {
+        "observed_at": row[0],
+        "eps_ttm": row[1],
+        "dps_annual": row[2],
+        "book_value_per_share": row[3],
+        "loss_making": row[4],
+    }
+
+
+def get_fundamentals_asof_all(db, as_of: str) -> dict:
+    """
+    `get_fundamentals_at` for every symbol at once: {symbol: {...}}.
+
+    A backtest asks this per rebalance date across the whole universe; one
+    query per symbol would dominate its runtime.
+    """
+    try:
+        rows = db.execute(
+            "SELECT DISTINCT ON (symbol) symbol, observed_at, eps_ttm, "
+            "dps_annual, book_value_per_share, loss_making "
+            "FROM fundamentals_history WHERE observed_at <= %s "
+            "ORDER BY symbol, observed_at DESC",
+            (as_of,),
+        ).fetchall()
+    except Exception:
+        return {}
+    return {
+        r[0]: {"observed_at": r[1], "eps_ttm": r[2], "dps_annual": r[3],
+               "book_value_per_share": r[4], "loss_making": r[5]}
+        for r in rows
     }
 
 
