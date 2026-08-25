@@ -1,0 +1,504 @@
+"""
+Walk-forward backtest of the composite score.
+
+WHAT THIS ANSWERS
+-----------------
+Does a higher composite score actually precede better forward returns on the
+EGX? Nothing in this app has ever established that. Every correctness fix so far
+proved the score is internally consistent and means what it says — a property
+entirely independent of whether it predicts anything.
+
+METHOD
+------
+Fetch a long daily history per symbol once, cached to disk. Walk forward monthly.
+At each date score every eligible symbol using ONLY bars up to that date, then
+measure forward returns at 21 / 63 / 126 trading days.
+
+The primary metric is the INFORMATION COEFFICIENT: at each date, the Spearman
+rank correlation between score and forward return ACROSS stocks; then the mean
+and t-statistic of those per-date ICs. Each date contributes one observation, so
+overlapping forward windows cannot inflate significance the way they would if
+42,000 symbol-dates were treated as independent samples.
+
+IC also happens to be the metric most robust to this dataset's three biggest
+distortions — survivorship, EGP devaluations, and market-wide moves — because
+all three shift the whole cross-section at once and therefore largely cancel in
+a rank correlation, while they dominate absolute bucket returns.
+
+WHAT IT DELIBERATELY DOES NOT TEST
+----------------------------------
+Fundamentals. `pe_data` holds a single snapshot of today, and
+`fundamentals_history` only began collecting on 2026-08-25. Passing today's P/E
+into a 2024 score would be look-ahead bias severe enough to manufacture any
+result. Quality is therefore scored on its technical inputs only, and
+Risk-Adjusted's verdict is withheld entirely (see RISK_FREE_RATE below).
+
+Run:  python -m scripts.backtest            (from egx-api-be)
+      python -m scripts.backtest --quick    (small universe, for a smoke test)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pickle
+import sys
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app.core.composite import (  # noqa: E402
+    CATEGORY_ORDER,
+    DEFAULT_WEIGHTS,
+    classify_signal,
+    compute_composite,
+)
+from app.core.constants import (  # noqa: E402
+    DEFAULT_RISK_FREE_RATE_PCT,
+    MACRO_TREND_DOWN_PCT,
+    MACRO_TREND_UP_PCT,
+)
+from app.core.extras_builder import build_composite_extras  # noqa: E402
+from app.core.index_membership import get_index_membership  # noqa: E402
+from app.core.indicators import compute_all  # noqa: E402
+
+BENCHMARK = "EGX30"
+BARS_TO_FETCH = 5000          # ~20 years; the practical server-side ceiling
+MIN_HISTORY_BARS = 250        # a year of prior data before a stock is scorable
+REBALANCE_EVERY = 21          # trading days between scoring dates (~monthly)
+HORIZONS = (21, 63, 126)      # forward-return windows, in trading days
+
+# Flat, and deliberately so. Egypt's policy rate ran from roughly 8% (2020) to
+# 27% (2024); the app stores one current value. Rather than hardcode
+# half-remembered rates into a validation exercise, run flat and WITHHOLD
+# Risk-Adjusted's verdict — it is reported but must not be read as evidence
+# about whether that category earns its weight.
+RISK_FREE_RATE = float(DEFAULT_RISK_FREE_RATE_PCT)
+CONFOUNDED_CATEGORIES = {"risk_adjusted"}
+
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+
+# The vendored client wraps every call in @retry(Exception, tries=20, delay=0.5,
+# backoff=0) — a flat half-second retry twenty times, which hammers the endpoint
+# rather than backing off. Throttle ourselves and treat "no data" as permanent.
+FETCH_PAUSE_SECONDS = 0.4
+
+# HARD ceiling per symbol, enforced by killing a child process.
+#
+# This is not belt-and-braces, it is required: the vendored client calls
+# `get_hist(..., timeout=-1)`, i.e. NO timeout, so an unresponsive websocket
+# blocks forever — and the 20-try retry decorator wrapped around it can re-enter
+# that hang twenty times. Observed directly: a full-universe run wedged on one
+# symbol and made zero progress for minutes while looping on "timed out,
+# retrying in 0.5 seconds". A thread cannot be killed in Python, so the fetch
+# runs in a child process that can be terminated.
+FETCH_TIMEOUT_SECONDS = 45
+
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+
+def _cache_path(symbol: str) -> str:
+    return os.path.join(CACHE_DIR, f"{symbol.upper()}.pkl")
+
+
+def _fetch_worker(symbols: list) -> None:
+    """
+    Child-process body: fetch a BATCH, writing each symbol as it completes.
+
+    Batched because Windows spawns a fresh interpreter per process, and
+    re-importing pandas/numpy/app.core cost more than the fetch itself —
+    measured at ~37 s per symbol one-at-a-time versus ~6 s for the fetch alone.
+    Writing incrementally is what makes a mid-batch kill safe: whatever landed
+    stays cached and only the remainder is retried.
+    """
+    from app.vendor.egxpy import get_OHLCV_data
+
+    for symbol in symbols:
+        path = _cache_path(symbol)
+        if os.path.exists(path):
+            continue
+        try:
+            df = get_OHLCV_data(symbol, "EGX", "Daily", BARS_TO_FETCH)
+        except Exception:
+            df = None
+
+        if df is not None and not df.empty:
+            df.columns = [c.lower() for c in df.columns]
+            df = df[~df.index.duplicated(keep="last")].sort_index()
+        else:
+            df = None
+
+        with open(path, "wb") as f:
+            pickle.dump(df, f)
+        time.sleep(FETCH_PAUSE_SECONDS)
+
+
+def fetch_batch(symbols: list) -> int:
+    """
+    Fetch a batch in one child process, killing it if it STOPS MAKING PROGRESS.
+
+    A fixed per-batch budget would either cut short a healthy batch or waste
+    minutes on a wedged one. Watching the cache directory instead means the
+    child is killed only when it has genuinely stalled — which is the failure
+    mode the vendored client produces, since it passes `timeout=-1` (no
+    timeout) and retries a hung socket up to twenty times.
+
+    Returns how many of the batch are now cached. Uncached symbols are simply
+    retried by the next pass, so this is safe to call repeatedly.
+    """
+    import multiprocessing as mp
+
+    todo = [s for s in symbols if not os.path.exists(_cache_path(s))]
+    if not todo:
+        return len(symbols)
+
+    proc = mp.Process(target=_fetch_worker, args=(todo,), daemon=True)
+    proc.start()
+
+    done = last_change = 0
+    stall_started = time.time()
+    while proc.is_alive():
+        proc.join(2)
+        done = sum(1 for s in todo if os.path.exists(_cache_path(s)))
+        if done != last_change:
+            last_change, stall_started = done, time.time()
+        elif time.time() - stall_started > FETCH_TIMEOUT_SECONDS:
+            proc.terminate()
+            proc.join(5)
+            break
+
+    return sum(1 for s in symbols if os.path.exists(_cache_path(s)))
+
+
+def load_history(symbol: str, refetch: bool = False):
+    """
+    Daily OHLCV for one symbol, from the disk cache. None if unavailable.
+
+    Read-only by design: workers must never fetch. main() warms the cache
+    serially first, because parallel cold fetches would multiply the vendored
+    client's retry storm across processes.
+    """
+    path = _cache_path(symbol)
+    if not refetch and os.path.exists(path):
+        try:
+            with open(path, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            return None
+
+    fetch_batch([symbol])
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception:
+        return None
+
+
+def universe() -> list:
+    """Symbols to test: the static ticker file plus whatever the feed lists."""
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    syms = set()
+    try:
+        with open(os.path.join(here, "data", "egx_tickers.json"), encoding="utf-8") as f:
+            syms |= {t["symbol"].upper() for t in json.load(f)}
+    except Exception:
+        pass
+    try:
+        from app.core.tradingview import scan
+        syms |= {(r.get("d") or [""])[0].strip().upper()
+                 for r in scan(["name"]) if (r.get("d") or [""])[0]}
+    except Exception:
+        pass
+    return sorted(s for s in syms if s and s != BENCHMARK)
+
+
+# ---------------------------------------------------------------------------
+# Historical macro regime
+# ---------------------------------------------------------------------------
+
+def macro_at(bench_close: pd.Series) -> dict | None:
+    """
+    Rebuild the EGX30 regime as `fetch_macro` would have seen it.
+
+    fetch_macro itself reads the DB, the network AND the clock, and writing to
+    macro_data would pollute the live cache — so it is reproduced here from the
+    benchmark series instead. The production quirks are reproduced exactly, or
+    this would be testing something the app does not do:
+      - iloc[-min(20, n)] is 19 bar-INTERVALS back, not 20
+      - `if (monthly_change and ...)` treats an exact 0.0 as falsy -> sideways
+    Only "bearish" modulates anything; bullish and sideways are exact no-ops.
+    """
+    n = len(bench_close)
+    if n < 5:
+        return None
+    current = float(bench_close.iloc[-1])
+    month_ago = float(bench_close.iloc[-min(20, n)])
+    change = ((current - month_ago) / month_ago * 100) if month_ago else None
+    trend = ("bullish" if (change and change > MACRO_TREND_UP_PCT)
+             else "bearish" if (change and change < MACRO_TREND_DOWN_PCT)
+             else "sideways")
+    return {"egx30": {"trend": trend}}
+
+
+# ---------------------------------------------------------------------------
+# Scoring one symbol across all dates
+# ---------------------------------------------------------------------------
+
+def rebalance_calendar(bench_close: pd.Series) -> list:
+    """
+    The COMMON scoring dates, taken from the benchmark's trading calendar.
+
+    Every symbol must be scored on the same dates or the primary metric breaks:
+    the Information Coefficient is a rank correlation computed ACROSS stocks on
+    a given date. Scoring each symbol at offsets from its own first bar (the
+    obvious implementation) produced 4,721 distinct dates for 221 symbols —
+    a median of 6 stocks per date, far too thin a cross-section to correlate.
+    """
+    idx = bench_close.index
+    usable = len(idx) - max(HORIZONS)
+    return [idx[i] for i in range(MIN_HISTORY_BARS, usable, REBALANCE_EVERY)]
+
+
+def score_symbol(symbol: str, bench_close: pd.Series, dates: list) -> list:
+    """
+    Every (date, score, category scores, forward returns) row for one symbol,
+    evaluated on the shared rebalance calendar.
+
+    Runs in a worker process; returns plain data only.
+    """
+    df = load_history(symbol)
+    if df is None or len(df) < MIN_HISTORY_BARS + max(HORIZONS):
+        return []
+
+    tier = get_index_membership(symbol)
+    close = df["close"]
+    out = []
+
+    for as_of in dates:
+        # Bars STRICTLY up to the rebalance date. searchsorted keeps this exact
+        # even when the symbol halted on a day the index traded.
+        i = int(df.index.searchsorted(as_of, side="right"))
+        if i < MIN_HISTORY_BARS or i - 1 + max(HORIZONS) >= len(df):
+            continue
+        sl = df.iloc[:i]
+
+        # Align the benchmark BY DATE. Slicing by position silently misaligns
+        # whenever a stock halts on a day the index trades.
+        bench = bench_close[bench_close.index <= as_of]
+        if len(bench) < 60:
+            continue
+
+        try:
+            indicators = compute_all(sl)
+            built = build_composite_extras(
+                sl, indicators,
+                interval="Daily",
+                egx30_close=bench,
+                include_multi_timeframe=True,
+                risk_free_rate_pct=RISK_FREE_RATE,
+                # Fundamentals are a today-only snapshot — passing them here
+                # would be look-ahead. This is what fundamentals_history will
+                # eventually make possible.
+                pe_ratio=None, dividend_yield=None, loss_making=None,
+                index_membership=tier,
+            )
+            result = compute_composite(
+                indicators,
+                extras=built["extras"],
+                weights=DEFAULT_WEIGHTS,          # pinned, not read from the DB
+                macro=macro_at(bench),
+            )
+        except Exception:
+            continue
+
+        row = {
+            "symbol": symbol,
+            "date": as_of,
+            "score": result["score"],
+            "signal": result["signal"],
+            # As of the scoring date, for the liquid-only cut. A result that
+            # only holds among names trading a few thousand shares a day is not
+            # a result a retail investor could have acted on.
+            "avg_volume": float(sl["volume"].tail(20).mean()),
+        }
+        for name in CATEGORY_ORDER:
+            row[f"cat_{name}"] = result["categories"][name]["score"]
+
+        p0 = float(close.iloc[i - 1])
+        if p0 <= 0:
+            continue
+        for h in HORIZONS:
+            pf = float(close.iloc[i - 1 + h])
+            row[f"fwd_{h}"] = (pf / p0 - 1.0) * 100.0
+        out.append(row)
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Analysis
+# ---------------------------------------------------------------------------
+
+def information_coefficient(panel: pd.DataFrame, score_col: str, horizon: int):
+    """
+    Mean per-date Spearman rank correlation between a score and forward return.
+
+    Cross-sectional by construction: each date yields ONE observation, so
+    overlapping forward windows cannot inflate the t-statistic.
+    """
+    fwd = f"fwd_{horizon}"
+    per_date = []
+    for _, grp in panel.groupby("date"):
+        g = grp[[score_col, fwd]].dropna()
+        # A rank correlation needs spread; a date where every stock scored the
+        # same is not evidence either way.
+        if len(g) < 10 or g[score_col].nunique() < 3:
+            continue
+        # Spearman computed as Pearson on ranks rather than via
+        # pandas' method="spearman", which imports scipy. This keeps the
+        # backtest runnable on the production venv without adding a dependency
+        # that Vercel would then install for no reason. `.rank()` uses average
+        # ranks for ties, which is the standard definition.
+        ic = g[score_col].rank().corr(g[fwd].rank())
+        if ic == ic:
+            per_date.append(ic)
+
+    if len(per_date) < 5:
+        return {"ic": None, "n_dates": len(per_date), "t_stat": None, "ci95": None}
+
+    arr = np.array(per_date, dtype=float)
+    mean, sd, n = arr.mean(), arr.std(ddof=1), len(arr)
+    se = sd / np.sqrt(n)
+    return {
+        "ic": round(float(mean), 4),
+        "n_dates": n,
+        "t_stat": round(float(mean / se), 2) if se > 0 else None,
+        "ci95": (round(float(mean - 1.96 * se), 4), round(float(mean + 1.96 * se), 4)),
+        "hit_rate": round(float((arr > 0).mean()), 3),
+    }
+
+
+def bucket_returns(panel: pd.DataFrame, horizon: int, by: str = "signal"):
+    """Mean forward return per signal band or score decile."""
+    fwd = f"fwd_{horizon}"
+    if by == "signal":
+        key = panel["signal"]
+        order = ["Strong Sell", "Sell", "Hold", "Buy", "Strong Buy"]
+    else:
+        key = pd.qcut(panel["score"], 10, labels=False, duplicates="drop")
+        order = sorted(k for k in key.dropna().unique())
+
+    rows = []
+    for k in order:
+        sel = panel[key == k][fwd].dropna()
+        if len(sel) == 0:
+            continue
+        rows.append({
+            "bucket": k if by != "signal" else str(k),
+            "n": len(sel),
+            "mean_fwd_pct": round(float(sel.mean()), 2),
+            "median_fwd_pct": round(float(sel.median()), 2),
+            "win_rate": round(float((sel > 0).mean()), 3),
+        })
+    return rows
+
+
+def sanity_checks(panel: pd.DataFrame) -> dict:
+    """
+    Prove the harness can detect "no signal" before any positive result is
+    believed. A shuffled score must produce IC ~ 0; if it does not, the
+    measured IC is an artefact of the plumbing rather than of the score.
+    """
+    rng = np.random.default_rng(12345)
+    shuffled = panel.copy()
+    shuffled["score"] = rng.permutation(shuffled["score"].values)
+    placebo = information_coefficient(shuffled, "score", HORIZONS[0])
+    return {
+        "placebo_ic": placebo["ic"],
+        "placebo_t": placebo["t_stat"],
+        "passes": placebo["ic"] is not None and abs(placebo["ic"]) < 0.03,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Driver
+# ---------------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--quick", action="store_true", help="small universe smoke test")
+    ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--out", default=os.path.join(CACHE_DIR, "panel.pkl"))
+    args = ap.parse_args()
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
+    syms = universe()
+    if args.quick:
+        syms = syms[:25]
+    print(f"universe: {len(syms)} symbols")
+
+    print(f"fetching benchmark {BENCHMARK} ...")
+    bench_df = load_history(BENCHMARK)
+    if bench_df is None:
+        print("FATAL: no benchmark data — relative strength and beta need it")
+        return 1
+    bench_close = bench_df["close"]
+    print(f"  {len(bench_close)} bars, {bench_close.index[0].date()} .. {bench_close.index[-1].date()}")
+
+    # Warm the disk cache serially: parallel cold fetches would multiply the
+    # vendored client's flat-retry storm across processes.
+    print("fetching histories (cached after first run) ...")
+    t0 = time.time()
+    missing = [s for s in syms if not os.path.exists(_cache_path(s))]
+    BATCH = 20
+    for i in range(0, len(missing), BATCH):
+        chunk = missing[i:i + BATCH]
+        fetch_batch(chunk)
+        n = i + len(chunk)
+        rate = (time.time() - t0) / max(n, 1)
+        print(f"  {n}/{len(missing)}  ({time.time()-t0:.0f}s, {rate:.1f}s/sym, "
+              f"~{rate*(len(missing)-n)/60:.0f}min left)", flush=True)
+
+    still_missing = [s for s in syms if not os.path.exists(_cache_path(s))]
+    print(f"  fetch done in {time.time()-t0:.0f}s; "
+          f"{len(still_missing)} stalled and were not cached (re-run to retry)")
+
+    dates = rebalance_calendar(bench_close)
+    print(f"scoring across {args.workers} workers "
+          f"on {len(dates)} shared rebalance dates "
+          f"({dates[0].date()} .. {dates[-1].date()}) ...")
+    t0 = time.time()
+    rows = []
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        futs = {pool.submit(score_symbol, s, bench_close, dates): s for s in syms}
+        for n, fut in enumerate(as_completed(futs), 1):
+            try:
+                rows.extend(fut.result())
+            except Exception as e:
+                print(f"  {futs[fut]}: {type(e).__name__} {e}")
+            if n % 50 == 0:
+                print(f"  {n}/{len(syms)} symbols  ({time.time()-t0:.0f}s)")
+
+    if not rows:
+        print("FATAL: no scored rows produced")
+        return 1
+
+    panel = pd.DataFrame(rows)
+    panel.to_pickle(args.out)
+    print(f"\npanel: {len(panel):,} symbol-dates, "
+          f"{panel['symbol'].nunique()} symbols, {panel['date'].nunique()} dates")
+    print(f"span: {panel['date'].min().date()} .. {panel['date'].max().date()}")
+    print(f"saved -> {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
