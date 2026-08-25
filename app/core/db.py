@@ -183,6 +183,24 @@ def init_db(db: _DB) -> None:
         "ON fundamentals_history(symbol, observed_at DESC)"
     )
 
+    # Market-condition readings (see core/regime.py). Append-only. The reading
+    # averages whatever the dashboard has already scored, so coverage varies
+    # through the day — a persisted last-known-good is what lets the card show
+    # this morning's reading instead of "no data" on a cold cache.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS market_regime (
+            id BIGSERIAL PRIMARY KEY,
+            observed_at TEXT NOT NULL,
+            mean_score DOUBLE PRECISION,
+            n_symbols INTEGER,
+            band TEXT
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_market_regime_time "
+        "ON market_regime(observed_at DESC)"
+    )
+
     for key in ("pe_last_successful_fetch", "pe_last_attempt_status"):
         db.execute(
             "INSERT INTO settings (key, value) VALUES (%s, '') ON CONFLICT (key) DO NOTHING",

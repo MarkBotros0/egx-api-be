@@ -1441,3 +1441,105 @@ def test_analysis_router_does_not_redefine_bars_per_year():
         "analysis.py redefines the bars-per-year table — import "
         "extras_builder.BARS_PER_YEAR instead"
     )
+
+
+# ---------------------------------------------------------------------------
+# Market condition reading — the only forecast-shaped surface
+# ---------------------------------------------------------------------------
+
+def test_regime_bands_match_the_measured_terciles():
+    """
+    Cutoffs come from 221 readings, 2007-2026. If someone retunes them by feel
+    the historical numbers shown beside them stop being true of the band.
+    """
+    from app.core.regime import REGIME_MIXED_MAX, REGIME_WEAK_MAX, classify_regime
+
+    assert classify_regime(40.0, 40)["band"] == "weak"
+    assert classify_regime(REGIME_WEAK_MAX, 40)["band"] == "mixed"
+    assert classify_regime(48.0, 40)["band"] == "mixed"
+    assert classify_regime(REGIME_MIXED_MAX, 40)["band"] == "broad"
+    assert classify_regime(58.0, 40)["band"] == "broad"
+
+
+def test_regime_refuses_to_classify_thin_coverage():
+    """
+    The batch scorer returns partial results on deadline. Averaging six stocks
+    into a confident market reading is worse than saying nothing.
+    """
+    from app.core.regime import MIN_SYMBOLS_FOR_REGIME, classify_regime
+
+    thin = classify_regime(52.0, MIN_SYMBOLS_FOR_REGIME - 1)
+    assert thin["band"] is None
+    assert "at least" in thin["summary"]
+
+    ok = classify_regime(52.0, MIN_SYMBOLS_FOR_REGIME)
+    assert ok["band"] == "broad"
+
+
+def test_regime_carries_its_own_evidence():
+    """
+    Every claim the UI makes must come from here, so the measurement and the
+    wording can't drift apart. The horizon in particular is load-bearing: 21
+    and 126 days were both tested and neither was significant.
+    """
+    r = classify_regime_or_skip()
+    for key in ("hist_median_3m_pct", "hist_positive_rate", "observations",
+                "association_rho", "association_n", "horizon_days"):
+        assert key in r, f"regime reading is missing {key}"
+    assert r["horizon_days"] == 63
+
+
+def classify_regime_or_skip():
+    from app.core.regime import classify_regime
+    return classify_regime(52.0, 40)
+
+
+def test_weak_band_is_not_advertised_as_negative():
+    """
+    The EGX rose a lot in EGP terms over the window, so the weak band means
+    "flat", not "falling". Claiming a crash is as wrong as claiming a rally.
+    """
+    from app.core.regime import classify_regime
+
+    weak = classify_regime(40.0, 40)
+    assert weak["hist_median_3m_pct"] > -1.0
+    assert "coin flip" in weak["summary"]
+
+
+def test_regime_reader_and_batch_writer_share_one_cache_key():
+    """
+    The dashboard batch WRITES per-symbol score cache entries; the market
+    reading READS them. If the two spelled the key differently the reading
+    would find zero hits forever and permanently report "not enough data" —
+    a silent failure, with the data sitting right there in the cache.
+    """
+    import app.core.cache as cache
+    from app.routers.analysis import (
+        composite_cache_key, read_cached_scores, scoring_cache_context,
+    )
+
+    _, _, _, _, tags = scoring_cache_context()
+    key = composite_cache_key("comi", "Daily", tags)
+    cache.set(key, {"score": 61.0, "signal": "Strong"})
+    try:
+        got = read_cached_scores(["COMI"], "Daily")
+        assert "COMI" in got, "reader missed a score the writer's key just stored"
+        assert got["COMI"]["score"] == 61.0
+    finally:
+        cache._store.pop(key, None)
+
+
+def test_regime_reader_ignores_error_entries():
+    """A cached failure must not be averaged in as if it were a score."""
+    import app.core.cache as cache
+    from app.routers.analysis import (
+        composite_cache_key, read_cached_scores, scoring_cache_context,
+    )
+
+    _, _, _, _, tags = scoring_cache_context()
+    key = composite_cache_key("ZZZZ", "Daily", tags)
+    cache.set(key, {"error": "no data"})
+    try:
+        assert read_cached_scores(["ZZZZ"], "Daily") == {}
+    finally:
+        cache._store.pop(key, None)

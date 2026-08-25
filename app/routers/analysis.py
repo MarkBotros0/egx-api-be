@@ -158,6 +158,61 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict,
         return symbol, {"error": str(e)}
 
 
+def scoring_cache_context():
+    """
+    The three non-price inputs that make a composite score what it is:
+    weights, macro regime, risk-free rate. Returns (weights, macro, tags).
+
+    Extracted so `_handle_batch` (which WRITES per-symbol score cache entries)
+    and `read_cached_scores` (which READS them) derive the key from one place.
+    Building the key twice is how a reader silently gets zero hits forever and
+    a feature quietly reports "no data" while the data is right there.
+    """
+    try:
+        db = get_db()
+        weights = get_weights_from_db(db)
+    except Exception:
+        db = None
+        weights = dict(DEFAULT_WEIGHTS)
+
+    macro = None
+    if db is not None:
+        try:
+            macro = fetch_macro(db)
+        except Exception:
+            macro = None
+
+    macro_tag = str(((macro or {}).get("egx30") or {}).get("trend") or "n/a")
+    risk_free_rate_pct = _read_risk_free_rate(db)
+    tags = (weights_hash(weights), macro_tag, f"rfr{risk_free_rate_pct:g}")
+    return db, weights, macro, risk_free_rate_pct, tags
+
+
+def composite_cache_key(symbol: str, interval: str, tags) -> str:
+    """The one place a per-symbol composite cache key is spelled."""
+    w_hash, macro_tag, rfr_tag = tags
+    return make_key("composite", symbol.upper(), interval, w_hash, macro_tag, rfr_tag)
+
+
+def read_cached_scores(symbols: list, interval: str = "Daily") -> dict:
+    """
+    Composite scores for `symbols` that are ALREADY cached. Never fetches.
+
+    The market-condition reading needs a market-wide average, and scoring 79
+    symbols cannot complete inside a serverless request — measured at over
+    400 s against a cold cache, because each symbol pulls 400 bars through a
+    client that retries hard on socket timeouts. So the reading consumes what
+    the dashboard has already scored and reports its coverage honestly.
+    """
+    _, _, _, _, tags = scoring_cache_context()
+    out = {}
+    for sym in symbols:
+        cached = get(composite_cache_key(sym, interval, tags))
+        if cached is not None and "error" not in cached and cached.get("score") is not None:
+            out[sym.upper()] = cached
+    return out
+
+
 def _handle_batch(symbols_str: str, interval: str):
     symbols = [s.strip().upper() for s in symbols_str.split(",") if s.strip()]
     if not symbols:
@@ -167,31 +222,12 @@ def _handle_batch(symbols_str: str, interval: str):
 
     symbols = list(dict.fromkeys(symbols))
 
-    try:
-        db = get_db()
-        weights = get_weights_from_db(db)
-    except Exception:
-        db = None
-        weights = dict(DEFAULT_WEIGHTS)
-    w_hash = weights_hash(weights)
-
-    # Macro is shared across all batch symbols and TTL-cached per-hour
-    macro = None
-    if db is not None:
-        try:
-            macro = fetch_macro(db)
-        except Exception:
-            macro = None
-    macro_trend = ((macro or {}).get("egx30") or {}).get("trend") or "n/a"
-    # Include macro regime in the cache key so scores invalidate when the
-    # modulation changes (bullish → bearish flip).
-    macro_tag = str(macro_trend)
-
-    # Risk-free rate is a scoring input (Risk-Adjusted compares against it),
-    # so it belongs in the cache key too — otherwise changing it in settings
-    # leaves stale scores served for the whole TTL.
-    risk_free_rate_pct = _read_risk_free_rate(db)
-    rfr_tag = f"rfr{risk_free_rate_pct:g}"
+    # Weights, macro regime and risk-free rate are the non-price scoring
+    # inputs, so all three belong in the cache key: without them a bullish→
+    # bearish flip, or a settings change, serves stale scores for the whole
+    # TTL. Derived through the shared helper so `read_cached_scores` cannot
+    # spell the same key differently and silently find nothing.
+    db, weights, macro, risk_free_rate_pct, tags = scoring_cache_context()
 
     # EGX30 fetched ONCE for the whole batch (not per symbol) and under the
     # same cache key /api/analysis uses, so relative strength is measured
@@ -203,7 +239,7 @@ def _handle_batch(symbols_str: str, interval: str):
     todo = []
 
     for sym in symbols:
-        ck = make_key("composite", sym, interval, w_hash, macro_tag, rfr_tag)
+        ck = composite_cache_key(sym, interval, tags)
         cached = get(ck)
         if cached is not None:
             if "error" in cached:
@@ -217,7 +253,7 @@ def _handle_batch(symbols_str: str, interval: str):
         pool = ThreadPoolExecutor(max_workers=BATCH_WORKERS)
         try:
             def _cache_on_done(sym: str):
-                ck = make_key("composite", sym, interval, w_hash, macro_tag, rfr_tag)
+                ck = composite_cache_key(sym, interval, tags)
                 def _cb(f):
                     try:
                         _s, r = f.result()

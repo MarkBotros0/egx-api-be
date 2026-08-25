@@ -46,6 +46,7 @@ egx-api-be/                     # Python FastAPI backend
       pe_fetch.py               # Fundamentals feed (P/E, dividend yield, loss-making) via TradingView scanner
       tradingview.py            # Shared TradingView scanner client (URL/headers), also used by tickers.py
       index_membership.py       # Static EGX30/70/100/NILEX lookup — no network, for the scoring hot path
+      regime.py                 # Market-condition reading: bands + the evidence behind them
       constants.py              # Shared constants (thresholds, lookbacks)
       json_encoding.py          # Float/NaN JSON safety helpers
     routers/
@@ -53,6 +54,7 @@ egx-api-be/                     # Python FastAPI backend
       portfolio.py              # CRUD /api/portfolio
       portfolio_analysis.py     # GET/POST /api/portfolio_analysis
       pe.py                     # GET /api/pe ; POST /api/pe/refresh (cron-triggered)
+      market_regime.py          # GET /api/market_regime (market-wide condition reading)
       ohlcv.py                  # GET /api/ohlcv
       compare.py                # GET /api/compare
       historical.py             # GET /api/historical
@@ -243,6 +245,48 @@ symbols and leaves 240 stale is worse than all-stale, because nothing on screen
 distinguishes them. Rows with no P/E, DY or EPS are skipped so
 `get_pe_for_symbol` can't return a truthy all-null dict. `pe_ratio > 300` is
 dropped at ingest (the live max is ~2756, which would render as "P/E 2756.0").
+
+### GET /api/market_regime
+
+**The only forecast-shaped surface in the app, and the one thing the backtest
+supported.** Returns the average composite across the EGX30+EGX70 constituents,
+its band, and the historical record behind that band.
+
+The per-stock score cannot rank stocks (IC ≈ 0). The market-wide AVERAGE of
+those same scores does carry a measured association with the market itself —
+rank correlation **+0.318 with the EGX30's next 63 trading days, t=2.84 across
+74 NON-OVERLAPPING periods**. Overlapping windows were checked explicitly:
+de-overlapping made the correlation stronger (+0.170 → +0.318), so it is not an
+overlap artifact. 21-day and 126-day horizons were both tested and neither was
+significant — do not relabel the horizon.
+
+Bands (terciles of 221 readings, 2007–2026), against the next three months of
+EGX30:
+
+| band | reading | median | 3m positive |
+|---|---|---|---|
+| weak | < 45.1 | −0.1% | 49% |
+| mixed | 45.1–51.5 | +5.5% | 68% |
+| broad | ≥ 51.5 | +6.7% | 70% |
+
+Read as **weak-versus-not**, not a dial: the top two bands are not meaningfully
+different. And the EGX rose substantially in EGP terms over the window, so
+"weak" means flat, not falling.
+
+**It never fetches.** Scoring the 79-symbol universe on demand does not finish
+inside a serverless request — measured at >400 s cold, because each symbol
+pulls 400 bars through a client that retries hard on socket timeouts. Instead
+it reads scores the dashboard batch path has already cached, via
+`analysis.read_cached_scores`, and reports coverage in `n_symbols`. Below
+`MIN_SYMBOLS_FOR_REGIME` (15) it refuses to classify and serves the last stored
+reading flagged `stale` rather than averaging a handful into a confident number.
+
+**The cache key is spelled once**, in `analysis.composite_cache_key` /
+`scoring_cache_context`, because the batch path WRITES those entries and this
+endpoint READS them. Two independent spellings would mean zero hits forever and
+a permanent, silent "not enough data".
+`tests/test_fixes.py::test_regime_reader_and_batch_writer_share_one_cache_key`
+pins it.
 
 ### GET /api/historical, GET /api/compare
 Multi-symbol historical data for comparison page.
@@ -576,6 +620,12 @@ pe_data    (symbol PK, company_name, pe_ratio, dividend_yield, loss_making,
                          -- loss_making       -> from diluted EPS; the feed never
                          --                      reports a negative P/E.
 ```
+
+```sql
+market_regime (id, observed_at, mean_score, n_symbols, band)
+```
+Append-only log of market-condition readings, so the card can show this
+morning's reading rather than "no data" when the score cache is cold.
 
 `loss_making` is added by an `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` in
 `init_db`. There is no migration framework — every statement there is
