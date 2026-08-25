@@ -1,0 +1,519 @@
+# EGX Analytics — Project Guide for Claude
+
+This file orients future Claude sessions to the codebase. Read it first before exploring.
+
+> **This file is mirrored in both repos** — `egx-api-be/CLAUDE.md` and
+> `egx-api-fe/CLAUDE.md` — because they are separate git repositories and a
+> session usually has only one of them open. It documents the whole app, both
+> halves, so **the two copies must be kept identical**. If you change one,
+> change the other in the same breath. The working copy at the workspace root
+> (`D:\Projects\egx-api\CLAUDE.md`) is outside both repos and is not tracked;
+> treat the in-repo copies as canonical.
+
+## What This App Is
+
+An educational stock market analysis and portfolio tracker for the **Egyptian Exchange (EGX)**. The target user is a mobile-first Egyptian retail investor learning to analyze stocks. Every feature has an educational component (LearnTooltip, Learn page, "Learn more" links on advice).
+
+**Key constraint:** The user primarily uses the app on phone — always design mobile-first.
+
+## Architecture
+
+**Next.js frontend + Python FastAPI backend, deployed to Vercel:**
+- **Frontend:** Next.js 14 App Router, React 18, TypeScript, Tailwind CSS, Recharts (in `egx-api-fe/`)
+- **Backend:** Python FastAPI app in `egx-api-be/` (Vercel Python runtime, 30s timeout)
+- **Database:** Neon Postgres (serverless, accessed via `psycopg` + `psycopg_pool`)
+- **Data source:** `egxpy`, **vendored** at `egx-api-be/app/vendor/egxpy` — `from app.vendor.egxpy import get_OHLCV_data, get_EGXdata, get_EGX_intraday_data`
+
+  It is vendored because its upstream repo (`github.com/egxlytics/egxpy`) was deleted or made private — GitHub returns "Repository not found" even to an authenticated account that previously installed from it, and there is no PyPI release. Vercel builds failed at `uv lock` with `could not read Username`; deploys had been surviving on a warm build cache holding an already-cloned copy. There is no upstream to pull from, so **treat `app/vendor/egxpy` as our code** — edit it directly and note any deviation from v1.1.0 in its `__init__.py`. It is a thin wrapper over `tvDatafeed`, which is still public and installs from git normally. MIT licensed, © 2025 EGXLytics, LICENSE retained alongside the source.
+
+Environment variables: `DATABASE_URL` (Neon connection string, includes `sslmode=require`).
+
+## Directory Layout
+
+The repo is split into two top-level directories — **`egx-api-be/`** (Python backend) and **`egx-api-fe/`** (Next.js frontend). CLAUDE.md previously described a flat `api/` layout; that is obsolete.
+
+```
+egx-api-be/                     # Python FastAPI backend
+  app/
+    main.py                     # FastAPI app entry; wires routers
+    core/
+      db.py                     # Neon Postgres connection + schema init (seeds weight_* keys + pe_* settings)
+      cache.py                  # In-memory 5-min TTL cache
+      composite.py              # Composite score engine (8 categories, macro modulation)
+      indicators.py             # All technical indicators (pandas/numpy only)
+      levels.py                 # Key levels (nearest support/resistance) + entry/exit zone computation
+      macro_fetch.py            # Macro data fetch helper (EGX30, USD/EGP, CBE rate)
+      pe_fetch.py               # EGX P/E scraper (MarketPECompanies.aspx) + name→symbol resolver
+      constants.py              # Shared constants (thresholds, lookbacks)
+      json_encoding.py          # Float/NaN JSON safety helpers
+    routers/
+      analysis.py               # GET /api/analysis (single stock + batch mode)
+      portfolio.py              # CRUD /api/portfolio
+      portfolio_analysis.py     # GET/POST /api/portfolio_analysis
+      pe.py                     # GET /api/pe ; POST /api/pe/refresh (cron-triggered)
+      ohlcv.py                  # GET /api/ohlcv
+      compare.py                # GET /api/compare
+      historical.py             # GET /api/historical
+      intraday.py               # GET /api/intraday
+      tickers.py                # GET /api/tickers
+      settings.py               # GET/PUT /api/settings  (weights live here too, section=weights)
+      macro.py                  # GET /api/macro
+      watchlist.py              # GET/POST/DELETE /api/watchlist
+    schemas/                    # (empty — Pydantic response shapes are inline dicts)
+
+egx-api-fe/                     # Next.js frontend
+  src/app/
+    page.tsx                    # Dashboard
+    stock/[symbol]/page.tsx     # Stock detail
+    portfolio/page.tsx          # Portfolio tracker
+    compare/page.tsx            # Multi-stock comparison
+    learn/page.tsx              # Educational content (has id anchors for learn_concept deep links)
+    components/                 # React components
+    lib/
+      api.ts                    # Typed fetch wrappers
+      types.ts                  # TypeScript interfaces
+      constants.ts              # Frontend constants + fallback weight presets
+
+public/                         # Static assets, PWA manifest
+```
+
+**Important file-naming note:** core backend modules are `composite.py`, `db.py`, `indicators.py`, `macro_fetch.py` — no leading underscore. Older CLAUDE.md referenced `_composite.py` / `_db.py` etc.; those names no longer exist.
+
+**Weights endpoint:** weights are NOT a separate `weights.py`. They are served via `GET/PUT /api/settings?section=weights` in `app/routers/settings.py`.
+
+## Pages & Features
+
+### Dashboard (`src/app/page.tsx`)
+- Sticky search bar (mobile) with live symbol/name filtering
+- Index filter pills (EGX30, EGX70, EGX100, NILEX) + sector filter pills, horizontal scroll on mobile
+- Stock count display showing filtered results
+- **Paginated grid** of `StockCard` components (24 per page, "Load More" with remaining count)
+- Each `StockCard` has a **30-day sparkline mini chart** colored by trend (gain/loss)
+- Price data per card is **lazy-loaded on scroll** (avoids hitting the API for off-screen cards)
+- `StockCard` accepts optional `compositeScore`/`compositeSignal` props — renders a mini `CompositeGauge` badge when provided
+- Watchlist sidebar panel (uses `useWatchlist()` hook)
+
+### Stock Detail (`src/app/stock/[symbol]/page.tsx`)
+- Sticky header on mobile (hides on desktop) with Watch/Watching toggle
+- Interval selector: Daily / Weekly / Monthly
+- Bar count selector: 60 / 100 / 200 / 500
+- Chart overlay toggles with color indicators: SMA 20, SMA 50, SMA 200, EMA 12, EMA 26, Bollinger Bands
+- **Composite Score card** — `CompositeGauge` (lg) + `ScoreBreakdown` side by side; divergence/multi-timeframe/BB squeeze pill callouts below
+- Price chart with support/resistance/Fibonacci ReferenceLines
+- Volume chart, RSI/MACD/Stochastic/OBV tabbed indicators
+- StatsPanel with Golden/Death Cross badge, Beta, ATR, RSI, volatility, 52W range
+- Every overlay/indicator/stat has a LearnTooltip
+- Re-fetches analysis when composite weights change (listens to `weightsVersion` from `ScoreWeightsProvider`)
+
+### Portfolio (`src/app/portfolio/page.tsx`)
+- Add/Edit/Delete holdings with live re-analysis after each change
+- **Target Price** and **Stop Loss** tracked per holding (optional) — drive distance calculations and stop-loss/target-hit signals
+- **Notes** field per holding for custom annotations
+- Cash balance management via `updateCash()` → `PUT /api/settings`
+- Mobile: FAB (floating action button) to add; full-screen modal form
+- Desktop: inline form, top-right "+ Add Stock" button
+- Sections stacked: MacroCard → PortfolioSummary → RiskDashboard → HoldingsTable → CorrelationHeatmap → MonteCarloChart → AdvicePanel
+- Re-runs analysis when composite weights change (listens to `weightsVersion`)
+
+### Compare (`src/app/compare/page.tsx`)
+- 2–5 stock selection with autocomplete dropdown
+- Customizable date range (start/end date inputs)
+- Normalized performance chart (multi-series line, one per stock)
+- Stats per stock: Total Return, Volatility, Max Drawdown
+- Mobile: stat cards. Desktop: stat table.
+
+### Learn (`src/app/learn/page.tsx`)
+- Expandable `<details>` sections using the `Concept` component pattern (title, definition, whyItMatters, howToUse)
+- Sections: Market Basics, Technical Analysis, Advanced Technical Indicators, **Composite Score**, Risk Management, Portfolio Risk Metrics, Macro Context, EGX — Egyptian Exchange
+- Signals link here via `learn_concept` → `/learn#{concept}` anchors
+
+## PWA / Offline
+
+- **Service worker:** `public/sw.js`, registered by `src/app/components/ServiceWorkerRegistrar.tsx`
+- **Strategy:** network-first for `/api/*` and navigation; cache-first for static assets
+- **Manifest:** `public/manifest.json` with maskable icons (192, 512) and SVG logo
+- Standalone display mode (app-like install experience)
+- iOS meta tags: `apple-web-app-capable`, status bar style, splash screens
+- Safe-area insets via `env(safe-area-inset-*)` CSS variables
+
+## API Endpoints
+
+### GET /api/tickers
+Returns list of all EGX tickers. Query: `index`, `sector`, `search` (case-insensitive substring match on symbol + name). Ticker list loaded once per container (module-level cache).
+
+### GET /api/ohlcv
+Raw OHLCV data. Query: `symbol`, `interval`, `bars`.
+
+### GET /api/analysis
+**The most important single-stock endpoint.** Returns OHLCV + all indicators + beta + support/resistance + fibonacci + MA crossovers + composite score.
+- Fetches `max(bars, 400)` internally for SMA 200 accuracy, trims output
+- Fetches EGX30 alongside for Beta computation (cached)
+- Cache key includes a weight hash so scores invalidate automatically when weights change
+- If interval is Daily, fetches weekly data and computes `multi_timeframe` alignment
+
+Response shape (see `AnalysisResponse` in types.ts):
+```
+{ symbol, interval, bars, ohlcv, indicators, stats, beta,
+  support_resistance, fibonacci, crossovers,
+  composite_score, divergences, volume_price, multi_timeframe, bb_squeeze,
+  key_levels, entry_exit }
+```
+
+- **`key_levels`** — `{current_price, nearest_support, nearest_resistance, room_to_support_pct, room_to_resistance_pct}`. Nearest levels are `{price, distance_pct (signed), strength}` or null. Computed by `levels.compute_key_levels` from `support_resistance`. Consumed by `KeyLevelsCard`.
+- **`entry_exit`** — `{entry_zone, exit_zone}`. Each zone: `{active, confidence, price_range, suggested_stop_loss (entry only), reasons}`. Confidence is `low`/`medium`/`high` or null. Entry zone active when price ≤5% above support AND RSI/Stoch not overbought. Exit zone active when price ≤3% below resistance AND RSI/Stoch overbought. Computed by `levels.compute_entry_exit`. Consumed by `EntryExitCard`.
+
+### GET /api/settings?section=weights, PUT /api/settings?section=weights
+Composite score weights (stored as `weight_*` keys in the `settings` table). Handled in `app/routers/settings.py` — there is no separate `weights.py` (older docs called this `/api/weights`; it is not a real endpoint).
+- GET returns `{ weights: { trend, momentum, volume, volatility, divergence, quality, risk_adjusted, relative_strength }, presets, default }`
+- PUT accepts raw weights (any subset of the 8 keys), merges with current, normalizes to sum to 100, saves and returns normalized values
+- Extending `CATEGORY_ORDER` in `composite.py` automatically extends what this endpoint accepts — the validation loop iterates `CATEGORY_ORDER`.
+
+### GET /api/portfolio, POST/PUT/DELETE
+CRUD for holdings. Stored in `portfolio` table in Turso.
+
+### GET /api/portfolio_analysis
+**The heaviest endpoint.** Per-holding analysis + portfolio-level risk metrics + Monte Carlo + macro + signals.
+- Fetches OHLCV for each holding sequentially (cache helps)
+- Computes composite score per holding (divergence lookback = 30 bars; multi-timeframe skipped to stay within timeout; Risk-Adjusted requires ≥120-day history, else excluded)
+- Applies macro modulation (EGX30 regime) to every per-holding score
+- Risk: with 10+ holdings, can approach 30s timeout
+- Returns `PortfolioAnalysisResponse` (see types.ts)
+
+### GET /api/macro
+Returns `{ egx30, usd_egp, interest_rate }`. 1-hour cache in `macro_data` table. Graceful degradation (returns null values if source fails).
+
+### GET /api/settings, PUT /api/settings
+Key-value settings. Pre-seeded: `cash_available=50000`, `currency=EGP`, `risk_free_rate=25`.
+
+### GET /api/watchlist, POST, DELETE
+User's watched symbols, stored in the `watchlist` table in Turso.
+- GET returns `{ symbols: string[] }` ordered by `added_at`
+- POST body `{ "symbol": "..." }` — idempotent (INSERT OR IGNORE)
+- DELETE `?symbol=XXX`
+
+### GET /api/pe, POST /api/pe/refresh
+Trailing P/E per stock, served from `pe_data`. Populated by a nightly Vercel cron
+(`04:00 UTC`, see `egx-api-be/vercel.json`) that calls `POST /api/pe/refresh`.
+- `GET /api/pe` returns `{ data: [...], last_successful_fetch, last_attempt_status }`
+- `GET /api/pe?symbol=XXX` returns the single row or 404
+- `POST /api/pe/refresh` scrapes [MarketPECompanies.aspx](https://www.egx.com.eg/en/MarketPECompanies.aspx),
+  parses via `pe_fetch.parse_pe_html`, resolves each page row's company name to an
+  egxpy symbol, and upserts. **Never wipes existing rows on failure** — last-known-good is preserved.
+- `PE_REFRESH_SECRET` env var guards manual invocation in production.
+
+**Important:** the EGX page exposes only Company Name / P/E / DY% — no symbol. Name→symbol
+resolution lives in `pe_fetch.match_symbol` with precedence overrides >
+exact-normalized > unique-prefix > jaccard≥0.6. `data/egx_pe_name_overrides.json` is the
+manual-map tail for spelling variants; extend it when new unmatched names appear.
+Unmatched names from each run are stored in `settings.pe_unmatched_names` for debugging.
+
+`pe_data.pe_ratio IS NULL` means the EGX page printed "0" — do NOT read that as "very cheap".
+
+### GET /api/historical, GET /api/compare
+Multi-symbol historical data for comparison page.
+
+### GET /api/intraday
+Intraday (1/5/30 minute) price data.
+
+## Technical Indicators (`egx-api-be/app/core/indicators.py`)
+
+All implemented from first principles — **no external TA libraries**. Each function has a detailed docstring explaining what it measures and why it matters. This is intentional — the app is a learning tool.
+
+**Basic:** `sma`, `ema`, `rsi`, `macd`, `bollinger_bands`, `daily_returns`, `volatility`, `cumulative_returns`
+
+**Advanced:** `atr`, `obv`, `stochastic`, `support_resistance`, `fibonacci_levels`, `ma_crossovers`, `compute_beta`
+
+**Composite engine inputs:**
+- `adx(high, low, close, period=14)` → `(adx_series, plus_di, minus_di)` — trend strength via Wilder's smoothing
+- `mfi(high, low, close, volume, period=14)` → Series — volume-weighted RSI (0-100)
+- `detect_divergences(close, indicator, lookback=60, swing_window=5)` → dict with `{bullish, bearish, hidden_bullish, hidden_bearish, detail}` — swing-based regular + hidden divergences
+- `volume_price_confirmation(close, volume, lookback=20)` → dict with `{classification, price_change_pct, volume_ratio}` — classifies as confirmed_up/down, unconfirmed_up, accumulation, quiet, normal
+- `multi_timeframe_alignment(daily_close, weekly_close)` → dict with `{daily_trend, weekly_trend, aligned, alignment_score}` — compares SMA50 slope on each timeframe
+- `relative_strength(stock_close, benchmark_close, lookback=30)` → dict `{stock_return_pct, benchmark_return_pct, alpha_pct, leader, laggard}` — alpha vs EGX30
+- `annualized_return(close, lookback=252)` → float | None — annualized return compared against T-bill rate in Risk-Adjusted scorer
+- `liquidity_score(volume, index_membership, lookback=20)` → dict `{avg_volume, classification, thin}` — index-aware (EGX30 vs NILEX volume baselines differ ~100x)
+
+`compute_all(df)` returns all array-based indicators (including adx/plus_di/minus_di/mfi) aligned to input dates. Non-array results (support/resistance, fibonacci, crossovers, beta, divergences, volume_price, multi_timeframe) are computed separately in endpoints.
+
+## Composite Score Engine (`egx-api-be/app/core/composite.py`)
+
+Pure functions, no DB access. Called by `analysis.py` and `portfolio_analysis.py`.
+
+**8-category model** (expanded from the original 5 in 2026). Default is the "Beginner Safe" preset — tilted toward stable, leading, cash-beating stocks:
+
+```python
+# "Beginner Safe" default — same as DEFAULT_WEIGHTS
+DEFAULT_WEIGHTS = {
+    "trend": 18, "momentum": 15, "volume": 12, "volatility": 10,
+    "divergence": 8, "quality": 12, "risk_adjusted": 13, "relative_strength": 12,
+}
+
+PRESETS = {
+    "beginner_safe":    DEFAULT_WEIGHTS,
+    "balanced":         # evenly across 8
+    "trend_follower":   # heavy on trend/quality/relative_strength
+    "reversal_hunter":  # heavy on divergence/momentum
+    "income_defensive": # heavy on risk_adjusted/quality/volatility (capital preservation)
+}
+```
+
+**Category scorers (each returns `(score | None, reasons)`):**
+- `score_trend(...)` — price vs SMA50/200, ADX strength, DI±, Golden/Death Cross
+- `score_momentum(...)` — RSI zone, MACD histogram direction, Stochastic crossover
+- `score_volume(...)` — OBV trend, MFI bands, volume-price classification
+- `score_volatility(...)` — Bollinger Band position + squeeze detection
+- `score_divergence(...)` — regular ±15, hidden ±5, double-divergence bonus ±10, baseline 50
+- **`score_quality(multi_timeframe, trend_consistency, current_drawdown_pct, pe_ratio=None)`** — rewards smooth trends + aligned timeframes + shallow drawdowns (penalises whipsaws); now also includes a P/E sub-band (cheap <10 → +15, >30 → -10, loss-making → -15) when `pe_ratio` is supplied. Egypt-tight thresholds (T-bill ~25%).
+- **`score_risk_adjusted(annualized_return_pct, risk_free_rate_pct, vol_ann_pct, atr_pct_of_price, history_days)`** — compares per-stock return to the ~25% T-bill. **Min 120-day history gate**: returns `None` if insufficient data, and renormalization excludes the category
+- **`score_relative_strength(rs_dict)`** — alpha vs EGX30 (leader/laggard classification over 30 days)
+
+**Orchestrator:**
+- `compute_composite(indicators, extras, weights, macro=None)` — calls all 8 scorers, renormalizes weights across categories that returned non-None, applies **macro modulation** post-hoc, and returns `{score, signal, categories, weights, macro_adjustment, macro_context}`
+- **Macro modulation** (`apply_macro_modulation`): applied after the weighted sum, based on EGX30 trend. **Bullish and Sideways are both 1.0× no-ops** — a neutral market must leave scores alone, otherwise every stock carries a permanent penalty. **Bearish shifts the whole distribution down**: above 50 scores are damped 15% toward neutral, below 50 they are pushed a further 15% away from it. Note this is deliberately asymmetric — it is a shift-down, not a symmetric pull-to-neutral. The delta is surfaced to UI as `macro_adjustment`.
+- `get_weights_from_db(db)` — reads `weight_*` keys; **per-key fallback to DEFAULT_WEIGHTS**, so extending CATEGORY_ORDER from 5 → 8 did not break existing DBs (missing new keys just inherit the Beginner Safe defaults).
+- `weights_hash(weights)` — short hash for cache key invalidation; extended automatically to the 8 keys.
+
+Signal bands are **half-open with the lower bound inclusive**, applied AFTER macro modulation:
+
+| Score | Signal |
+|-------|--------|
+| < 20 | Strong Sell |
+| 20–39.99 | Sell |
+| 40–59.99 | Hold |
+| 60–79.99 | Buy |
+| ≥ 80 | Strong Buy |
+
+`classify_signal` in `composite.py` is the canonical implementation. The frontend mirrors it via `scoreBand()` in `egx-api-fe/src/app/lib/constants.ts` — **every** colour, label and badge derives from that one function, so they cannot disagree at a boundary. The constants are named `SCORE_*_MAX` for historical reasons but each is really the *minimum* of the band above it; comparing with `<=` shifts every band down by one.
+
+## One Score Per Stock — READ BEFORE TOUCHING ANY SCORING PATH
+
+The composite score is computed in three places:
+
+| Path | Entry point |
+|------|-------------|
+| Stock detail page | `analysis.py` → `get_analysis` full path |
+| Dashboard cards | `analysis.py` → `_compute_batch_one` |
+| Portfolio rows | `portfolio_analysis.py` → `_analyze` per-holding loop |
+
+**All three MUST produce the same number for the same symbol.** They each used to assemble their own `extras` dict, and the batch path omitted the inputs that `score_quality`, `score_risk_adjusted` and `score_relative_strength` need. Those scorers returned `None`, `compute_composite` renormalized over the remaining 5 of 8 categories, and the categories that vanished were exactly the punitive ones. Measured on identical data: **66 "Buy" on the dashboard card, 45 "Hold" on the detail page** for the same stock. A user tapped a Buy and landed on a Hold.
+
+Rules that keep them aligned:
+
+1. **Never build an `extras` dict by hand.** Call `core/extras_builder.py::build_composite_extras`. `tests/test_fixes.py::test_no_router_hand_rolls_composite_extras` greps the routers and fails if you do.
+2. **One fetch window** — `INTERNAL_BARS_MIN` (400) everywhere. The score depends on the window (volatility, S/R, SMA200, beta), so a "lightweight" 220-bar batch fetch silently rescored every card.
+3. **One divergence lookback** — `DIVERGENCE_LOOKBACK_FULL` (60) everywhere.
+4. **One benchmark series** — fetch EGX30 through the shared `make_key("egx30", exchange, interval, INTERNAL_BARS_MIN)` cache key so relative strength and beta compare against identical data.
+5. **Multi-timeframe is derived by resampling the daily frame** (`W-THU`), not by a separate weekly fetch. It costs no extra network call, which is why the batch and portfolio paths can now afford it, and it guarantees daily and weekly agree.
+6. **Scoring inputs belong in the cache key.** `/api/analysis` keys on `w_hash + macro_tag + rfr_tag`; the batch path keys on the same. Omitting the macro regime meant a bullish→bearish flip updated the dashboard immediately while the detail page served a pre-flip score for the rest of the 15-minute TTL.
+
+If a category legitimately can't be scored (a stock with 60 bars has no 1-year return), it is dropped on *every* page for the same reason — and `ScoreBreakdown` renders it as "excluded — not enough data" rather than advertising a weight it didn't carry.
+
+### Interval calibration (Daily / Weekly / Monthly)
+
+The stock detail page can be viewed on Daily, Weekly or Monthly bars. **Anything that annualizes, spans "one year", or gates on history length MUST scale by `BARS_PER_YEAR[interval]`** (252 / 52 / 12 in `extras_builder.py`) — never the bare `TRADING_DAYS_PER_YEAR` constant.
+
+Hardcoding the daily constants made the non-daily views quietly wrong:
+
+| Input | Bug when weekly bars hit daily constants |
+|-------|------------------------------------------|
+| `annualized_return` | treated 252 *weeks* as one year — a multi-year run reported as a single year's gain, then compared to the 25% T-bill |
+| annualized volatility | weekly σ × √252 instead of √52 — overstated 2.2× |
+| `current_drawdown_pct` | `tail(252)` = a ~5-year drawdown labelled 1-year |
+| `history_days` gate | 120 weekly bars (2.3 y) passed the same gate as 120 daily bars (6 mo) |
+| `relative_strength` | 30 weekly bars compared against a "30-day" label |
+| `multi_timeframe` | resampling weekly→weekly is a no-op, so it compared the timeframe **with itself** |
+
+Together those feed Risk-Adjusted (13%) and Quality (12%) — a quarter of the score. `interval` is now a parameter of `build_composite_extras` and the higher timeframe comes from `_HIGHER_TIMEFRAME_RULE` (Daily→Weekly, Weekly→Monthly, Monthly→none). Tests in `tests/test_fixes.py` assert Daily and Weekly report the same annualized return for the same underlying growth rate.
+
+**Monthly is inherently data-starved**: SMA50/SMA200 need 50/200 *months* (4/16 years) of history, and there is no higher timeframe to align against, so Quality and Trend are scored from fewer inputs there. Daily remains the best-supported view.
+
+## Decision Framework for Beginners
+
+The Learn page's "How to Take a Decision" section and the in-app signals both follow the same 6-step flow. Keep any new guidance consistent with this flow — it is the single source of truth:
+
+1. **Check the macro.** What is the EGX30 trend? In bearish regimes, demand higher scores (≥ 70 instead of 60).
+2. **Check the composite score.** Below 60 = don't buy. Between 50–60 = Watchlist, revisit weekly.
+3. **Check Risk-Adjusted.** Is annualized return comfortably above the ~25% T-bill? If not, be sceptical.
+4. **Check Relative Strength.** Is the stock a leader (outperforming EGX30) or a laggard (underperforming by >10%)?
+5. **Set the stop-loss BEFORE buying.** The house convention is **1.5× ATR below the nearest support** (`STOP_LOSS_ATR_MULTIPLIER` in `core/constants.py`) — anchored to support, not to your entry price, so the number is objective and computable before you buy. `levels.compute_entry_exit`, `entry_price.compute_max_buy_price` and the `atr_stop` signal all use that one constant. Enter the value on the Portfolio add form.
+6. **Size the position at 5–10% max** per stock (2–3% for thin-liquidity / NILEX names).
+
+## Portfolio Risk Metrics (`egx-api-be/app/routers/portfolio_analysis.py`)
+
+- **Sharpe Ratio** — annualized, uses `risk_free_rate` from settings (default 25%)
+- **Sortino Ratio** — downside-only variant
+- **Max Drawdown** — with peak/trough dates and current drawdown
+- **VaR 95% / CVaR 95%** — historical method
+- **Correlation Matrix** — pandas `.corr()` on aligned daily returns
+- **Monte Carlo** — **vectorized numpy**: `np.random.normal(mu, sigma, (1000, 60))`. Never use Python loops for paths. Returns percentile bands (p5/p25/p50/p75/p95) per day.
+- **Avg Composite Score** — mean of per-holding composite scores
+
+**Egypt context:** T-bill rate is ~25% annualized. This is VERY high globally and makes Sharpe ratios lower than in other markets. Always mention this when explaining Sharpe values to the user.
+
+## Signals / Advice System
+
+Returned in `signals` array from portfolio_analysis. Sorted by priority:
+
+| Severity | Icon | Examples |
+|----------|------|----------|
+| `action_required` | `!!` | Stop-loss about to trigger, Death Cross, negative Sharpe, max drawdown > 20%, support broken, strong_sell_composite (score ≤ 20) |
+| `warning` | `!` | Sector/stock concentration, high correlation pairs, OBV bearish divergence, near resistance, big loss, sell_composite (score ≤ 40), **`cash_underperformer`** (held >90d, ann. return < T-bill), **`relative_strength_laggard`** (alpha < -10% vs EGX30), **`mfi_extreme`** at >80, **`low_liquidity_warning`** (thin volume relative to the stock's own index), **`exit_zone_active`** at medium/high confidence, **`pe_overvalued`** (P/E > 30), **`pe_loss_making`** (negative P/E) |
+| `opportunity` | `$` | Golden Cross, RSI/Stochastic oversold+bullish crossover, near support, target approaching, strong_buy_composite (score ≥ 80), divergence_bullish, **`relative_strength_leader`** (alpha > +5% vs EGX30), **`mfi_extreme`** at <20, **`entry_zone_active`** (price near support + momentum not overbought), **`pe_undervalued`** (P/E < 10) |
+| `info` | `i` | Beta context, ATR-based stop-loss suggestion, macro context, profit-taking reminder, buy_composite (score ≥ 60), **`adx_strong_trend`** (ADX > 30, direction from DI±), **`exit_zone_active`** at low confidence |
+
+New signal types added with the 8-category engine have their `learn_concept` anchors wired into the Learn page: `risk_adjusted_return`, `relative_strength`, `mfi`, `adx`, `liquidity`, `multi_timeframe`, `cash_underperformer`. Entry/exit zone signals use `entry_exit_zones`.
+
+Each signal has a `learn_concept` key that links to a Learn page anchor (`id` attribute on a Concept card in `egx-api-fe/src/app/learn/page.tsx`). Deep links take the form `/learn#<concept>`.
+
+## Frontend Components
+
+Components in `src/app/components/`:
+
+**Charts:**
+- `PriceChart` — Recharts ComposedChart with SMA/EMA/Bollinger overlays, support/resistance/fibonacci ReferenceLines
+- `VolumeChart` — BarChart colored by up/down
+- `IndicatorPanel` — Tabbed panel with RSI, MACD, Stochastic, OBV subcharts
+- `CompareChart` — Multi-series normalized comparison
+- `MonteCarloChart` — AreaChart fan with 5 percentile bands
+- `CorrelationHeatmap` — Full grid desktop, simplified pairs list mobile
+
+**Composite Score:**
+- `CompositeGauge` — Hand-rolled SVG semicircle gauge. Props: `score`, `signal`, `size ("sm"|"md"|"lg")`. Exports `scoreColor(score)` for use elsewhere. "sm" (40px) used as badges; "md" (96px) mid-size; "lg" (160px) hero. Pulses when score ≤ 20.
+- `ScoreBreakdown` — 5 tappable category bars (score + weight% + expandable reasons). Gear button opens `ScoreWeightsModal`.
+
+**Levels & Zones:**
+- `KeyLevelsCard` — Displays nearest support/resistance from `AnalysisResponse.key_levels` with distance %, strength, and a "broken through" visual state when price has crossed a level. Used on the stock detail page above the price chart.
+- `EntryExitCard` — Displays active entry/exit zones from `AnalysisResponse.entry_exit`. Shows price range, confidence tier, suggested stop-loss (entry only), and supporting reasons. Renders a "no active zone" empty state when neither is active. Used on the stock detail page. In `HoldingsTable`, a compact `ZoneBadge` pill surfaces the same state inline next to each holding; the expanded row uses `ZoneDetail` for full zone info.
+- `ScoreWeightsModal` — 5 range sliders (0–50, step 5), normalized preview row, 3 preset buttons (Balanced / Trend Follower / Reversal Hunter), mobile full-screen / desktop card. Saves via `ScoreWeightsProvider`.
+- `ScoreWeightsProvider` — React Context. Fetches weights once on mount, shares across all score-aware components. Exports `useScoreWeights()` hook. Increments `version` on save to trigger re-fetches in pages. Wrapped around `{children}` in `layout.tsx`.
+
+**Portfolio views:**
+- `PortfolioSummary` — Totals + avg composite score tile + sector allocation pie/stacked bar
+- `RiskDashboard` — Sharpe/Sortino/MaxDD/VaR/Current DD grid
+- `HoldingsTable` — Full table desktop (Score column with gauge + signal), cards mobile (gauge in card header + expanded detail). Error rows use `colSpan={11}`.
+- `MacroCard` — EGX30/USD-EGP/CBE rate indicator row
+- `AdvicePanel` — Signals rendered with severity styles + learn links
+- `AddHoldingForm` — Full-screen modal on mobile, inline on desktop
+
+**UI helpers:**
+- `Navbar`, `BottomTabBar` — mobile bottom nav, desktop top nav
+- `LearnTooltip` — dashed-underline hover tooltip used everywhere for inline education
+- `LoadingSkeleton` — Card/Chart/Table skeletons
+- `StockCard`, `Watchlist`, `IndexFilter`, `SectorFilter`, `StatsPanel`
+
+## Mobile-First Conventions
+
+- Breakpoint: `md:` (768px) is the main one
+- Bottom nav bar (`BottomTabBar`) visible only on mobile with `md:hidden`
+- Main layout adds `pb-[60px] md:pb-0` to clear bottom nav
+- Tables → cards on mobile (`space-y-3 md:hidden` + `hidden md:block` pattern)
+- Forms → full-screen modal on mobile, inline on desktop
+- Touch targets: `min-h-[44px]` minimum
+- Safe areas: `env(safe-area-inset-top/bottom)` on navbar/footer
+- Horizontal scrolling for filter pills: `overflow-x-auto no-scrollbar`
+- Charts wrapped in Recharts `ResponsiveContainer`
+
+## Styling
+
+Tailwind with custom colors (`tailwind.config.ts`):
+- `charcoal-dark: #0a0a0f` — page background
+- `charcoal: #12121a` — card background
+- `gain: #00ff88` — green
+- `loss: #ff3355` — red
+- `accent: #4488ff` — blue
+
+Fonts: Outfit (sans), JetBrains Mono (mono).
+
+## Database Schema (`api/_db.py`)
+
+```sql
+portfolio (id, symbol, name, buy_price, buy_date, quantity, notes, sector,
+           target_price, stop_loss, created_at, updated_at)
+settings  (key, value)   -- pre-seeded: cash_available, currency, risk_free_rate,
+                         --             weight_trend, weight_momentum, weight_volume,
+                         --             weight_volatility, weight_divergence,
+                         --             weight_quality, weight_risk_adjusted,
+                         --             weight_relative_strength,
+                         --             pe_last_successful_fetch, pe_last_attempt_status,
+                         --             pe_unmatched_names
+watchlist (symbol, added_at)                                     -- user's watched tickers
+macro_data (key, value, previous_value, change_pct, updated_at)  -- 1-hour cache
+pe_data    (symbol PK, company_name, pe_ratio, dividend_yield, updated_at)
+                         -- Nightly-scraped from egx.com.eg/en/MarketPECompanies.aspx.
+                         -- symbol is the egxpy code resolved from company_name via
+                         -- pe_fetch.match_symbol (overrides > normalized > prefix > jaccard).
+                         -- pe_ratio IS NULL when the page shows "0" (no earnings / loss).
+```
+
+Connection singleton in `_db.py` with lazy init. `get_db()` returns the ready connection.
+
+## Caching Strategy
+
+- **Serverside:** `api/_cache.py` — module-level dict, 5-min TTL, keyed by `endpoint:params`
+- **Survives warm container**, cleared on cold start
+- **Turso cache:** `macro_data` table for 1-hour macro data cache
+- **EGX30 data:** Cached under dedicated key (reused across many stock analyses)
+- **Composite score cache invalidation:** `analysis.py` and `portfolio_analysis.py` include `weights_hash(weights)` in their cache keys — changing weights via PUT /api/weights automatically busts cached scores
+
+## Common Tasks
+
+**Adding a new indicator:**
+1. Write function in `api/_indicators.py` with detailed docstring
+2. Add to `compute_all()` return dict (for array-based indicators)
+3. Extend `AnalysisIndicators` interface in `src/app/lib/types.ts`
+4. Add to `priceChartData`/`indicatorData` useMemo in stock detail page
+5. Add chart rendering in `IndicatorPanel.tsx` or `PriceChart.tsx`
+6. Add a Concept card to `src/app/learn/page.tsx`
+
+**Adding a new signal type:**
+1. Add rule in `_analyze()` method in `portfolio_analysis.py`
+2. Use `"action_required" | "warning" | "opportunity" | "info"` severity
+3. Include `learn_concept` string pointing to a Learn page anchor
+4. Add an explanation sentence — target audience is a beginner
+
+**Adding a new portfolio metric:**
+1. Compute in `portfolio_analysis.py` after per-holding loop
+2. Add to `portfolio_metrics` dict in response
+3. Extend `PortfolioMetrics` interface in types.ts
+4. Render in `PortfolioSummary.tsx` or `RiskDashboard.tsx`
+5. Add Learn page concept
+
+**Changing composite score logic:**
+- Category scorers are in `api/_composite.py` — pure functions, safe to edit in isolation
+- Adding a new scoring input: add the value to the `extras` dict passed from `analysis.py` / `portfolio_analysis.py`, then consume it in the relevant `score_*` function
+- Changing weight defaults: update `DEFAULT_WEIGHTS` in `_composite.py` and the `INSERT OR IGNORE` seeds in `_db.py`
+
+## Watchlist
+
+Synced to Turso via `/api/watchlist` and exposed through `WatchlistProvider` (wrapped in `layout.tsx`). The `useWatchlist()` hook returns `{ symbols, loading, add, remove, has }` — shared across all consumers, so add/remove on one page updates everywhere. Adds/removes are optimistic and roll back on API failure. On first mount the provider migrates any legacy `egx-watchlist` localStorage entries to the DB and clears the key.
+
+## Things to Know
+
+- **EGX30 symbol:** use `get_OHLCV_data("EGX30", "EGX", ...)`. Wrap in try/except — some exchanges/intervals may not have it.
+- **SMA 200 needs 200+ bars:** `analysis.py` fetches `max(bars, 400)` internally and trims output
+- **Monte Carlo MUST be vectorized:** `np.random.normal(mu, sigma, (n_sims, n_days))` — never loop
+- **All P&L in EGP.** Egypt's currency is the Egyptian pound.
+- **EGX trading hours:** Sun–Thu, 10:00 AM – 2:30 PM Cairo time. EGX30 only updates during these hours.
+- **T+2 settlement:** mentioned on Learn page but not enforced in portfolio logic
+- **No auth:** app is single-user, all portfolio data is in one Turso database. Auth would be needed before multi-tenant use.
+- **Composite score is educational only:** always note the disclaimer when surfacing scores to users — it does not predict future price; no fundamentals or news are considered.
+- **Vercel timeout budget:** all three scoring paths now use identical inputs (see *One score per stock* below), so the levers are `BATCH_WORKERS` and the `include_multi_timeframe=False` escape hatch on `build_composite_extras` — **not** shrinking a single path's window, which is what caused the scores to diverge in the first place.
+- **Missing data / short history:** `compute_composite` renormalizes weights across only available categories when a scorer returns None — scores on NILEX tickers with <50 bars will have reduced category coverage.
+
+## Not Present / Deliberately Missing
+
+- Real-time streaming quotes (egxpy is polling, not streaming)
+- Order placement (this is analysis-only; user trades through Thndr app separately)
+- Multi-user authentication
+- External TA libraries (ta-lib, pandas-ta) — everything is from-scratch for learning
+- Per-stock composite score on the dashboard (StockCard accepts the prop but dashboard doesn't batch-fetch scores — out of scope)
+
+## Starting Points for Common Questions
+
+- "Why is the stock detail page slow?" → `api/analysis.py` fetches 400 bars + weekly data; check cache hit
+- "Why is portfolio analysis timing out?" → sequential `get_OHLCV_data` calls per holding; 10+ holdings = tight
+- "Where are user settings stored?" → `settings` table in Turso, accessed via `/api/settings`
+- "Where are composite weights stored?" → same `settings` table, keys `weight_*` (now 8 keys); accessed via `GET/PUT /api/settings?section=weights` in `app/routers/settings.py`
+- "How do I show a tooltip on a new metric?" → wrap label with `<LearnTooltip term=... explanation=...>`
+- "How is mobile different from desktop?" → `md:` breakpoint, bottom tab bar, card layouts, full-screen modals
+- "Why did composite scores change after I hit save on weights?" → `weights_hash()` in cache key causes old entries to miss; fresh fetch re-computes with new weights
