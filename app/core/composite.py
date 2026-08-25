@@ -46,6 +46,7 @@ import math
 from typing import Optional
 
 from app.core.constants import (
+    DEFAULT_RISK_FREE_RATE_PCT,
     SCORE_BUY_MAX,
     SCORE_HOLD_MAX,
     SCORE_SELL_MAX,
@@ -445,8 +446,9 @@ def score_quality(multi_timeframe: Optional[dict],
                          Keys: daily_trend, weekly_trend, aligned, alignment_score.
       - trend_consistency: float 0-1; fraction of the last 20 bars where close
                            was above the 20-day SMA (higher = more consistent).
-      - current_drawdown_pct: float (negative number, e.g. -0.15 for -15%); how
-                              far the stock is below its recent peak.
+      - current_drawdown_pct: FRACTION, not a percent — negative, e.g. -0.15
+                              for -15% below the recent peak. All callers
+                              build it via `(price / peak) - 1`.
       - pe_ratio: optional trailing P/E from the EGX P/E feed. Egypt context is
                   tight (T-bills ~25%) so the bands are stricter than in
                   developed markets. None → band is skipped entirely.
@@ -484,7 +486,10 @@ def score_quality(multi_timeframe: Optional[dict],
             reasons.append(f"Price below SMA20 on {int((1 - trend_consistency) * 100)}% of last 20 days — steady downtrend")
 
     if current_drawdown_pct is not None:
-        dd_pct = current_drawdown_pct * 100 if abs(current_drawdown_pct) <= 1 else current_drawdown_pct
+        # Contract is a fraction (see docstring). Sniffing the magnitude to
+        # guess the unit made a -0.9% drawdown read as -90% and scored it
+        # worse than a -1.5% one.
+        dd_pct = current_drawdown_pct * 100
         if dd_pct <= -30:
             score -= 15
             reasons.append(f"Severe drawdown ({dd_pct:.0f}% from peak) — quality impaired")
@@ -632,12 +637,18 @@ def apply_macro_modulation(raw_score: float, macro: Optional[dict]) -> tuple:
 
     Regime is read from macro["egx30"]["trend"] in {bullish, bearish, sideways}.
 
-    Bullish: no change (1.0×).
-    Sideways: dampen bullish-side scores by 5%, reinforce bearish-side by 5%.
-    Bearish: dampen bullish-side scores by 15%, reinforce bearish-side by 15%.
+    Bullish:  no change (1.0x).
+    Sideways: no change (1.0x) — a neutral market must be neutral, otherwise
+              every stock carries a permanent penalty and no regime can ever
+              leave a score alone.
+    Bearish:  the whole distribution SHIFTS DOWN. Above 50, scores are damped
+              15% toward neutral (a stock must be exceptional to still read
+              "Buy" in a falling market). Below 50, scores are pushed a
+              further 15% AWAY from neutral (a weak stock in a bear market is
+              worse than the same stock in a calm one).
 
-    Scores are pulled toward neutral (50) in bear markets — a stock must be
-    exceptional to still register a "Buy" in a falling market.
+    Note this is deliberately NOT a symmetric "pull toward neutral" — only the
+    bullish half is pulled in; the bearish half is pushed out.
 
     Returns (adjusted_score, delta, description).
     """
@@ -647,17 +658,13 @@ def apply_macro_modulation(raw_score: float, macro: Optional[dict]) -> tuple:
     egx30 = (macro.get("egx30") or {}) if isinstance(macro, dict) else {}
     trend = (egx30.get("trend") or "").lower()
 
-    if trend == "bullish":
+    if trend in ("bullish", "sideways"):
         return raw_score, 0.0, None
 
-    if trend == "sideways":
-        dampen = 0.95
-        reinforce = 1.05
-        desc = "EGX30 sideways"
-    elif trend == "bearish":
+    if trend == "bearish":
         dampen = 0.85
         reinforce = 1.15
-        desc = "EGX30 bearish — scores pulled toward neutral"
+        desc = "EGX30 bearish — bullish scores damped, bearish scores deepened"
     else:
         return raw_score, 0.0, None
 
@@ -770,9 +777,11 @@ def compute_composite(indicators: dict, extras: Optional[dict] = None,
         extras.get("current_drawdown_pct"),
         pe_ratio=extras.get("pe_ratio"),
     )
+    # `or` would treat a legitimate 0% rate as missing — check for None.
+    _rfr = extras.get("risk_free_rate_pct")
     risk_adjusted_score, risk_adjusted_reasons = score_risk_adjusted(
         extras.get("annualized_return_pct"),
-        float(extras.get("risk_free_rate_pct") or 25.0),
+        float(_rfr) if _rfr is not None else float(DEFAULT_RISK_FREE_RATE_PCT),
         extras.get("volatility_annualized_pct"),
         extras.get("atr_pct_of_price"),
         extras.get("history_days"),
@@ -879,5 +888,8 @@ def get_weights_from_db(db) -> dict:
 
 def weights_hash(weights: dict) -> str:
     """A small stable hash of the weights for cache key invalidation."""
-    parts = [f"{k}{int(round(weights.get(k, 0)))}" for k in CATEGORY_ORDER]
+    # Two decimals, matching normalize_weights' precision. Rounding to int
+    # would collide distinct weight sets onto one cache key, so a small
+    # slider tweak would serve a stale score.
+    parts = [f"{k}{float(weights.get(k, 0)):.2f}" for k in CATEGORY_ORDER]
     return "_".join(parts)

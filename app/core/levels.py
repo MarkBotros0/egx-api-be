@@ -17,6 +17,8 @@ entry/exit layer rides alongside it as independent guidance.
 
 from typing import Optional
 
+from app.core.constants import STOP_LOSS_ATR_MULTIPLIER, STOP_LOSS_FALLBACK_PCT
+
 
 # --- Thresholds (kept local — tuning knobs specific to this module) ---
 
@@ -34,11 +36,8 @@ EXIT_RSI_HOT_MIN = 75
 EXIT_RSI_WARM_MIN = 65
 STOCH_OVERBOUGHT = 80
 
-# Stop-loss: multiple of ATR placed below support. CLAUDE.md calls out
-# 1.5–2× ATR as the house convention — pick 1.5 for a tighter stop.
-STOP_LOSS_ATR_MULTIPLIER = 1.5
-# Fallback stop-loss when ATR is unavailable — 2% below support.
-STOP_LOSS_FALLBACK_PCT = 0.02
+# Stop-loss multiplier/fallback live in core/constants.py — every module that
+# suggests a stop must use the same convention (1.5x ATR below support).
 
 
 def _distance_pct(current: float, target: float) -> float:
@@ -222,10 +221,12 @@ def compute_entry_exit(
             conf = _entry_confidence(dist, ns["strength"], rsi_latest, stoch_k_latest)
             if conf is not None:
                 sp = ns["price"]
-                # A narrow band just above the support level.
+                # Band spans the whole activation window, so an active zone
+                # always contains the price that activated it. (Half-width
+                # bands leave the 2.5-5% slice active-but-outside-the-band.)
                 entry["price_range"] = {
                     "low": round(sp, 2),
-                    "high": round(sp * (1 + ENTRY_NEAR_SUPPORT_PCT / 100 / 2), 2),
+                    "high": round(sp * (1 + ENTRY_NEAR_SUPPORT_PCT / 100), 2),
                 }
                 # Stop-loss: ATR-based when possible, else a 2% buffer.
                 if atr_latest is not None and atr_latest > 0:
@@ -260,9 +261,13 @@ def compute_entry_exit(
         conf = _exit_confidence(dist, nr["strength"], rsi_latest, stoch_k_latest)
         if conf is not None:
             rp = nr["price"]
+            # When price has already broken above resistance the zone stays
+            # active (dist down to -1%), so stretch the band up to the
+            # current price — a trim band entirely below the market is
+            # unactionable.
             exit_z["price_range"] = {
                 "low": round(rp * (1 - EXIT_NEAR_RESISTANCE_PCT / 100 / 2), 2),
-                "high": round(rp, 2),
+                "high": round(max(rp, float(current_price)), 2),
             }
             exit_z["active"] = True
             exit_z["confidence"] = conf

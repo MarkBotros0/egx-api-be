@@ -67,18 +67,22 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     Formula:
       1. delta = close.diff()
       2. gain = max(delta, 0);  loss = max(-delta, 0)
-      3. avg_gain = EMA of gains over `period`
-      4. avg_loss = EMA of losses over `period`
+      3. avg_gain = Wilder-smoothed gains (EMA with alpha = 1/period)
+      4. avg_loss = Wilder-smoothed losses (EMA with alpha = 1/period)
       5. RS = avg_gain / avg_loss
       6. RSI = 100 - (100 / (1 + RS))
+
+    Wilder's smoothing (alpha = 1/period) is what every charting platform
+    uses for RSI — NOT span=period (which is alpha = 2/(period+1) and
+    smooths ~1.9x too fast). adx() below uses the same convention.
     """
     delta = close.diff()
 
     gain = delta.where(delta > 0, 0.0)
     loss = (-delta).where(delta < 0, 0.0)
 
-    avg_gain = gain.ewm(span=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, adjust=False).mean()
+    avg_gain = gain.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
 
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
@@ -206,7 +210,11 @@ def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
                      that won't get triggered by normal noise.
     Formula:
       TR = max(high - low, |high - prev_close|, |low - prev_close|)
-      ATR = rolling mean of TR over `period` days
+      ATR = Wilder-smoothed TR (EMA with alpha = 1/period)
+
+    Wilder's smoothing is the standard ATR definition and matches the ATR
+    computed internally by adx() below. A simple rolling mean drifts from
+    it by up to ~40% on volatile series.
     """
     prev_close = close.shift(1)
     tr = pd.DataFrame({
@@ -214,7 +222,7 @@ def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
         "hc": (high - prev_close).abs(),
         "lc": (low - prev_close).abs(),
     }).max(axis=1)
-    return tr.rolling(window=period).mean()
+    return tr.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
 
 
 # ---------------------------------------------------------------------------
@@ -616,13 +624,21 @@ def support_resistance(high: pd.Series, low: pd.Series, close: pd.Series,
 
 
 def _cluster_levels(levels, threshold=0.02):
-    """Group price levels within threshold% of each other."""
+    """
+    Group price levels within threshold% of each other.
+
+    Each candidate is compared against the cluster's MEAN, not the last
+    level added. Comparing to the last member lets a ladder of levels each
+    just under the threshold chain into one cluster of unbounded width,
+    producing a "price" nothing ever bounced at and an inflated strength.
+    """
     if not levels:
         return []
     levels = sorted(levels)
     clusters = [[levels[0]]]
     for level in levels[1:]:
-        if (level - clusters[-1][-1]) / clusters[-1][-1] < threshold:
+        anchor = float(np.mean(clusters[-1]))
+        if anchor > 0 and (level - anchor) / anchor < threshold:
             clusters[-1].append(level)
         else:
             clusters.append([level])
@@ -644,23 +660,54 @@ def fibonacci_levels(high: pd.Series, low: pd.Series, lookback: int = 60):
     Why it matters:  These levels often act as support/resistance. The 61.8%
                      retracement is considered the strongest level.
 
-    Returns: {"high": float, "low": float, "levels": {"23.6%": float, ...}}
+    Direction matters: a retracement is measured back from the END of the
+    swing toward its origin. In an UP-swing (low came first, high last) the
+    levels count down from the high. In a DOWN-swing (high first, low last)
+    they count UP from the low. Always retracing from the high mislabels
+    every level in a downtrend — the "61.8%" would actually be the 38.2%.
+
+    Returns: {"high": float, "low": float, "direction": "up"|"down",
+              "levels": {"23.6%": float, ...}}
     """
-    recent_high = float(high.iloc[-lookback:].max()) if len(high) >= lookback else float(high.max())
-    recent_low = float(low.iloc[-lookback:].min()) if len(low) >= lookback else float(low.min())
+    high_window = high.iloc[-lookback:] if len(high) >= lookback else high
+    low_window = low.iloc[-lookback:] if len(low) >= lookback else low
+
+    recent_high = float(high_window.max())
+    recent_low = float(low_window.min())
     diff = recent_high - recent_low
+
+    # Which extreme happened LAST? Use positional index so this works
+    # regardless of whether the frame carries a DatetimeIndex.
+    try:
+        high_pos = high_window.reset_index(drop=True).idxmax()
+        low_pos = low_window.reset_index(drop=True).idxmin()
+        direction = "up" if high_pos >= low_pos else "down"
+    except Exception:
+        direction = "up"
+
+    if direction == "up":
+        # Swing ran low -> high; retrace downward from the high.
+        def level(ratio):
+            return round(recent_high - ratio * diff, 2)
+        origin, end = recent_high, recent_low
+    else:
+        # Swing ran high -> low; retrace upward from the low.
+        def level(ratio):
+            return round(recent_low + ratio * diff, 2)
+        origin, end = recent_low, recent_high
 
     return {
         "high": round(recent_high, 2),
         "low": round(recent_low, 2),
+        "direction": direction,
         "levels": {
-            "0%": round(recent_high, 2),
-            "23.6%": round(recent_high - 0.236 * diff, 2),
-            "38.2%": round(recent_high - 0.382 * diff, 2),
-            "50%": round(recent_high - 0.5 * diff, 2),
-            "61.8%": round(recent_high - 0.618 * diff, 2),
-            "78.6%": round(recent_high - 0.786 * diff, 2),
-            "100%": round(recent_low, 2),
+            "0%": round(origin, 2),
+            "23.6%": level(0.236),
+            "38.2%": level(0.382),
+            "50%": level(0.5),
+            "61.8%": level(0.618),
+            "78.6%": level(0.786),
+            "100%": round(end, 2),
         },
     }
 
@@ -734,12 +781,15 @@ def compute_beta(stock_returns: pd.Series, market_returns: pd.Series) -> float:
     Beta < 1: stock is LESS volatile (defensive)
 
     Formula: Beta = Cov(stock, market) / Var(market)
+
+    Both terms use ddof=1 (sample statistics). np.cov defaults to ddof=1,
+    so the variance must match or beta is overstated by n/(n-1).
     """
     aligned = pd.DataFrame({"stock": stock_returns, "market": market_returns}).dropna()
     if len(aligned) < 20:
         return None
     cov_matrix = np.cov(aligned["stock"], aligned["market"])
-    market_var = np.var(aligned["market"])
+    market_var = np.var(aligned["market"], ddof=1)
     if market_var == 0:
         return None
     return float(cov_matrix[0][1] / market_var)
@@ -805,14 +855,26 @@ def relative_strength(stock_close: pd.Series, benchmark_close: pd.Series,
 # Annualized Return
 # ---------------------------------------------------------------------------
 
-def annualized_return(close: pd.Series, lookback: int = 252) -> float | None:
+def annualized_return(close: pd.Series, lookback: int = 252,
+                      periods_per_year: int = 252) -> float | None:
     """
-    Annualized return over the last `lookback` trading days (default 252 ≈ 1y).
+    Annualized return over the last `lookback` BARS.
 
-    Formula: (end/start)^(252/days) - 1
+    Formula: (end/start)^(periods_per_year/bars) - 1
+
+    `periods_per_year` must match the interval the series is sampled at —
+    252 for daily bars, 52 for weekly, 12 for monthly. Leaving it at the
+    daily default while passing weekly bars treats 252 weeks as one year:
+    a stock that doubled over five years then reports "+94% annualized"
+    instead of ~15%, which the Risk-Adjusted scorer compares against the
+    ~25% T-bill rate.
 
     Used to compare per-stock return vs the risk-free rate (T-bill ~25% in Egypt).
     Returns None if insufficient history — caller must handle that.
+
+    NOTE the caller is responsible for the minimum-history gate. Annualizing
+    a short window extrapolates wildly (a 20% six-week move reports as
+    +380%), so `score_risk_adjusted` refuses to score without ~6 months.
     """
     if close is None or len(close.dropna()) < 30:
         return None
@@ -826,7 +888,7 @@ def annualized_return(close: pd.Series, lookback: int = 252) -> float | None:
     if total <= 0:
         return None
     # Annualize based on actual window length
-    ann = total ** (252.0 / n) - 1.0
+    ann = total ** (float(periods_per_year) / n) - 1.0
     return round(ann * 100.0, 2)
 
 

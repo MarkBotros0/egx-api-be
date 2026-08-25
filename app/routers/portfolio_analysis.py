@@ -5,6 +5,7 @@ GET  — Read the current user's holdings from Postgres and analyze them
 POST — Accept holdings in request body (body: {portfolio: [...]})
 """
 
+import zlib
 from datetime import date, datetime
 from typing import Optional, List
 
@@ -15,26 +16,25 @@ from app.core.db import get_db
 from app.core.macro_fetch import fetch_macro
 from app.core.composite import compute_composite, get_weights_from_db, DEFAULT_WEIGHTS
 from app.core.levels import compute_key_levels, compute_entry_exit
+from app.core.extras_builder import build_composite_extras
 from app.core.pe_fetch import get_pe_for_symbol
 from app.core.constants import (
     BIG_LOSS_PCT,
-    CONCENTRATION_CRITICAL_PCT,
-    CONCENTRATION_WARNING_PCT,
     CORRELATION_HIGH_THRESHOLD,
     CORRELATION_NEGATIVE_THRESHOLD,
     CURRENT_DRAWDOWN_WARNING_PCT,
     DEFAULT_RISK_FREE_RATE_PCT,
-    DIVERGENCE_LOOKBACK_PORTFOLIO,
+    DIVERGENCE_LOOKBACK_FULL,
+    INTERNAL_BARS_MIN,
     MAX_DRAWDOWN_WARNING_PCT,
     MONTE_CARLO_FORECAST_DAYS,
     MONTE_CARLO_SIMULATIONS,
-    PORTFOLIO_FETCH_BARS_MAX,
-    PORTFOLIO_FETCH_BARS_MIN,
     PROFIT_TARGET_PCT,
     SCORE_BUY_MAX,
     SCORE_STRONG_SELL_MAX,
     SECTOR_ALERT_PCT,
     STOCK_ALERT_PCT,
+    STOP_LOSS_ATR_MULTIPLIER,
     TRADING_DAYS_PER_YEAR,
     VAR_PERCENTILE,
 )
@@ -45,9 +45,6 @@ from app.core.indicators import (
     support_resistance, fibonacci_levels, ma_crossovers,
     macd as calc_macd, bollinger_bands as calc_bollinger,
     adx as calc_adx, mfi as calc_mfi,
-    detect_divergences, volume_price_confirmation,
-    relative_strength as calc_relative_strength,
-    annualized_return as calc_annualized_return,
     liquidity_score as calc_liquidity,
 )
 
@@ -62,10 +59,29 @@ def _days_between(date_str: str, today: date) -> int:
         return 0
 
 
-def _annualized_return(total_return_pct: float, days_held: int) -> float:
-    if days_held <= 0:
-        return 0.0
-    return ((1 + total_return_pct / 100) ** (365 / days_held) - 1) * 100
+# Below this many days held, annualizing a position's return produces
+# nonsense (a +5% week annualizes to five figures). The signal layer and the
+# UI both suppress the number instead of showing it.
+MIN_DAYS_FOR_ANNUALIZATION = 30
+
+
+def _annualized_return(total_return_pct: float, days_held: int) -> Optional[float]:
+    """
+    Annualize a POSITION's return over calendar days held.
+
+    Note this is a different quantity from indicators.annualized_return(),
+    which annualizes the STOCK's market return over trading bars. The two
+    answer different questions ("how did my purchase do" vs "how did the
+    stock do") and must not be compared to each other.
+
+    Returns None when the holding is too young to annualize meaningfully.
+    """
+    if days_held < MIN_DAYS_FOR_ANNUALIZATION:
+        return None
+    base = 1 + total_return_pct / 100
+    if base <= 0:
+        return -100.0
+    return (base ** (365 / days_held) - 1) * 100
 
 
 def _analyze(holdings):
@@ -85,15 +101,22 @@ def _analyze(holdings):
     sector_values = {}
     stock_values = {}
     all_returns = {}
+    # Holdings we could not price. Their cost basis must NOT land in
+    # total_invested — counting cost with no matching value fabricates a loss.
+    excluded_holdings = []
 
     egx30_returns = None
     egx30_close = None
     egx30_df = None
     try:
-        egx30_cache_key = make_key("egx30", "EGX", "Daily", 300)
+        # Same window and cache key as /api/analysis so beta and relative
+        # strength are computed against an identical benchmark series on
+        # every page. A shorter window here gave the same stock a different
+        # beta on the portfolio page than on its detail page.
+        egx30_cache_key = make_key("egx30", "EGX", "Daily", INTERNAL_BARS_MIN)
         egx30_df = cache_get(egx30_cache_key)
         if egx30_df is None:
-            egx30_raw = get_OHLCV_data("EGX30", "EGX", "Daily", 300)
+            egx30_raw = get_OHLCV_data("EGX30", "EGX", "Daily", INTERNAL_BARS_MIN)
             if egx30_raw is not None and not egx30_raw.empty:
                 egx30_raw.columns = [c.lower() for c in egx30_raw.columns]
                 cache_set(egx30_cache_key, egx30_raw)
@@ -134,17 +157,26 @@ def _analyze(holdings):
         buy_date = h.get("buy_date", "")
         target_price = h.get("target_price")
         stop_loss = h.get("stop_loss")
-        sector = h.get("sector", "Unknown")
+        # An empty-string sector renders as "45% of your portfolio is in ."
+        sector = (h.get("sector") or "Unknown").strip() or "Unknown"
 
         invested = buy_price * quantity
-        total_invested += invested
+        counted_in_totals = False
 
         try:
             days_held = _days_between(buy_date, today)
-            fetch_bars = min(max(PORTFOLIO_FETCH_BARS_MIN, days_held), PORTFOLIO_FETCH_BARS_MAX)
-            df = get_OHLCV_data(symbol, "EGX", "Daily", fetch_bars)
+            # Fixed window (not a function of days_held): a shorter fetch left
+            # SMA200 with a single valid point, so golden/death crosses could
+            # never be detected for a recently-bought holding, and made beta
+            # depend on how long the user had owned the stock.
+            df = get_OHLCV_data(symbol, "EGX", "Daily", INTERNAL_BARS_MIN)
             if df is None or df.empty:
                 stock_analyses.append({"symbol": symbol, "error": "Could not fetch market data"})
+                excluded_holdings.append({
+                    "symbol": symbol,
+                    "invested": round(invested, 2),
+                    "error": "Could not fetch market data",
+                })
                 continue
 
             df.columns = [c.lower() for c in df.columns]
@@ -153,6 +185,9 @@ def _analyze(holdings):
 
             current_value = current_price * quantity
             total_current_value += current_value
+            # Cost basis is only counted once we have a matching market value.
+            total_invested += invested
+            counted_in_totals = True
             pnl = (current_price - buy_price) * quantity
             pnl_pct = (current_price / buy_price - 1) * 100 if buy_price > 0 else 0
             ann_return = _annualized_return(pnl_pct, days_held)
@@ -162,7 +197,7 @@ def _analyze(holdings):
 
             sma_50 = calc_sma(close, 50)
             current_sma_50 = float(sma_50.iloc[-1]) if not np.isnan(sma_50.iloc[-1]) else None
-            above_sma = current_price > current_sma_50 if current_sma_50 else None
+            above_sma = current_price > current_sma_50 if current_sma_50 is not None else None
 
             sma_200 = calc_sma(close, 200)
             current_sma_200 = float(sma_200.iloc[-1]) if len(sma_200.dropna()) > 0 else None
@@ -181,7 +216,7 @@ def _analyze(holdings):
 
             atr_series = calc_atr(df["high"], df["low"], close)
             current_atr = float(atr_series.iloc[-1]) if not np.isnan(atr_series.iloc[-1]) else None
-            atr_pct = round(current_atr / current_price * 100, 1) if current_atr and current_price > 0 else None
+            atr_pct = round(current_atr / current_price * 100, 1) if current_atr is not None and current_price > 0 else None
 
             obv_series = calc_obv(close, df["volume"])
             obv_rising = float(obv_series.iloc[-1]) > float(obv_series.iloc[-min(20, len(obv_series))]) if len(obv_series) >= 5 else None
@@ -248,12 +283,12 @@ def _analyze(holdings):
             except Exception:
                 bb_upper_series = bb_middle_series = bb_lower_series = None
 
-            divergences_h = {
-                "rsi": detect_divergences(close, rsi_series, lookback=DIVERGENCE_LOOKBACK_PORTFOLIO) if rsi_series is not None else {},
-                "macd": detect_divergences(close, macd_line_series, lookback=DIVERGENCE_LOOKBACK_PORTFOLIO) if macd_line_series is not None else {},
-            }
-
-            volume_price_h = volume_price_confirmation(close, df["volume"])
+            # Divergences and volume/price confirmation are produced by
+            # build_composite_extras below (they are scoring inputs), so they
+            # are not computed here — doing both ran the expensive divergence
+            # scan twice per holding.
+            divergences_h = {"rsi": {}, "macd": {}}
+            volume_price_h = None
 
             def _tolist(s):
                 try:
@@ -279,37 +314,6 @@ def _analyze(holdings):
                 "obv": _tolist(obv_series),
             }
 
-            # New per-holding extras for the 8-category composite
-            try:
-                last20 = close.iloc[-20:]
-                sma20_h = calc_sma(close, 20)
-                last20_sma = sma20_h.iloc[-20:]
-                paired = [(c, s) for c, s in zip(last20, last20_sma) if s == s]
-                trend_consistency_h = (sum(1 for c, s in paired if c > s) / len(paired)) if paired else None
-            except Exception:
-                trend_consistency_h = None
-
-            try:
-                window = close.tail(min(TRADING_DAYS_PER_YEAR, len(close)))
-                peak = float(window.max())
-                current_drawdown_h = (current_price - peak) / peak if peak > 0 else None
-            except Exception:
-                current_drawdown_h = None
-
-            ann_return_pct_h = calc_annualized_return(close, lookback=TRADING_DAYS_PER_YEAR)
-            try:
-                daily_vol = stock_rets.std()
-                volatility_ann_pct_h = float(daily_vol) * (TRADING_DAYS_PER_YEAR ** 0.5) * 100.0 if daily_vol == daily_vol else None
-            except Exception:
-                volatility_ann_pct_h = None
-
-            rs_h = None
-            try:
-                if egx30_close is not None:
-                    rs_h = calc_relative_strength(close, egx30_close, lookback=30)
-            except Exception:
-                rs_h = None
-
             liquidity_h = None
             try:
                 liquidity_h = calc_liquidity(df["volume"], index_membership=None, lookback=20)
@@ -322,35 +326,34 @@ def _analyze(holdings):
             except Exception:
                 pe_info_h = None
 
+            # Same builder as /api/analysis (both full and batch paths), so a
+            # holding's score here equals its score on the dashboard card and
+            # on its own detail page. multi_timeframe is now included: it is
+            # derived by resampling the daily frame, so it costs no extra
+            # fetch and no longer has to be skipped for the timeout budget.
             try:
+                built_h = build_composite_extras(
+                    df, holding_indicators,
+                    # Portfolio holdings are always analysed on daily bars.
+                    interval="Daily",
+                    egx30_close=egx30_close,
+                    include_multi_timeframe=True,
+                    risk_free_rate_pct=risk_free_rate_pct,
+                    pe_ratio=pe_info_h.get("pe_ratio") if pe_info_h else None,
+                    divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
+                )
+                divergences_h = built_h["divergences"]
+                volume_price_h = built_h["volume_price"]
+                rs_h = built_h["extras"].get("relative_strength")
                 composite_h = compute_composite(
                     holding_indicators,
-                    extras={
-                        "current_price": current_price,
-                        "divergences": divergences_h,
-                        "volume_price": volume_price_h,
-                        "bb_squeeze": False,
-                        "obv_rising": obv_rising,
-                        "price_rising_20d": price_rising,
-                        "golden_cross_active": crossovers.get("current_signal") == "golden_cross"
-                                               and (crossovers.get("days_since_cross") or 99) < 10,
-                        # multi_timeframe is omitted — weekly fetch per-holding is too costly for portfolio timeout.
-                        "multi_timeframe": None,
-                        "trend_consistency": trend_consistency_h,
-                        "current_drawdown_pct": current_drawdown_h,
-                        "annualized_return_pct": ann_return_pct_h,
-                        "volatility_annualized_pct": volatility_ann_pct_h,
-                        "atr_pct_of_price": atr_pct,
-                        "history_days": len(close),
-                        "risk_free_rate_pct": risk_free_rate_pct,
-                        "relative_strength": rs_h,
-                        "pe_ratio": pe_info_h.get("pe_ratio") if pe_info_h else None,
-                    },
+                    extras=built_h["extras"],
                     weights=weights,
                     macro=macro_data,
                 )
             except Exception:
                 composite_h = None
+                rs_h = None
 
             dist_to_target = None
             dist_to_stop = None
@@ -378,18 +381,21 @@ def _analyze(holdings):
                 "pnl": round(pnl, 2),
                 "pnl_pct": round(pnl_pct, 2),
                 "days_held": days_held,
-                "annualized_return": round(ann_return, 2),
-                "rsi": round(current_rsi, 1) if current_rsi else None,
-                "sma_50": round(current_sma_50, 2) if current_sma_50 else None,
+                # None until MIN_DAYS_FOR_ANNUALIZATION — see _annualized_return.
+                "annualized_return": round(ann_return, 2) if ann_return is not None else None,
+                # `is not None` throughout: a genuinely flat/suspended stock has
+                # volatility 0.0 and ATR 0.0, which is real data, not missing data.
+                "rsi": round(current_rsi, 1) if current_rsi is not None else None,
+                "sma_50": round(current_sma_50, 2) if current_sma_50 is not None else None,
                 "above_sma": above_sma,
-                "volatility": round(current_vol, 4) if current_vol else None,
+                "volatility": round(current_vol, 4) if current_vol is not None else None,
                 "volume_trend": volume_trend,
                 "target_price": target_price,
                 "stop_loss": stop_loss,
                 "dist_to_target": round(dist_to_target, 2) if dist_to_target is not None else None,
                 "dist_to_stop": round(dist_to_stop, 2) if dist_to_stop is not None else None,
                 "beta": beta,
-                "atr": round(current_atr, 2) if current_atr else None,
+                "atr": round(current_atr, 2) if current_atr is not None else None,
                 "atr_pct": atr_pct,
                 "obv_trend": obv_trend,
                 "stochastic_k": round(current_stoch_k, 1) if current_stoch_k is not None else None,
@@ -399,7 +405,7 @@ def _analyze(holdings):
                 "fibonacci": fib,
                 "trend": trend,
                 "golden_cross_active": crossovers["current_signal"] == "golden_cross",
-                "sma_200": round(current_sma_200, 2) if current_sma_200 else None,
+                "sma_200": round(current_sma_200, 2) if current_sma_200 is not None else None,
                 "adx": round(current_adx, 1) if current_adx is not None else None,
                 "plus_di": round(current_plus_di, 1) if current_plus_di is not None else None,
                 "minus_di": round(current_minus_di, 1) if current_minus_di is not None else None,
@@ -416,21 +422,27 @@ def _analyze(holdings):
             stock_analyses.append(analysis)
 
             if composite_h and composite_h.get("score") is not None:
-                composite_scores_collected.append(composite_h["score"])
+                # (score, value) so the portfolio average is value-weighted and
+                # duplicate lots of one symbol don't count twice.
+                composite_scores_collected.append((composite_h["score"], current_value))
 
             # --- Signals ---
             if composite_h:
                 c_score = composite_h["score"]
                 c_signal = composite_h["signal"]
+                # Band edges must match composite.classify_signal exactly
+                # (lower bound inclusive), or a score of exactly 20 gets an
+                # "action required: Strong Sell" alert while its own badge
+                # in the same payload reads "Sell".
                 if c_score >= SCORE_BUY_MAX:
                     signals.append({"type": "strong_buy_composite", "severity": "opportunity", "symbol": symbol,
                         "message": f"{symbol} composite score is {c_score:.0f} — Strong Buy across multiple indicators.",
-                        "explanation": "The composite score blends trend, momentum, volume, volatility, and divergence into one number. A score ≥80 means most categories are aligned bullishly — a high-conviction setup.",
+                        "explanation": "The composite score blends 8 categories — trend, momentum, volume, volatility, divergence, quality, risk-adjusted return and relative strength — into one number. A score ≥80 means most categories are aligned bullishly — a high-conviction setup.",
                         "learn_concept": "composite_score"})
-                elif c_score <= SCORE_STRONG_SELL_MAX:
+                elif c_score < SCORE_STRONG_SELL_MAX:
                     signals.append({"type": "strong_sell_composite", "severity": "action_required", "symbol": symbol,
                         "message": f"{symbol} composite score is {c_score:.0f} — Strong Sell. Most indicators are bearish.",
-                        "explanation": "When the composite score falls below 20, trend, momentum, volume, volatility, and divergence are all flashing bearish.",
+                        "explanation": "When the composite score falls below 20, nearly every category — trend, momentum, volume, quality, risk-adjusted return and relative strength — is flashing bearish.",
                         "learn_concept": "composite_score"})
                 elif c_signal == "Buy":
                     signals.append({"type": "buy_composite", "severity": "opportunity", "symbol": symbol,
@@ -457,7 +469,16 @@ def _analyze(holdings):
                         "explanation": "Bearish divergence means buyers are losing momentum despite the price rising.",
                         "learn_concept": "divergence"})
 
-            if dist_to_stop is not None and dist_to_stop > -10:
+            # dist_to_stop = (stop / price - 1) * 100, so it turns POSITIVE
+            # once price falls below the stop. Without a separate branch an
+            # already-breached stop reported as "X% away from your stop" —
+            # indistinguishable from a stop still X% below the price.
+            if dist_to_stop is not None and dist_to_stop >= 0:
+                signals.append({"type": "stop_breached", "severity": "action_required", "symbol": symbol,
+                    "message": f"{symbol} is trading {dist_to_stop:.1f}% BELOW your stop-loss at {stop_loss:.2f} EGP — your exit rule has triggered.",
+                    "explanation": "You set this stop-loss to cap your loss on this position. Price has passed it, so the rule you wrote before buying says to sell. Acting on your own pre-set rule is what stops a small loss becoming a large one.",
+                    "learn_concept": "stop_loss"})
+            elif dist_to_stop is not None and dist_to_stop > -10:
                 prio = "action_required" if dist_to_stop > -5 else "warning"
                 signals.append({"type": "stop_loss", "severity": prio, "symbol": symbol,
                     "message": f"{symbol} is {abs(dist_to_stop):.1f}% away from your stop-loss at {stop_loss:.2f} EGP.",
@@ -497,31 +518,55 @@ def _analyze(holdings):
                             "explanation": "The Stochastic is below 20 (oversold) and %K crossed above %D — bullish reversal signal.",
                             "learn_concept": "stochastic"})
 
-            if sr["supports"]:
-                nearest_support = sr["supports"][0]
-                dist_to_support = (current_price - nearest_support["price"]) / current_price * 100
-                if 0 < dist_to_support < 3:
+            # Levels come from key_levels_h (proximity-ordered), NOT from
+            # sr["supports"][0] — that array is sorted by STRENGTH, so index 0
+            # is the most-tested level, which is often nowhere near the price
+            # and can even sit above it. Using it emitted "broke below support"
+            # alerts citing a level the KeyLevels card showed as still intact.
+            ns_sig = key_levels_h.get("nearest_support")
+            if ns_sig:
+                # distance_pct is signed: negative = support is below price.
+                below_by = -ns_sig["distance_pct"]
+                if 0 < below_by < 3:
                     signals.append({"type": "near_support", "severity": "opportunity", "symbol": symbol,
-                        "message": f"{symbol} is near support at {nearest_support['price']:.2f} EGP (tested {nearest_support['strength']} times).",
+                        "message": f"{symbol} is near support at {ns_sig['price']:.2f} EGP (tested {ns_sig['strength']} times).",
                         "explanation": "Support levels are prices where the stock has historically bounced.",
                         "learn_concept": "support_resistance"})
-                elif dist_to_support < 0:
-                    next_support = sr["supports"][1]["price"] if len(sr["supports"]) > 1 else None
-                    msg = f"{symbol} broke below support at {nearest_support['price']:.2f} EGP."
-                    if next_support:
+                elif ns_sig["distance_pct"] > 0:
+                    # Support sits ABOVE current price = price broke through it.
+                    lower = [s for s in sr["supports"]
+                             if s.get("price") is not None and s["price"] < current_price]
+                    next_support = max(lower, key=lambda s: s["price"])["price"] if lower else None
+                    msg = f"{symbol} broke below support at {ns_sig['price']:.2f} EGP."
+                    if next_support is not None:
                         msg += f" Next support at {next_support:.2f} EGP."
                     signals.append({"type": "support_broken", "severity": "action_required", "symbol": symbol,
                         "message": msg,
                         "explanation": "When a stock breaks below a support level, it often continues falling.",
                         "learn_concept": "support_resistance"})
 
-            if sr["resistances"]:
-                nearest_resistance = sr["resistances"][0]
-                dist_to_resistance = (nearest_resistance["price"] - current_price) / current_price * 100
-                if 0 < dist_to_resistance < 3:
+            nr_sig = key_levels_h.get("nearest_resistance")
+            if nr_sig:
+                # distance_pct is signed: positive = resistance is above price.
+                above_by = nr_sig["distance_pct"]
+                if 0 < above_by < 3:
                     signals.append({"type": "near_resistance", "severity": "warning", "symbol": symbol,
-                        "message": f"{symbol} approaching resistance at {nearest_resistance['price']:.2f} EGP.",
+                        "message": f"{symbol} approaching resistance at {nr_sig['price']:.2f} EGP.",
                         "explanation": "Resistance levels are prices where the stock has historically been rejected.",
+                        "learn_concept": "support_resistance"})
+                elif above_by < 0:
+                    # Price cleared the level — the bullish mirror of a support
+                    # break, which previously had no branch at all and so was
+                    # silently never reported.
+                    higher = [r for r in sr["resistances"]
+                              if r.get("price") is not None and r["price"] > current_price]
+                    next_resistance = min(higher, key=lambda r: r["price"])["price"] if higher else None
+                    msg = f"{symbol} broke above resistance at {nr_sig['price']:.2f} EGP."
+                    if next_resistance is not None:
+                        msg += f" Next resistance at {next_resistance:.2f} EGP."
+                    signals.append({"type": "resistance_broken", "severity": "opportunity", "symbol": symbol,
+                        "message": msg,
+                        "explanation": "Breaking above a level that previously rejected the stock often starts a new leg up. Old resistance frequently becomes new support — consider trailing your stop-loss up to just below it.",
                         "learn_concept": "support_resistance"})
 
             # Entry/exit zones add momentum confirmation on top of raw level
@@ -565,10 +610,17 @@ def _analyze(holdings):
                     "learn_concept": "entry_exit_zones"})
 
             if beta is not None:
-                if beta > 1.3:
+                # Magnitude drives volatility, not the raw value: a beta of
+                # -2.10 is twice as volatile as the index, not "defensive".
+                if abs(beta) > 1.3:
                     signals.append({"type": "high_beta", "severity": "info", "symbol": symbol,
                         "message": f"{symbol} is highly volatile (beta {beta:.2f}).",
                         "explanation": "High-beta stocks amplify market moves.",
+                        "learn_concept": "beta"})
+                elif beta < 0:
+                    signals.append({"type": "inverse_beta", "severity": "info", "symbol": symbol,
+                        "message": f"{symbol} tends to move AGAINST the market (beta {beta:.2f}).",
+                        "explanation": "A negative beta means the stock has historically risen when EGX30 fell, and vice versa. Small negative betas are often just noise, but a consistent one makes the stock a useful diversifier.",
                         "learn_concept": "beta"})
                 elif beta < 0.8:
                     signals.append({"type": "low_beta", "severity": "info", "symbol": symbol,
@@ -576,10 +628,20 @@ def _analyze(holdings):
                         "explanation": "Low-beta stocks are less volatile.",
                         "learn_concept": "beta"})
 
-            if current_atr and current_price > 0:
+            if current_atr is not None and current_atr > 0 and current_price > 0:
+                # One stop-loss convention app-wide: 1.5x ATR below the nearest
+                # support (see constants.STOP_LOSS_ATR_MULTIPLIER). Quote an
+                # actual price — the old message printed ATR *distances*
+                # formatted like prices ("stop-loss: 1.80-2.40 EGP").
+                if ns_sig:
+                    suggested_stop = ns_sig["price"] - STOP_LOSS_ATR_MULTIPLIER * current_atr
+                    anchor = f"({STOP_LOSS_ATR_MULTIPLIER:g}x ATR below support at {ns_sig['price']:.2f})"
+                else:
+                    suggested_stop = current_price - STOP_LOSS_ATR_MULTIPLIER * current_atr
+                    anchor = f"({STOP_LOSS_ATR_MULTIPLIER:g}x ATR below the current price — no clear support level found)"
                 signals.append({"type": "atr_stop", "severity": "info", "symbol": symbol,
-                    "message": f"{symbol} ATR is {current_atr:.2f} EGP ({atr_pct}% of price). Suggested stop-loss: {current_atr*1.5:.2f}-{current_atr*2:.2f} EGP below entry.",
-                    "explanation": "ATR measures typical daily price movement. Set stops 1.5-2x ATR below entry.",
+                    "message": f"{symbol} ATR is {current_atr:.2f} EGP ({atr_pct}% of price). Suggested stop-loss: {suggested_stop:.2f} EGP {anchor}.",
+                    "explanation": f"ATR measures typical daily price movement. Placing your stop {STOP_LOSS_ATR_MULTIPLIER:g}x ATR below the nearest support keeps normal daily noise from stopping you out while still capping the loss.",
                     "learn_concept": "atr"})
 
             if dist_to_target is not None and 0 < dist_to_target < 10:
@@ -626,11 +688,14 @@ def _analyze(holdings):
 
             # --- New signals from the 8-category engine ---
 
-            # Cash underperformer: annualized return < risk-free AND held >90 days
-            if days_held > 90 and ann_return < risk_free_rate_pct:
+            # Cash underperformer: annualized return < risk-free AND held >90 days.
+            # Says "your position in X" because ann_return annualizes the
+            # user's own buy price, not the stock's market return — the
+            # Risk-Adjusted category uses the latter and the two can differ.
+            if days_held > 90 and ann_return is not None and ann_return < risk_free_rate_pct:
                 signals.append({"type": "cash_underperformer", "severity": "warning", "symbol": symbol,
-                    "message": f"{symbol} has returned {ann_return:.0f}% annualized — less than the {risk_free_rate_pct:.0f}% T-bill rate.",
-                    "explanation": "Holding this stock is earning you less than risk-free cash. Either your thesis needs to play out soon, or capital is better placed in T-bills.",
+                    "message": f"Your position in {symbol} has returned {ann_return:.0f}% annualized since you bought it — less than the {risk_free_rate_pct:.0f}% T-bill rate.",
+                    "explanation": "Holding this stock has earned you less than risk-free cash would have. Either your thesis needs to play out soon, or capital is better placed in T-bills. (This measures your purchase, not the stock's own 12-month performance — the Risk-Adjusted score covers that.)",
                     "learn_concept": "risk_adjusted_return"})
 
             # Relative strength — leader or laggard vs EGX30 over 30 days
@@ -696,6 +761,12 @@ def _analyze(holdings):
 
         except Exception as e:
             stock_analyses.append({"symbol": symbol, "error": f"Analysis failed: {str(e)}"})
+            if not counted_in_totals:
+                excluded_holdings.append({
+                    "symbol": symbol,
+                    "invested": round(invested, 2),
+                    "error": f"Analysis failed: {str(e)}",
+                })
 
     # Portfolio-level metrics
     total_portfolio_value = total_current_value
@@ -710,13 +781,16 @@ def _analyze(holdings):
     for sym, val in stock_values.items():
         stock_concentration[sym] = round(val / total_portfolio_value * 100, 1) if total_portfolio_value > 0 else 0
 
+    # Penalties start at the SAME thresholds that raise the warning signals
+    # below. When they differed, a portfolio could score "Diversification
+    # 100/100" while an alert right beside it said "45% in Banking".
     div_score = 100
     for sym, pct in stock_concentration.items():
-        if pct > CONCENTRATION_WARNING_PCT:
-            div_score -= (pct - CONCENTRATION_WARNING_PCT) * 2
+        if pct > STOCK_ALERT_PCT:
+            div_score -= (pct - STOCK_ALERT_PCT) * 2
     for sec, pct in sector_allocation.items():
-        if pct > CONCENTRATION_CRITICAL_PCT:
-            div_score -= (pct - CONCENTRATION_CRITICAL_PCT) * 1.5
+        if pct > SECTOR_ALERT_PCT:
+            div_score -= (pct - SECTOR_ALERT_PCT) * 1.5
     div_score = max(0, min(100, div_score))
 
     for sec, pct in sector_allocation.items():
@@ -730,17 +804,24 @@ def _analyze(holdings):
         if pct > STOCK_ALERT_PCT:
             signals.append({"type": "stock_concentration", "severity": "warning", "symbol": sym,
                 "message": f"{sym} makes up {pct:.0f}% of your portfolio.",
-                "explanation": "Having more than 30-35% in a single stock is risky.",
+                "explanation": f"Having more than {STOCK_ALERT_PCT}% in a single stock is risky — one company's bad news would move your whole portfolio.",
                 "learn_concept": "correlation"})
 
-    total_weight = sum(stock_values.values())
-    weighted_rsi = 0
+    # Weight each ROW by its own value and renormalize over the rows actually
+    # included. Using stock_values[symbol] double-counted a symbol held in two
+    # lots, and skipping a None-RSI holding without renormalizing dragged the
+    # portfolio RSI toward 0 (reading as "oversold" on missing data).
+    weighted_rsi = None
     rsi_count = 0
+    _rsi_num = 0.0
+    _rsi_weight = 0.0
     for sa in stock_analyses:
-        if "rsi" in sa and sa.get("rsi") is not None and sa["symbol"] in stock_values:
-            w = stock_values[sa["symbol"]] / total_weight if total_weight > 0 else 0
-            weighted_rsi += sa["rsi"] * w
+        if sa.get("rsi") is not None and sa.get("current_value") is not None:
+            _rsi_num += sa["rsi"] * sa["current_value"]
+            _rsi_weight += sa["current_value"]
             rsi_count += 1
+    if rsi_count > 0 and _rsi_weight > 0:
+        weighted_rsi = _rsi_num / _rsi_weight
 
     import numpy as np
 
@@ -754,7 +835,16 @@ def _analyze(holdings):
         returns_df = pd.DataFrame(valid_returns).dropna()
 
         if len(returns_df) >= 20:
-            port_weights = {sym: stock_values.get(sym, 0) / total_current_value for sym in returns_df.columns}
+            # Renormalize over the holdings actually present in returns_df.
+            # Dividing by total_current_value left the excluded holdings'
+            # weight unallocated, so portfolio_daily came out scaled by k<1
+            # while rf_daily was not — pushing Sharpe more negative the more
+            # holdings were dropped, and understating VaR and drawdown.
+            included_value = sum(stock_values.get(sym, 0) for sym in returns_df.columns)
+            if included_value > 0:
+                port_weights = {sym: stock_values.get(sym, 0) / included_value for sym in returns_df.columns}
+            else:
+                port_weights = {sym: 1.0 / len(returns_df.columns) for sym in returns_df.columns}
             portfolio_daily = sum(returns_df[sym] * port_weights.get(sym, 0) for sym in returns_df.columns)
 
             rf_daily = (1 + risk_free_annual) ** (1 / TRADING_DAYS_PER_YEAR) - 1
@@ -763,9 +853,13 @@ def _analyze(holdings):
             if excess.std() > 0:
                 sharpe_ratio = round(float(excess.mean() / excess.std() * np.sqrt(TRADING_DAYS_PER_YEAR)), 2)
 
-            downside = excess[excess < 0]
-            if len(downside) > 0 and downside.std() > 0:
-                sortino_ratio = round(float(excess.mean() / downside.std() * np.sqrt(TRADING_DAYS_PER_YEAR)), 2)
+            # True downside deviation: RMS of the negative part over ALL
+            # observations. Taking the std of just the negative subset
+            # measures spread within the losses (and divides by their count),
+            # which systematically inflates Sortino.
+            downside_dev = float(np.sqrt(np.mean(np.minimum(excess.values, 0.0) ** 2)))
+            if downside_dev > 0:
+                sortino_ratio = round(float(excess.mean() / downside_dev * np.sqrt(TRADING_DAYS_PER_YEAR)), 2)
 
             cumulative = (1 + portfolio_daily).cumprod()
             running_max = cumulative.cummax()
@@ -818,8 +912,20 @@ def _analyze(holdings):
             sigma = float(portfolio_daily.std())
             if sigma > 0:
                 n_sims, n_days = MONTE_CARLO_SIMULATIONS, MONTE_CARLO_FORECAST_DAYS
-                sims = np.random.normal(mu, sigma, (n_sims, n_days))
-                paths = np.cumprod(1 + sims, axis=1)
+                # Seed from the portfolio composition + today's date. Without a
+                # seed (and with no response cache on this endpoint) "Chance of
+                # Loss" and the whole cone changed on every page refresh with
+                # identical inputs. Same holdings on the same day -> same cone;
+                # it moves when the portfolio or the market data moves.
+                _seed_src = "|".join(sorted(f"{s}:{v:.2f}" for s, v in stock_values.items()))
+                _seed = (zlib.crc32(_seed_src.encode()) ^ zlib.crc32(today.isoformat().encode())) & 0xFFFFFFFF
+                rng = np.random.default_rng(_seed)
+                # Log-return sampling with geometric drift (mu - sigma^2/2).
+                # Feeding an arithmetic mean into a multiplicative cumprod
+                # biases the median path upward and understates loss odds.
+                log_mu = mu - 0.5 * sigma ** 2
+                sims = rng.normal(log_mu, sigma, (n_sims, n_days))
+                paths = np.exp(np.cumsum(sims, axis=1))
                 p5  = np.percentile(paths, 5,  axis=0)
                 p25 = np.percentile(paths, 25, axis=0)
                 p50 = np.percentile(paths, 50, axis=0)
@@ -851,10 +957,13 @@ def _analyze(holdings):
                     "explanation": f"With Egypt's T-bill rate at ~{risk_free_annual*100:.0f}%, you could earn guaranteed returns with zero risk.",
                     "learn_concept": "sharpe_ratio"})
 
+            # Phrased as a simulation, not as history: portfolio_daily applies
+            # TODAY's weights across the whole analysis window, including dates
+            # before the user owned any of it.
             if max_drawdown_info and max_drawdown_info["value"] < -MAX_DRAWDOWN_WARNING_PCT:
                 signals.append({"type": "severe_drawdown", "severity": "action_required", "symbol": None,
-                    "message": f"Your portfolio's max drawdown has been {max_drawdown_info['value']*100:.1f}%.",
-                    "explanation": f"A drawdown over {int(MAX_DRAWDOWN_WARNING_PCT*100)}% means your portfolio lost more than that share of its value at some point.",
+                    "message": f"This mix of holdings would have fallen {abs(max_drawdown_info['value'])*100:.1f}% at its worst over the analysis window.",
+                    "explanation": f"A drawdown over {int(MAX_DRAWDOWN_WARNING_PCT*100)}% means this combination of stocks, at your current weights, lost more than that share of its value at some point in the past — including dates before you owned them. It measures how bumpy the mix is, not what your account actually did.",
                     "learn_concept": "max_drawdown"})
 
             if max_drawdown_info and max_drawdown_info["current_drawdown"] < -CURRENT_DRAWDOWN_WARNING_PCT:
@@ -878,25 +987,42 @@ def _analyze(holdings):
                 "explanation": "The EGX30 index reflects the overall market direction.",
                 "learn_concept": "egx30_benchmark"})
 
+    # Tell the user when totals don't cover everything they own, rather than
+    # letting an unpriced holding quietly distort the headline numbers.
+    if excluded_holdings:
+        _syms = ", ".join(e["symbol"] for e in excluded_holdings)
+        _excluded_invested = sum(e["invested"] for e in excluded_holdings)
+        signals.append({"type": "holdings_excluded", "severity": "warning", "symbol": None,
+            "message": f"{len(excluded_holdings)} holding(s) could not be priced ({_syms}) and are left out of every total below.",
+            "explanation": f"Market data was unavailable for these, so {_excluded_invested:,.0f} EGP of cost basis is excluded from your P&L, allocation and risk metrics. The figures shown describe the rest of your portfolio. This is usually temporary — try refreshing later.",
+            "learn_concept": None})
+
     severity_order = {"action_required": 0, "warning": 1, "opportunity": 2, "info": 3}
     signals.sort(key=lambda s: severity_order.get(s["severity"], 4))
 
     return {
         "holdings": stock_analyses,
+        "excluded_holdings": excluded_holdings,
         "portfolio_metrics": {
             "total_value": round(total_portfolio_value, 2),
             "total_invested": round(total_invested, 2),
+            "excluded_invested": round(sum(e["invested"] for e in excluded_holdings), 2) if excluded_holdings else 0,
+            "excluded_count": len(excluded_holdings),
             "total_current_value": round(total_current_value, 2),
             "total_pnl": round(total_pnl, 2),
             "total_pnl_pct": round(total_pnl_pct, 2),
             "sector_allocation": sector_allocation,
             "stock_concentration": stock_concentration,
             "diversification_score": round(div_score, 0),
-            "weighted_rsi": round(weighted_rsi, 1) if rsi_count > 0 else None,
+            "weighted_rsi": round(weighted_rsi, 1) if weighted_rsi is not None else None,
             "num_holdings": len(holdings),
+            # Value-weighted so a large position counts more than a token one,
+            # and a symbol split across two lots isn't counted twice.
             "avg_composite_score": (
-                round(sum(composite_scores_collected) / len(composite_scores_collected), 1)
-                if composite_scores_collected else None
+                round(sum(s * v for s, v in composite_scores_collected)
+                      / sum(v for _, v in composite_scores_collected), 1)
+                if composite_scores_collected and sum(v for _, v in composite_scores_collected) > 0
+                else None
             ),
             "sharpe_ratio": sharpe_ratio,
             "sortino_ratio": sortino_ratio,

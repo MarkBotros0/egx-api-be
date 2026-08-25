@@ -31,7 +31,11 @@ BATCH_WORKERS = 6
 
 # === Bar fetch limits ===
 
-BATCH_BARS = 220                           # Bars fetched per symbol in batched composite analysis
+# INTERNAL_BARS_MIN is the ONE fetch window for every path that scores a
+# stock — detail page, dashboard batch, and per-holding portfolio analysis.
+# They must match: the composite score depends on the window (volatility,
+# support/resistance, SMA200, beta), so different windows meant the same
+# stock scored differently depending on which page you opened.
 INTERNAL_BARS_MIN = 400                    # Min bars fetched internally so SMA200 is valid even when caller asks for fewer
 USER_BARS_MIN = 30                         # Lower bound on user-requested `bars` query param
 USER_BARS_MAX = 5000                       # Upper bound on user-requested `bars` query param
@@ -39,8 +43,6 @@ BATCH_MAX_SYMBOLS = 24                     # Max symbols accepted per batched co
 HISTORICAL_MAX_SYMBOLS = 20                # Max symbols accepted per /historical request
 COMPARE_MIN_SYMBOLS = 2
 COMPARE_MAX_SYMBOLS = 10
-PORTFOLIO_FETCH_BARS_MIN = 200             # Floor on bars per holding (so SMA50/RSI are stable)
-PORTFOLIO_FETCH_BARS_MAX = 500             # Ceiling on bars per holding (caps Vercel-timeout exposure)
 
 
 # === Trading calendar ===
@@ -50,12 +52,11 @@ TRADING_DAYS_PER_YEAR = 252                # Used for annualizing Sharpe/Sortino
 
 # === Divergence detection windows ===
 
-# Full /api/analysis can afford the longer window; batched + per-holding
-# portfolio paths cap at 30 to fit the per-symbol time budget. Keep both
-# values explicit so the difference is auditable.
+# ONE lookback for every path. The batch and portfolio paths used to scan a
+# shorter window, which meant a divergence visible on the detail page was
+# invisible on the card for the same stock — and the divergence category
+# (8% of the score) differed between them.
 DIVERGENCE_LOOKBACK_FULL = 60
-DIVERGENCE_LOOKBACK_BATCH = 30
-DIVERGENCE_LOOKBACK_PORTFOLIO = 30
 
 
 # === Composite score signal cutoffs ===
@@ -67,6 +68,18 @@ SCORE_SELL_MAX = 40
 SCORE_HOLD_MAX = 60
 SCORE_BUY_MAX = 80
 # (>80 is Strong Buy)
+
+
+# === Stop-loss convention ===
+
+# THE house convention, used everywhere a stop-loss is suggested:
+# stop = nearest_support - STOP_LOSS_ATR_MULTIPLIER x ATR.
+# Anchoring to support (not to entry price) keeps the number objective and
+# computable before the user has bought anything. Referenced by
+# core/levels.py, core/entry_price.py and routers/portfolio_analysis.py —
+# do not re-derive a different multiplier at a call site.
+STOP_LOSS_ATR_MULTIPLIER = 1.5
+STOP_LOSS_FALLBACK_PCT = 0.02              # Used when ATR is unavailable: 2% below support
 
 
 # === Bollinger Band squeeze detection ===
@@ -91,10 +104,12 @@ CURRENT_DRAWDOWN_WARNING_PCT = 0.05        # Currently in a drawdown of ≥5% fr
 
 # === Portfolio risk thresholds ===
 
-CONCENTRATION_WARNING_PCT = 30             # Single position > 30% of portfolio = penalty starts in diversification score
-CONCENTRATION_CRITICAL_PCT = 50            # Sector > 50% of portfolio = larger diversification-score penalty
-SECTOR_ALERT_PCT = 40                      # Sector > 40% triggers a `sector_concentration` warning signal
-STOCK_ALERT_PCT = 35                       # Single stock > 35% triggers a `stock_concentration` warning signal
+# These two thresholds drive BOTH the warning signals and the diversification
+# score's penalties. They were separate values once, so a portfolio could show
+# "Diversification 100/100" beside a "45% in Banking — consider diversifying"
+# alert. One threshold per concept keeps the score and the alerts consistent.
+SECTOR_ALERT_PCT = 40                      # Sector > 40%: `sector_concentration` warning + diversification-score penalty
+STOCK_ALERT_PCT = 35                       # Single stock > 35%: `stock_concentration` warning + diversification-score penalty
 CORRELATION_HIGH_THRESHOLD = 0.7           # Pairwise corr > 0.7 = "high" (warning signal)
 CORRELATION_NEGATIVE_THRESHOLD = -0.3      # Pairwise corr < -0.3 = "good for diversification" (info signal)
 PROFIT_TARGET_PCT = 20                     # Unrealized gain > 20% triggers profit-taking reminder

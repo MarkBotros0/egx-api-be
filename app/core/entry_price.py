@@ -21,8 +21,12 @@ The max buy price is the LOWER of the two caps. When one cap is missing
 (e.g. no resistance identified), the other stands alone; if neither can be
 computed the helper returns None and the UI hides the card.
 
-Stop-loss suggestion is 1 × ATR below support (beginner-friendly: buffered,
-not pinned, to absorb normal daily noise without getting whipsawed).
+Stop-loss suggestion follows the single house convention:
+STOP_LOSS_ATR_MULTIPLIER x ATR below support (see core/constants.py). It
+must match core/levels.py and routers/portfolio_analysis.py exactly — the
+stock detail page renders this card and the entry/exit card side by side,
+so two different stop numbers there is a contradiction the user cannot
+resolve.
 
 This module is pure: no DB, no I/O. Consumes values already in the analysis
 response.
@@ -33,8 +37,12 @@ from __future__ import annotations
 import math
 from typing import Optional
 
+from app.core.constants import STOP_LOSS_ATR_MULTIPLIER
+
 
 # Beginner rule: don't chase more than 5% above nearest support.
+# Mirrors ENTRY_NEAR_SUPPORT_PCT (5.0) in core/levels.py — the same business
+# rule expressed as a fraction here and a percent there.
 SUPPORT_CHASE_PCT = 0.05
 
 # Minimum acceptable reward/risk for an entry in this app's guidance.
@@ -85,7 +93,7 @@ def compute_max_buy_price(
     if atr_value is None or not math.isfinite(atr_value) or atr_value <= 0:
         atr_value = current_price * FALLBACK_ATR_PCT_OF_PRICE
 
-    stop_loss = round(nearest_support - atr_value, 2)
+    stop_loss = round(nearest_support - STOP_LOSS_ATR_MULTIPLIER * atr_value, 2)
 
     # Cap A: support-proximity
     cap_support = round(nearest_support * (1 + SUPPORT_CHASE_PCT), 2)
@@ -97,9 +105,6 @@ def compute_max_buy_price(
         # → entry <= (target + k*stop) / (1 + k)
         k = MIN_RISK_REWARD
         cap_rr = round((nearest_resistance + k * stop_loss) / (1 + k), 2)
-        # Clamp: never recommend buying above the target itself.
-        if cap_rr >= nearest_resistance:
-            cap_rr = round(nearest_resistance, 2)
 
     candidate_caps = [c for c in (cap_support, cap_rr) if c is not None]
     if not candidate_caps:
@@ -130,8 +135,8 @@ def compute_max_buy_price(
 
     reasons: list = []
     reasons.append(
-        f"Stop-loss {stop_loss:.2f} = 1 ATR ({atr_value:.2f}) below support "
-        f"{nearest_support:.2f}."
+        f"Stop-loss {stop_loss:.2f} = {STOP_LOSS_ATR_MULTIPLIER:g} x ATR "
+        f"({atr_value:.2f}) below support {nearest_support:.2f}."
     )
     if nearest_resistance is not None:
         reasons.append(
