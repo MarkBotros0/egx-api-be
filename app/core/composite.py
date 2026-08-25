@@ -297,8 +297,21 @@ def score_momentum(rsi_val, macd_hist, macd_hist_prev,
 
 
 def score_volume(obv_rising: Optional[bool], price_rising_20d: Optional[bool],
-                 mfi_val: Optional[float], volume_price: Optional[dict]) -> tuple:
-    """Score the volume category (0-100)."""
+                 mfi_val: Optional[float], volume_price: Optional[dict],
+                 *, liquidity: Optional[dict] = None) -> tuple:
+    """
+    Score the volume category (0-100).
+
+    `liquidity` (from indicators.liquidity_score) is PENALTY-ONLY: thin volume
+    subtracts, everything else adds nothing. The other bands here are
+    directional — "is volume confirming this move?" — while liquidity is
+    structural: "can you get out?". Awarding points for normal liquidity would
+    let the two cancel into a number that means neither, and would move ~95%
+    of stocks for no information. Only the genuinely untradeable tail moves.
+    """
+    # Note the guard deliberately ignores `liquidity`: it must not be able to
+    # carry the category on its own, or a stock with no volume-confirmation
+    # data at all would score 38 off a single liquidity reason.
     if obv_rising is None and mfi_val is None and volume_price is None:
         return None, []
 
@@ -355,6 +368,33 @@ def score_volume(obv_rising: Optional[bool], price_rising_20d: Optional[bool],
         elif cls == "accumulation":
             score += 8
             reasons.append(f"Flat price on {vr:.1f}x volume — quiet accumulation")
+
+    # Liquidity: penalty-only (see docstring). The "low" tier scores 0 but
+    # still explains itself — with ~a quarter of the market in that tier,
+    # penalizing it would shift the whole distribution for no signal.
+    if liquidity is not None and liquidity.get("avg_volume") is not None:
+        avg_vol = liquidity["avg_volume"]
+        tier = liquidity.get("index_membership") or "EGX100"
+        dead = liquidity.get("dead_sessions") or 0
+        if dead >= 1 and liquidity.get("thin"):
+            # Sessions with no trading at all. Naming them matters: the average
+            # can look respectable off one old block trade while the stock is
+            # in practice untradeable.
+            score -= 12
+            reasons.append(
+                f"No trading on {dead} of the last 20 sessions — you may not be "
+                "able to buy or sell this at the quoted price."
+            )
+        elif liquidity.get("thin"):
+            score -= 12
+            reasons.append(
+                f"Thin liquidity — {avg_vol:,} shares/day, below the floor for "
+                f"an {tier} name. Hard to exit; keep the position small."
+            )
+        elif liquidity.get("classification") == "low":
+            reasons.append(
+                f"Modest liquidity — {avg_vol:,} shares/day for an {tier} name."
+            )
 
     return _clamp(score), reasons
 
@@ -433,7 +473,10 @@ def score_divergence(divergences: Optional[dict]) -> tuple:
 def score_quality(multi_timeframe: Optional[dict],
                   trend_consistency: Optional[float],
                   current_drawdown_pct: Optional[float],
-                  pe_ratio: Optional[float] = None) -> tuple:
+                  *,
+                  pe_ratio: Optional[float] = None,
+                  dividend_yield: Optional[float] = None,
+                  loss_making: Optional[bool] = None) -> tuple:
     """
     Score the quality category (0-100).
 
@@ -441,20 +484,29 @@ def score_quality(multi_timeframe: Optional[dict],
     drawdowns. A beginner benefits from holding "clean" trends — choppy stocks
     are where over-trading losses come from.
 
+    The fundamentals inputs are keyword-only on purpose: callers pass them by
+    name, so a new one can be added without silently shifting an existing
+    positional argument into the wrong slot.
+
     Inputs:
       - multi_timeframe: output of indicators.multi_timeframe_alignment(daily, weekly).
                          Keys: daily_trend, weekly_trend, aligned, alignment_score.
       - trend_consistency: float 0-1; fraction of the last 20 bars where close
                            was above the 20-day SMA (higher = more consistent).
       - current_drawdown_pct: FRACTION, not a percent — negative, e.g. -0.15
-                              for -15% below the recent peak. All callers
+                              for -15% below the 52-week high. All callers
                               build it via `(price / peak) - 1`.
-      - pe_ratio: optional trailing P/E from the EGX P/E feed. Egypt context is
-                  tight (T-bills ~25%) so the bands are stricter than in
-                  developed markets. None → band is skipped entirely.
+      - pe_ratio: trailing P/E. Bands are centred on the EGX MEDIAN (~12.4),
+                  not on a developed-market notion of "cheap" — see the band
+                  comment below. None → skipped.
+      - dividend_yield: PERCENT (e.g. 3.12). 0.0 means "pays nothing", which is
+                        not a defect; None means unknown. Both skip the band.
+      - loss_making: from diluted EPS < 0. Separate from pe_ratio because the
+                     feed reports null, never a negative P/E, for loss-makers.
     """
     if (multi_timeframe is None and trend_consistency is None
-            and current_drawdown_pct is None and pe_ratio is None):
+            and current_drawdown_pct is None and pe_ratio is None
+            and dividend_yield is None and loss_making is None):
         return None, []
 
     score = 50.0
@@ -489,35 +541,95 @@ def score_quality(multi_timeframe: Optional[dict],
         # Contract is a fraction (see docstring). Sniffing the magnitude to
         # guess the unit made a -0.9% drawdown read as -90% and scored it
         # worse than a -1.5% one.
+        #
+        # The peak is the 52-week high, so the reasons say so — "recent peak"
+        # was vague enough that users read it as a short-term high.
         dd_pct = current_drawdown_pct * 100
         if dd_pct <= -30:
             score -= 15
-            reasons.append(f"Severe drawdown ({dd_pct:.0f}% from peak) — quality impaired")
+            reasons.append(
+                f"{abs(dd_pct):.0f}% below its 52-week high — quality impaired"
+            )
         elif dd_pct <= -15:
             score -= 8
-            reasons.append(f"Moderate drawdown ({dd_pct:.0f}% from peak)")
+            reasons.append(f"{abs(dd_pct):.0f}% below its 52-week high")
         elif dd_pct >= -3:
             score += 5
-            reasons.append("Near recent peak — strong quality")
+            reasons.append(
+                f"Within {abs(dd_pct):.1f}% of its 52-week high — trading at the "
+                "top of its range"
+            )
 
-    # P/E sub-component: reward cheap/fair P/E, penalize expensive or loss-making.
-    # Bands are shifted down for Egypt (T-bill ~25%). When pe_ratio is None the
-    # band is skipped — quality score still builds from the other inputs.
+    # Loss-making comes from diluted EPS, not from a negative P/E: the
+    # fundamentals feed reports NULL for loss-makers, so the old `pe_ratio < 0`
+    # test could never fire.
+    if loss_making:
+        score -= 15
+        reasons.append("Company is loss-making — earnings-based valuation doesn't apply")
+
+    # P/E sub-component, centred on the EGX MEDIAN (~12.4), not on a
+    # developed-market idea of cheap. The previous bands gave +8 to anything
+    # under 20, which is most of this market — so simply HAVING P/E data was
+    # worth points, and only ~22% of EGX stocks have it. Bands now aim to give
+    # the median stock roughly nothing, making this a relative signal.
     if pe_ratio is not None:
-        if pe_ratio < 0:
-            score -= 15
-            reasons.append("Company is loss-making (negative P/E)")
-        elif pe_ratio < 10:
-            score += 15
-            reasons.append(f"Very cheap on earnings (P/E {pe_ratio:.1f})")
-        elif pe_ratio < 20:
-            score += 8
-            reasons.append(f"Reasonably valued (P/E {pe_ratio:.1f})")
-        elif pe_ratio < 30:
-            reasons.append(f"Fully valued (P/E {pe_ratio:.1f})")
-        else:
-            score -= 10
+        if pe_ratio < 3:
+            # Not a bargain — a P/E under 3 in this market means the earnings
+            # are non-recurring or the price has collapsed. MEGM trades at 0.7.
+            score += 3
+            reasons.append(
+                f"P/E {pe_ratio:.1f} — implausibly low; check the earnings are recurring"
+            )
+        elif pe_ratio < 8:
+            score += 12
+            reasons.append(f"Cheap versus the EGX median of ~12 (P/E {pe_ratio:.1f})")
+        elif pe_ratio < 15:
+            score += 4
+            reasons.append(f"Around the EGX median (P/E {pe_ratio:.1f})")
+        elif pe_ratio < 25:
+            score -= 2
+            reasons.append(f"Above the EGX median (P/E {pe_ratio:.1f})")
+        elif pe_ratio < 40:
+            score -= 8
             reasons.append(f"Expensive on earnings (P/E {pe_ratio:.1f})")
+        else:
+            score -= 14
+            reasons.append(
+                f"Very expensive (P/E {pe_ratio:.1f}) — needs confirmed growth to justify"
+            )
+
+    # Dividend yield. Deliberately NON-monotonic: a very high yield on the EGX
+    # is almost always a special dividend or a collapsed share price, not
+    # income quality. Every reason frames the payout as evidence of
+    # cash-generative discipline, never as "good income" — even 7% loses badly
+    # to a ~25% T-bill, and saying otherwise would mislead.
+    # 0.0 means "pays nothing", which is normal for a growth company and not a
+    # defect, so it scores the same as unknown.
+    if dividend_yield is not None and dividend_yield > 0:
+        if dividend_yield >= 15:
+            score -= 8
+            reasons.append(
+                f"Extreme yield (DY {dividend_yield:.1f}%) — typically a special "
+                "dividend or a collapsed share price, not steady income"
+            )
+        elif dividend_yield >= 8:
+            score += 4
+            reasons.append(
+                f"Very high dividend (DY {dividend_yield:.1f}%) — check it recurs"
+            )
+        elif dividend_yield >= 4:
+            score += 8
+            reasons.append(
+                f"Above-median dividend (DY {dividend_yield:.1f}%) — real cash returned "
+                "to shareholders, though still under the T-bill"
+            )
+        elif dividend_yield >= 2:
+            score += 4
+            reasons.append(
+                f"Pays about the EGX median dividend (DY {dividend_yield:.1f}%)"
+            )
+        else:
+            reasons.append(f"Token dividend (DY {dividend_yield:.1f}%)")
 
     return _clamp(score), reasons
 
@@ -711,6 +823,10 @@ def compute_composite(indicators: dict, extras: Optional[dict] = None,
                   - "history_days": int (for risk-adjusted min-history gate)
                   - "risk_free_rate_pct": float (usually passed through from settings)
                   - "relative_strength": output of indicators.relative_strength(...)
+                  - "pe_ratio": float (trailing P/E) | None
+                  - "dividend_yield": float PERCENT; 0.0 = pays nothing, None = unknown
+                  - "loss_making": bool (from diluted EPS) | None
+                  - "liquidity": output of indicators.liquidity_score(...)
       weights:    dict {category: weight_percent}, default DEFAULT_WEIGHTS.
       macro:      optional macro dict (from macro_fetch.get_macro()) — when
                   provided, applies a post-hoc modulation based on EGX30 trend.
@@ -763,6 +879,7 @@ def compute_composite(indicators: dict, extras: Optional[dict] = None,
         extras.get("price_rising_20d"),
         mfi_val,
         extras.get("volume_price"),
+        liquidity=extras.get("liquidity"),
     )
     volatility_score, volatility_reasons = score_volatility(
         current_price, bb_upper, bb_lower, bb_middle,
@@ -776,6 +893,8 @@ def compute_composite(indicators: dict, extras: Optional[dict] = None,
         extras.get("trend_consistency"),
         extras.get("current_drawdown_pct"),
         pe_ratio=extras.get("pe_ratio"),
+        dividend_yield=extras.get("dividend_yield"),
+        loss_making=extras.get("loss_making"),
     )
     # `or` would treat a legitimate 0% rate as missing — check for None.
     _rfr = extras.get("risk_free_rate_pct")

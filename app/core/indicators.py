@@ -905,6 +905,11 @@ _INDEX_LIQ_FLOORS = {
     "NILEX":   {"thin": 5_000,     "low": 20_000},
 }
 
+# Share of the lookback window that may have zero volume before the stock is
+# called untradeable regardless of its average. A genuinely liquid EGX name
+# essentially never has a dead session.
+_DEAD_SESSION_SHARE = 0.3
+
 def liquidity_score(volume: pd.Series, index_membership: str | None = None,
                     lookback: int = 20) -> dict:
     """
@@ -918,9 +923,15 @@ def liquidity_score(volume: pd.Series, index_membership: str | None = None,
         "avg_volume": int | None,
         "classification": "thin" | "low" | "normal" | None,
         "thin": bool,     (worth a warning for a beginner)
+        "index_membership": str | None,   (the tier whose floors were applied)
     }
+
+    `index_membership` is echoed back because the caller's message needs to say
+    WHICH floor was used — "thin for an EGX30 name" and "thin for a NILEX name"
+    are ~20x apart, and a bare "thin" hides that the judgement is relative.
     """
-    empty = {"avg_volume": None, "classification": None, "thin": False}
+    empty = {"avg_volume": None, "classification": None, "thin": False,
+             "index_membership": None, "dead_sessions": None}
     if volume is None or len(volume.dropna()) < lookback:
         return empty
 
@@ -928,8 +939,28 @@ def liquidity_score(volume: pd.Series, index_membership: str | None = None,
     if np.isnan(avg):
         return empty
 
-    floors = _INDEX_LIQ_FLOORS.get((index_membership or "").upper(),
-                                   _INDEX_LIQ_FLOORS["EGX100"])
+    # Days with NO trading at all. A mean hides these completely: a suspended
+    # stock with 19 dead sessions and one old block trade averages out to
+    # "low" liquidity, when the truth is you cannot trade it. MEGM has been
+    # frozen at 12.54 with zero volume since January 2022 and still averaged
+    # ~99k shares/day. Count the zeros instead of trusting the mean.
+    window = volume.tail(lookback)
+    dead_sessions = int((window <= 0).sum())
+    if dead_sessions >= lookback * _DEAD_SESSION_SHARE:
+        return {
+            "avg_volume": int(avg),
+            "classification": "thin",
+            "thin": True,
+            "index_membership": (index_membership or "").upper() or None,
+            "dead_sessions": dead_sessions,
+        }
+
+    tier = (index_membership or "").upper()
+    if tier not in _INDEX_LIQ_FLOORS:
+        # Unknown tier — EGX100 is the middle-of-the-road default, and was the
+        # behaviour for every symbol before membership was plumbed through.
+        tier = "EGX100"
+    floors = _INDEX_LIQ_FLOORS[tier]
 
     if avg < floors["thin"]:
         classification = "thin"
@@ -945,6 +976,8 @@ def liquidity_score(volume: pd.Series, index_membership: str | None = None,
         "avg_volume": int(avg),
         "classification": classification,
         "thin": thin,
+        "index_membership": tier,
+        "dead_sessions": dead_sessions,
     }
 
 

@@ -1,9 +1,12 @@
 """
-/api/pe — P/E ratio endpoints, backed by the nightly-scraped pe_data table.
+/api/pe — fundamentals endpoints, backed by the nightly-refreshed pe_data table.
 
-GET  /api/pe                  — All stored P/E rows + freshness metadata
+GET  /api/pe                  — All stored rows + freshness metadata
 GET  /api/pe?symbol=XXX       — Single symbol (404 if no stored row)
-POST /api/pe/refresh          — Trigger the scrape (cron-invoked; secret-guarded)
+POST /api/pe/refresh          — Trigger the refresh (cron-invoked; secret-guarded)
+
+Rows carry trailing P/E, dividend yield and loss-making status. See
+core/pe_fetch.py for the source and its null semantics.
 """
 
 import os
@@ -30,7 +33,8 @@ def get_pe(symbol: Optional[str] = Query(None)):
             return {"symbol": symbol.upper(), **data}
 
         rows = db.execute(
-            "SELECT symbol, company_name, pe_ratio, dividend_yield, updated_at FROM pe_data"
+            "SELECT symbol, company_name, pe_ratio, dividend_yield, loss_making, "
+            "updated_at FROM pe_data"
         ).fetchall()
         last_row = db.execute(
             "SELECT value FROM settings WHERE key = 'pe_last_successful_fetch'"
@@ -45,7 +49,8 @@ def get_pe(symbol: Optional[str] = Query(None)):
                     "company_name": r[1],
                     "pe_ratio": r[2],
                     "dividend_yield": r[3],
-                    "fetched_at": r[4],
+                    "loss_making": r[4],
+                    "fetched_at": r[5],
                 }
                 for r in rows
             ],

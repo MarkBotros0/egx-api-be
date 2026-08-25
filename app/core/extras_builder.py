@@ -40,6 +40,7 @@ from app.core.indicators import (
     annualized_return,
     daily_returns,
     detect_divergences,
+    liquidity_score,
     ma_crossovers,
     macd,
     multi_timeframe_alignment,
@@ -55,6 +56,9 @@ WEEKLY_RESAMPLE_RULE = "W-THU"
 
 # Bars needed on each side of a 20-bar comparison window.
 _TREND_WINDOW = 20
+
+# Averaging window for the liquidity check, in bars.
+_LIQUIDITY_LOOKBACK = 20
 
 # How many bars make a year, per interval. EVERY annualization, 1-year window
 # and history gate must scale by this — otherwise weekly bars get treated as
@@ -143,6 +147,9 @@ def build_composite_extras(
     include_multi_timeframe: bool = True,
     risk_free_rate_pct: Optional[float] = None,
     pe_ratio: Optional[float] = None,
+    dividend_yield: Optional[float] = None,
+    loss_making: Optional[bool] = None,
+    index_membership: Optional[str] = None,
     divergence_lookback: int = DIVERGENCE_LOOKBACK_FULL,
 ) -> dict:
     """
@@ -174,6 +181,12 @@ def build_composite_extras(
                            starts brushing the 30 s Vercel ceiling.
       risk_free_rate_pct:  T-bill rate as a PERCENT (e.g. 25.0).
       pe_ratio:            Trailing P/E, or None when unknown.
+      dividend_yield:      PERCENT (e.g. 3.12). 0.0 means "pays nothing" —
+                           real data, distinct from None ("unknown").
+      loss_making:         From diluted EPS < 0, or None when unknown.
+      index_membership:    "EGX30"/"EGX70"/"EGX100"/"NILEX" or None. Selects
+                           which volume floors the liquidity check uses; None
+                           falls back to EGX100 inside liquidity_score.
       divergence_lookback: Bars scanned for divergences.
 
     Returns:
@@ -184,6 +197,9 @@ def build_composite_extras(
         "bb_squeeze": bool,
         "crossovers": {...},
         "multi_timeframe": {...} | None,
+        "liquidity": {...} | None,
+        "high_52w": float | None,
+        "low_52w": float | None,
       }
     """
     close = df["close"]
@@ -239,30 +255,68 @@ def build_composite_extras(
             multi_timeframe = None
 
     # --- Trend consistency: share of last 20 bars closing above SMA20 ---
+    # Bars sitting exactly ON the average are excluded rather than counted as
+    # "below". A suspended stock whose price is frozen has close == SMA20 on
+    # every bar, which scored 0.0 — read by score_quality as "steady
+    # downtrend" and penalised, when in truth the price simply never moved.
+    # With no bar off the average, this stays None and the band is skipped.
     trend_consistency = None
     try:
         sma20 = sma(close, 20)
-        paired = [
+        moved = [
             (c, s)
             for c, s in zip(close.iloc[-_TREND_WINDOW:], sma20.iloc[-_TREND_WINDOW:])
-            if s == s
+            if s == s and c != s
         ]
-        if paired:
-            trend_consistency = sum(1 for c, s in paired if c > s) / len(paired)
+        if moved:
+            trend_consistency = sum(1 for c, s in moved if c > s) / len(moved)
     except Exception:
         trend_consistency = None
 
-    # --- Current drawdown vs the 1-year peak (FRACTION, e.g. -0.15) ---
-    # `bars_per_year` bars, not 252 bars — on weekly data a fixed 252 made
-    # this a ~5-year drawdown labelled as a 1-year one.
+    # --- 52-week extremes, from the FULL frame and true intraday high/low ---
+    # `bars_per_year` bars, not 252 — on weekly data a fixed 252 made this a
+    # ~5-year window labelled as a 1-year one.
+    #
+    # The peak comes from `high`, not `close`. Reading closes made score_quality
+    # say "near recent peak" off one number while StatsPanel rendered "52W High"
+    # off another, on the same screen. `analysis.py` used to compute these
+    # separately with its own copy of the bars-per-year table; it now reads them
+    # from here so there is one definition.
+    yearly_window = min(bars_per_year, len(df))
+    high_52w = low_52w = None
+    try:
+        high_52w = float(df["high"].tail(yearly_window).max())
+        low_52w = float(df["low"].tail(yearly_window).min())
+    except Exception:
+        high_52w = low_52w = None
+
+    # --- Current drawdown vs the 52-week high (FRACTION, e.g. -0.15) ---
     current_drawdown_pct = None
     try:
-        window = close.tail(min(bars_per_year, len(close)))
-        peak = float(window.max())
+        # Fall back to closes when there is no high column (synthetic frames).
+        peak = high_52w
+        if peak is None:
+            peak = float(close.tail(yearly_window).max())
         if peak > 0:
             current_drawdown_pct = (float(close.iloc[-1]) - peak) / peak
     except Exception:
         current_drawdown_pct = None
+
+    # --- Liquidity, index-aware, normalized to shares per DAY ---
+    # liquidity_score's floors are daily share counts. Handing it weekly bars
+    # would make one stock look ~5x more liquid on the Weekly view than on the
+    # Daily view of itself — the same interval-calibration class of bug as the
+    # annualization ones above.
+    liquidity = None
+    try:
+        bars_per_day = TRADING_DAYS_PER_YEAR / bars_per_year
+        liquidity = liquidity_score(
+            df["volume"] / bars_per_day,
+            index_membership=index_membership,
+            lookback=_LIQUIDITY_LOOKBACK,
+        )
+    except Exception:
+        liquidity = None
 
     # --- Annualized return + annualized volatility ---
     # Both scale by bars_per_year. With the daily constants hardcoded, a stock
@@ -332,6 +386,9 @@ def build_composite_extras(
         "risk_free_rate_pct": risk_free_rate_pct,
         "relative_strength": rs,
         "pe_ratio": pe_ratio,
+        "dividend_yield": dividend_yield,
+        "loss_making": loss_making,
+        "liquidity": liquidity,
     }
 
     return {
@@ -341,4 +398,7 @@ def build_composite_extras(
         "bb_squeeze": bb_squeeze,
         "crossovers": crossovers,
         "multi_timeframe": multi_timeframe,
+        "liquidity": liquidity,
+        "high_52w": high_52w,
+        "low_52w": low_52w,
     }

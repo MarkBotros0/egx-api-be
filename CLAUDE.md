@@ -43,7 +43,9 @@ egx-api-be/                     # Python FastAPI backend
       indicators.py             # All technical indicators (pandas/numpy only)
       levels.py                 # Key levels (nearest support/resistance) + entry/exit zone computation
       macro_fetch.py            # Macro data fetch helper (EGX30, USD/EGP, CBE rate)
-      pe_fetch.py               # EGX P/E scraper (MarketPECompanies.aspx) + name→symbol resolver
+      pe_fetch.py               # Fundamentals feed (P/E, dividend yield, loss-making) via TradingView scanner
+      tradingview.py            # Shared TradingView scanner client (URL/headers), also used by tickers.py
+      index_membership.py       # Static EGX30/70/100/NILEX lookup — no network, for the scoring hot path
       constants.py              # Shared constants (thresholds, lookbacks)
       json_encoding.py          # Float/NaN JSON safety helpers
     routers/
@@ -198,22 +200,49 @@ User's watched symbols, stored in the `watchlist` table in Turso.
 - DELETE `?symbol=XXX`
 
 ### GET /api/pe, POST /api/pe/refresh
-Trailing P/E per stock, served from `pe_data`. Populated by a nightly Vercel cron
-(`04:00 UTC`, see `egx-api-be/vercel.json`) that calls `POST /api/pe/refresh`.
+Fundamentals per stock (trailing P/E, dividend yield, loss-making), served from
+`pe_data`. Populated by a nightly Vercel cron (`04:00 UTC`, see
+`egx-api-be/vercel.json`) that calls `POST /api/pe/refresh`.
 - `GET /api/pe` returns `{ data: [...], last_successful_fetch, last_attempt_status }`
 - `GET /api/pe?symbol=XXX` returns the single row or 404
-- `POST /api/pe/refresh` scrapes [MarketPECompanies.aspx](https://www.egx.com.eg/en/MarketPECompanies.aspx),
-  parses via `pe_fetch.parse_pe_html`, resolves each page row's company name to an
-  egxpy symbol, and upserts. **Never wipes existing rows on failure** — last-known-good is preserved.
+- `POST /api/pe/refresh` makes ONE POST to the TradingView scanner via
+  `core/tradingview.scan`, and upserts. **Never wipes existing rows on failure** —
+  last-known-good is preserved.
 - `PE_REFRESH_SECRET` env var guards manual invocation in production.
 
-**Important:** the EGX page exposes only Company Name / P/E / DY% — no symbol. Name→symbol
-resolution lives in `pe_fetch.match_symbol` with precedence overrides >
-exact-normalized > unique-prefix > jaccard≥0.6. `data/egx_pe_name_overrides.json` is the
-manual-map tail for spelling variants; extend it when new unmatched names appear.
-Unmatched names from each run are stored in `settings.pe_unmatched_names` for debugging.
+**The source is no longer egx.com.eg.** That page is behind a JavaScript bot
+challenge: the request returns HTTP 200 with ~6 KB reading *"Please enable
+JavaScript to view the page content"*, so the GridView parser matched zero rows.
+It had **never once succeeded in production** — `pe_data` was empty and
+`settings.pe_last_attempt_status` was blank from the day the feature shipped
+until 2026-08-25, which means `score_quality`'s P/E band had never executed
+against real data. The whole name→symbol matching apparatus
+(`match_symbol`, the overrides JSON, jaccard scoring) is **deleted**: the
+scanner returns bare symbols, so there is nothing to resolve.
 
-`pe_data.pe_ratio IS NULL` means the EGX page printed "0" — do NOT read that as "very cheap".
+`core/tradingview.py` holds the scanner URL/headers, shared with
+`routers/tickers.py::_fetch_live_tickers` so the two cannot drift.
+
+**Null semantics — these changed with the source, and two of them invert:**
+
+| Field | Meaning |
+|-------|---------|
+| `pe_ratio IS NULL` | no trailing P/E — usually a loss-maker or newly listed |
+| `dividend_yield = 0.0` | **real data: the company pays nothing.** Only NULL means unknown — do NOT treat 0 as a missing-data sentinel the way the old EGX feed did |
+| negative `pe_ratio` | **never occurs.** The feed returns NULL for loss-makers, so `loss_making` (from diluted EPS < 0) carries that instead |
+
+**Coverage is partial and that is expected:** of ~293 EGX stocks, ~64 have a
+trailing P/E and ~92 a dividend yield. A missing value SKIPS its band rather
+than defaulting, so a stock is never punished for the feed's silence — and the
+bands are centred on the EGX median so having data isn't itself an advantage
+(see *Fundamentals bands*).
+
+Guards in `refresh_pe_data`: a response under `MIN_EXPECTED_ROWS` (100) is
+rejected **without writing anything** — a partial refresh that updates 50
+symbols and leaves 240 stale is worse than all-stale, because nothing on screen
+distinguishes them. Rows with no P/E, DY or EPS are skipped so
+`get_pe_for_symbol` can't return a truthy all-null dict. `pe_ratio > 300` is
+dropped at ingest (the live max is ~2756, which would render as "P/E 2756.0").
 
 ### GET /api/historical, GET /api/compare
 Multi-symbol historical data for comparison page.
@@ -266,10 +295,10 @@ PRESETS = {
 **Category scorers (each returns `(score | None, reasons)`):**
 - `score_trend(...)` — price vs SMA50/200, ADX strength, DI±, Golden/Death Cross
 - `score_momentum(...)` — RSI zone, MACD histogram direction, Stochastic crossover
-- `score_volume(...)` — OBV trend, MFI bands, volume-price classification
+- `score_volume(..., liquidity=None)` — OBV trend, MFI bands, volume-price classification, plus a **penalty-only** liquidity band (see *Liquidity*)
 - `score_volatility(...)` — Bollinger Band position + squeeze detection
 - `score_divergence(...)` — regular ±15, hidden ±5, double-divergence bonus ±10, baseline 50
-- **`score_quality(multi_timeframe, trend_consistency, current_drawdown_pct, pe_ratio=None)`** — rewards smooth trends + aligned timeframes + shallow drawdowns (penalises whipsaws); now also includes a P/E sub-band (cheap <10 → +15, >30 → -10, loss-making → -15) when `pe_ratio` is supplied. Egypt-tight thresholds (T-bill ~25%).
+- **`score_quality(multi_timeframe, trend_consistency, current_drawdown_pct, *, pe_ratio=None, dividend_yield=None, loss_making=None)`** — rewards smooth trends + aligned timeframes + being near the 52-week high (penalises whipsaws), plus the valuation bands below. **The fundamentals args are keyword-only** so a new one can't shift an existing positional argument.
 - **`score_risk_adjusted(annualized_return_pct, risk_free_rate_pct, vol_ann_pct, atr_pct_of_price, history_days)`** — compares per-stock return to the ~25% T-bill. **Min 120-day history gate**: returns `None` if insufficient data, and renormalization excludes the category
 - **`score_relative_strength(rs_dict)`** — alpha vs EGX30 (leader/laggard classification over 30 days)
 
@@ -313,6 +342,79 @@ Rules that keep them aligned:
 6. **Scoring inputs belong in the cache key.** `/api/analysis` keys on `w_hash + macro_tag + rfr_tag`; the batch path keys on the same. Omitting the macro regime meant a bullish→bearish flip updated the dashboard immediately while the detail page served a pre-flip score for the rest of the 15-minute TTL.
 
 If a category legitimately can't be scored (a stock with 60 bars has no 1-year return), it is dropped on *every* page for the same reason — and `ScoreBreakdown` renders it as "excluded — not enough data" rather than advertising a weight it didn't carry.
+
+### Fundamentals bands — centred on the EGX median, NOT on "low = cheap"
+
+Both valuation bands live in `score_quality` and are calibrated against the
+**actual EGX distribution** (measured 2026-08-25 over all 293 listed stocks):
+
+| Metric | coverage | p25 | median | p75 | p90 | max |
+|---|---|---|---|---|---|---|
+| P/E (TTM) | 64 | 5.8 | **12.4** | 22.0 | — | 2756 |
+| Dividend yield (>0) | 86 | 1.17% | **3.12%** | 5.11% | 7.21% | 42.55% |
+
+**Why centring matters.** The old band gave `+8` to any P/E under 20 — which is
+most of a market whose median is 12.4. Since only ~22% of EGX stocks have a P/E
+at all, simply HAVING data was worth points, and the app would have ranked
+covered stocks above uncovered ones for a reason unrelated to their merit. The
+rule to preserve: **the median EGX stock should score ≈0 from these bands.**
+
+P/E: `<3 → +3`, `3–8 → +12`, `8–15 → +4`, `15–25 → −2`, `25–40 → −8`, `≥40 → −14`.
+
+**The `<3` floor is not cosmetic.** A P/E under 3 on the EGX means one-off
+earnings or a price that already collapsed. MEGM trades at **P/E 0.7 with a
+42.55% dividend yield** — under the old band that was `+15 "Very cheap on
+earnings"`, i.e. the app calling a suspended, distressed stock a bargain.
+
+Dividend yield is deliberately **NON-monotonic**: `0–2 → 0`, `2–4 → +4`,
+`4–8 → +8`, `8–15 → +4`, `≥15 → −8`. A yield above 15% is a special dividend or
+a collapsed price, not income quality.
+
+**Framing rule for every DY string:** with T-bills near 25%, *no* EGX yield is
+competitive as income — even 8% loses. Reason strings must present a dividend as
+**evidence the company generates real cash**, never as income. `dividend_yield`
+of `0.0` means "pays nothing", which is normal for a growth company; it scores
+identically to unknown.
+
+### Liquidity — penalty-only, index-aware, zero-aware
+
+`indicators.liquidity_score` now feeds the composite through `score_volume`.
+Three deliberate properties:
+
+1. **Penalty-only** (`thin → −12`, `low → 0`, `normal → 0`). `score_volume`'s
+   other bands are *directional* ("is volume confirming this move?"); liquidity
+   is *structural* ("can you get out?"). Awarding points for normal liquidity
+   would move ~95% of stocks for no information and let the two ideas cancel
+   into a number meaning neither. The `low` tier still emits its reason string.
+2. **It cannot carry the category.** The all-None guard in `score_volume`
+   ignores `liquidity` on purpose — otherwise a stock with no volume-confirmation
+   data would score 38 off a single liquidity reason and claim the full weight.
+3. **Dead sessions beat the average.** A mean hides zeros: MEGM has been frozen
+   at 12.54 with zero volume since **January 2022**, yet one old block trade left
+   it averaging ~99k shares/day — comfortably "low", not thin. If ≥30% of the
+   lookback window (`_DEAD_SESSION_SHARE`) has zero volume the stock is thin
+   regardless of its mean, and the reason names the count.
+
+Index membership comes from `core/index_membership.py`, which reads
+`data/egx_tickers.json` **directly**. Do NOT route this through
+`tickers._load_tickers()` — that can fire a 10 s TradingView POST on a cold
+container, putting every dashboard card behind a ticker-list fetch. Unknown
+symbols return `None`, which `liquidity_score` maps to the EGX100 floors (the
+behaviour every symbol had before membership was plumbed through).
+
+### When to split "Valuation" into its own category
+
+`score_quality` now carries 3 technical inputs and 3 fundamental ones. Sub-bands
+were chosen over a 9th category because a new category costs: `CATEGORY_ORDER` +
+`DEFAULT_WEIGHTS` + all 5 `PRESETS` + `compute_composite`'s hand-written
+`category_raw` dict (**not** derived from `CATEGORY_ORDER` — a missing entry is a
+`KeyError`) + `db.py` seeds, and on the frontend **six** hardcoded lists of which
+**three fail silently** (no slider, wrong normalization percentages, bar never
+renders).
+
+**The pre-decided trigger:** when a *fourth* fundamental input is added (payout
+ratio, EPS growth, debt/equity), "Quality" stops being coherent — split
+**Valuation** out and pay the 9-category tax once, deliberately.
 
 ### Interval calibration (Daily / Weekly / Monthly)
 
@@ -373,8 +475,8 @@ Returned in `signals` array from portfolio_analysis. Sorted by priority:
 | Severity | Icon | Examples |
 |----------|------|----------|
 | `action_required` | `!!` | Stop-loss about to trigger, Death Cross, negative Sharpe, max drawdown > 20%, support broken, strong_sell_composite (score ≤ 20) |
-| `warning` | `!` | Sector/stock concentration, high correlation pairs, OBV bearish divergence, near resistance, big loss, sell_composite (score ≤ 40), **`cash_underperformer`** (held >90d, ann. return < T-bill), **`relative_strength_laggard`** (alpha < -10% vs EGX30), **`mfi_extreme`** at >80, **`low_liquidity_warning`** (thin volume relative to the stock's own index), **`exit_zone_active`** at medium/high confidence, **`pe_overvalued`** (P/E > 30), **`pe_loss_making`** (negative P/E) |
-| `opportunity` | `$` | Golden Cross, RSI/Stochastic oversold+bullish crossover, near support, target approaching, strong_buy_composite (score ≥ 80), divergence_bullish, **`relative_strength_leader`** (alpha > +5% vs EGX30), **`mfi_extreme`** at <20, **`entry_zone_active`** (price near support + momentum not overbought), **`pe_undervalued`** (P/E < 10) |
+| `warning` | `!` | Sector/stock concentration, high correlation pairs, OBV bearish divergence, near resistance, big loss, sell_composite (score ≤ 40), **`cash_underperformer`** (held >90d, ann. return < T-bill), **`relative_strength_laggard`** (alpha < -10% vs EGX30), **`mfi_extreme`** at >80, **`low_liquidity_warning`** (thin volume relative to the stock's own index), **`exit_zone_active`** at medium/high confidence, **`pe_overvalued`** (P/E ≥ 25 — expensive vs the EGX median of ~12), **`pe_loss_making`** (diluted EPS < 0), **`pe_implausibly_low`** (P/E < 3 — one-off earnings or a collapsed price, NOT a bargain), **`dividend_yield_extreme`** (DY ≥ 15%) |
+| `opportunity` | `$` | Golden Cross, RSI/Stochastic oversold+bullish crossover, near support, target approaching, strong_buy_composite (score ≥ 80), divergence_bullish, **`relative_strength_leader`** (alpha > +5% vs EGX30), **`mfi_extreme`** at <20, **`entry_zone_active`** (price near support + momentum not overbought), **`pe_undervalued`** (P/E < 8) |
 | `info` | `i` | Beta context, ATR-based stop-loss suggestion, macro context, profit-taking reminder, buy_composite (score ≥ 60), **`adx_strong_trend`** (ADX > 30, direction from DI±), **`exit_zone_active`** at low confidence |
 
 New signal types added with the 8-category engine have their `learn_concept` anchors wired into the Learn page: `risk_adjusted_return`, `relative_strength`, `mfi`, `adx`, `liquidity`, `multi_timeframe`, `cash_underperformer`. Entry/exit zone signals use `entry_exit_zones`.
@@ -395,12 +497,12 @@ Components in `src/app/components/`:
 
 **Composite Score:**
 - `CompositeGauge` — Hand-rolled SVG semicircle gauge. Props: `score`, `signal`, `size ("sm"|"md"|"lg")`. Exports `scoreColor(score)` for use elsewhere. "sm" (40px) used as badges; "md" (96px) mid-size; "lg" (160px) hero. Pulses when score ≤ 20.
-- `ScoreBreakdown` — 5 tappable category bars (score + weight% + expandable reasons). Gear button opens `ScoreWeightsModal`.
+- `ScoreBreakdown` — 8 tappable category bars (score + weight% + expandable reasons). Gear button opens `ScoreWeightsModal`.
 
 **Levels & Zones:**
 - `KeyLevelsCard` — Displays nearest support/resistance from `AnalysisResponse.key_levels` with distance %, strength, and a "broken through" visual state when price has crossed a level. Used on the stock detail page above the price chart.
 - `EntryExitCard` — Displays active entry/exit zones from `AnalysisResponse.entry_exit`. Shows price range, confidence tier, suggested stop-loss (entry only), and supporting reasons. Renders a "no active zone" empty state when neither is active. Used on the stock detail page. In `HoldingsTable`, a compact `ZoneBadge` pill surfaces the same state inline next to each holding; the expanded row uses `ZoneDetail` for full zone info.
-- `ScoreWeightsModal` — 5 range sliders (0–50, step 5), normalized preview row, 3 preset buttons (Balanced / Trend Follower / Reversal Hunter), mobile full-screen / desktop card. Saves via `ScoreWeightsProvider`.
+- `ScoreWeightsModal` — 8 range sliders (0–50, step 5; 4 core + 4 behind an "advanced" toggle), normalized preview row, preset buttons rendered dynamically from the API's `presets` field (5 today), mobile full-screen / desktop card. Saves via `ScoreWeightsProvider`.
 - `ScoreWeightsProvider` — React Context. Fetches weights once on mount, shares across all score-aware components. Exports `useScoreWeights()` hook. Increments `version` on save to trigger re-fetches in pages. Wrapped around `{children}` in `layout.tsx`.
 
 **Portfolio views:**
@@ -450,16 +552,23 @@ settings  (key, value)   -- pre-seeded: cash_available, currency, risk_free_rate
                          --             weight_volatility, weight_divergence,
                          --             weight_quality, weight_risk_adjusted,
                          --             weight_relative_strength,
-                         --             pe_last_successful_fetch, pe_last_attempt_status,
-                         --             pe_unmatched_names
+                         --             pe_last_successful_fetch, pe_last_attempt_status
 watchlist (symbol, added_at)                                     -- user's watched tickers
 macro_data (key, value, previous_value, change_pct, updated_at)  -- 1-hour cache
-pe_data    (symbol PK, company_name, pe_ratio, dividend_yield, updated_at)
-                         -- Nightly-scraped from egx.com.eg/en/MarketPECompanies.aspx.
-                         -- symbol is the egxpy code resolved from company_name via
-                         -- pe_fetch.match_symbol (overrides > normalized > prefix > jaccard).
-                         -- pe_ratio IS NULL when the page shows "0" (no earnings / loss).
+pe_data    (symbol PK, company_name, pe_ratio, dividend_yield, loss_making,
+            updated_at)
+                         -- Nightly refresh from the TradingView scanner via
+                         -- core/pe_fetch.py. `symbol` is the exact ticker from
+                         -- the feed — no name matching involved.
+                         -- pe_ratio IS NULL  -> no trailing P/E (usually a loss-maker)
+                         -- dividend_yield 0  -> REAL: pays nothing. Only NULL is unknown.
+                         -- loss_making       -> from diluted EPS; the feed never
+                         --                      reports a negative P/E.
 ```
+
+`loss_making` is added by an `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` in
+`init_db`. There is no migration framework — every statement there is
+idempotent, so new columns land on the next cold start of any process.
 
 Connection singleton in `_db.py` with lazy init. `get_db()` returns the ready connection.
 

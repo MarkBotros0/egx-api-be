@@ -18,7 +18,6 @@ from app.core.constants import (
     DEFAULT_RISK_FREE_RATE_PCT,
     DIVERGENCE_LOOKBACK_FULL,
     INTERNAL_BARS_MIN,
-    TRADING_DAYS_PER_YEAR,
     USER_BARS_MAX,
     USER_BARS_MIN,
 )
@@ -31,6 +30,7 @@ from app.core.composite import (
     compute_composite, get_weights_from_db, weights_hash, DEFAULT_WEIGHTS,
 )
 from app.core.extras_builder import build_composite_extras
+from app.core.index_membership import get_index_membership
 from app.core.levels import compute_key_levels, compute_entry_exit
 from app.core.macro_fetch import fetch_macro
 from app.core.pe_fetch import get_pe_for_symbol
@@ -95,7 +95,10 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict,
                        macro: Optional[dict] = None,
                        egx30_close=None,
                        risk_free_rate_pct: Optional[float] = None,
-                       pe_ratio: Optional[float] = None) -> tuple:
+                       pe_ratio: Optional[float] = None,
+                       dividend_yield: Optional[float] = None,
+                       loss_making: Optional[bool] = None,
+                       index_membership: Optional[str] = None) -> tuple:
     """
     Score one symbol for the dashboard grid.
 
@@ -124,6 +127,9 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict,
             include_multi_timeframe=True,
             risk_free_rate_pct=risk_free_rate_pct,
             pe_ratio=pe_ratio,
+            dividend_yield=dividend_yield,
+            loss_making=loss_making,
+            index_membership=index_membership,
             divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
         )
 
@@ -223,18 +229,23 @@ def _handle_batch(symbols_str: str, interval: str):
 
             futures: dict = {}
             for s in todo:
-                # P/E is a single indexed row per symbol — cheap enough to read
-                # per symbol, and score_quality's P/E band needs it to match
-                # what the detail page scores.
-                pe_ratio = None
+                # Fundamentals are a single indexed row per symbol — cheap
+                # enough to read per symbol, and score_quality's bands need
+                # them to match what the detail page scores.
+                pe_ratio = dividend_yield = loss_making = None
                 if db is not None:
                     try:
                         pe_row = get_pe_for_symbol(db, s)
-                        pe_ratio = pe_row.get("pe_ratio") if pe_row else None
+                        if pe_row:
+                            pe_ratio = pe_row.get("pe_ratio")
+                            dividend_yield = pe_row.get("dividend_yield")
+                            loss_making = pe_row.get("loss_making")
                     except Exception:
-                        pe_ratio = None
+                        pe_ratio = dividend_yield = loss_making = None
                 f = pool.submit(_compute_batch_one, s, interval, weights, macro,
-                                egx30_close, risk_free_rate_pct, pe_ratio)
+                                egx30_close, risk_free_rate_pct, pe_ratio,
+                                dividend_yield, loss_making,
+                                get_index_membership(s))
                 # Stragglers that finish AFTER we've returned still self-cache
                 # via this callback — a frontend retry a few seconds later hits
                 # a warm cache and fills in the '--' cards.
@@ -353,23 +364,48 @@ def get_analysis(
 
         close = df_trimmed["close"]
 
-        # 52-week range comes from the FULL internal frame and from the true
-        # intraday high/low columns. Reading it off the trimmed frame made the
-        # "52W High" a function of the chart's bar-count selector — clicking
-        # 60/100/200/500 changed the number with no other input changing — and
-        # using closes missed intraday extremes. Weekly/Monthly intervals need
-        # their own bars-per-year.
-        bars_per_year = {"Daily": TRADING_DAYS_PER_YEAR, "Weekly": 52, "Monthly": 12}.get(
-            interval, TRADING_DAYS_PER_YEAR
+        # Benchmark series, shared cache key with the batch + portfolio paths.
+        egx30_close = _get_egx30_close(exchange, interval, internal_bars)
+
+        # Fundamentals from the nightly feed; None when no stored row.
+        pe_info = None
+        try:
+            pe_info = get_pe_for_symbol(db, symbol)
+        except Exception:
+            pe_info = None
+
+        # Same builder the dashboard cards and the portfolio page use, so all
+        # three produce the same score for the same symbol. Built before `stats`
+        # because the 52-week range is one of its by-products.
+        built = build_composite_extras(
+            df, indicators_full,
+            interval=interval,
+            egx30_close=egx30_close,
+            include_multi_timeframe=True,
+            risk_free_rate_pct=risk_free_rate_pct,
+            pe_ratio=pe_info.get("pe_ratio") if pe_info else None,
+            dividend_yield=pe_info.get("dividend_yield") if pe_info else None,
+            loss_making=pe_info.get("loss_making") if pe_info else None,
+            index_membership=get_index_membership(symbol),
+            divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
         )
-        year_window = min(bars_per_year, len(df))
+        divergences = built["divergences"]
+        volume_price = built["volume_price"]
+        multi_timeframe = built["multi_timeframe"]
+        bb_squeeze = built["bb_squeeze"]
+
+        # 52-week range comes from the builder, which reads the FULL internal
+        # frame and the true intraday high/low columns. Computing it here off
+        # the trimmed frame made "52W High" a function of the chart's bar-count
+        # selector, and reading closes missed intraday extremes. It lives in the
+        # builder so score_quality's drawdown and this number are the same fact.
         stats = {
             "current_price": float(close.iloc[-1]),
             "previous_close": float(close.iloc[-2]) if len(close) > 1 else None,
             "change": float(close.iloc[-1] - close.iloc[-2]) if len(close) > 1 else 0,
             "change_pct": float((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100) if len(close) > 1 else 0,
-            "high_52w": float(df["high"].tail(year_window).max()),
-            "low_52w": float(df["low"].tail(year_window).min()),
+            "high_52w": built["high_52w"],
+            "low_52w": built["low_52w"],
             "avg_volume": int(df_trimmed["volume"].tail(20).mean()),
         }
 
@@ -383,9 +419,6 @@ def get_analysis(
 
         close_full = df["close"]
 
-        # Benchmark series, shared cache key with the batch + portfolio paths.
-        egx30_close = _get_egx30_close(exchange, interval, internal_bars)
-
         beta = None
         try:
             if egx30_close is not None:
@@ -394,13 +427,6 @@ def get_analysis(
                     beta = round(beta, 2)
         except Exception:
             beta = None
-
-        # P/E from the nightly EGX scrape; None when no stored row.
-        pe_info = None
-        try:
-            pe_info = get_pe_for_symbol(db, symbol)
-        except Exception:
-            pe_info = None
 
         # Descriptive forecasts — NOT predictions. Expected-move is a 1-sigma
         # historical band (~68% of days fall inside). Monte Carlo projects 60
@@ -417,22 +443,6 @@ def get_analysis(
             }
         except Exception:
             forecast = None
-
-        # Same builder the dashboard cards and the portfolio page use, so all
-        # three produce the same score for the same symbol.
-        built = build_composite_extras(
-            df, indicators_full,
-            interval=interval,
-            egx30_close=egx30_close,
-            include_multi_timeframe=True,
-            risk_free_rate_pct=risk_free_rate_pct,
-            pe_ratio=pe_info.get("pe_ratio") if pe_info else None,
-            divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
-        )
-        divergences = built["divergences"]
-        volume_price = built["volume_price"]
-        multi_timeframe = built["multi_timeframe"]
-        bb_squeeze = built["bb_squeeze"]
 
         composite = compute_composite(
             indicators_full,

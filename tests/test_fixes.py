@@ -20,6 +20,7 @@ from app.core.composite import (
     compute_composite,
     score_quality,
     score_risk_adjusted,
+    score_volume,
     weights_hash,
 )
 from app.core.constants import (
@@ -31,11 +32,13 @@ from app.core.constants import (
     STOP_LOSS_ATR_MULTIPLIER,
 )
 from app.core.extras_builder import build_composite_extras
+from app.core.index_membership import get_index_membership
 from app.core.indicators import (
     _cluster_levels,
     atr,
     compute_all,
     fibonacci_levels,
+    liquidity_score,
     rsi,
 )
 from app.core.levels import compute_entry_exit, compute_key_levels
@@ -428,6 +431,9 @@ def test_all_three_paths_build_identical_extras(stock_df, bench_close):
         include_multi_timeframe=True,
         risk_free_rate_pct=25.0,
         pe_ratio=14.0,
+        dividend_yield=3.1,
+        loss_making=False,
+        index_membership="EGX30",
         divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
     )
 
@@ -497,6 +503,54 @@ def test_no_router_hand_rolls_composite_extras():
     )
 
 
+def test_all_three_call_sites_pass_the_same_builder_kwargs():
+    """
+    The three scoring paths must hand build_composite_extras the SAME set of
+    named inputs.
+
+    test_all_three_paths_build_identical_extras only proves the builder is
+    deterministic — it calls one function three times with identical kwargs.
+    It cannot catch a call site that FORGETS a kwarg, which is exactly how the
+    66-"Buy"-on-the-card / 45-"Hold"-on-the-detail-page divergence happened:
+    the batch path omitted the inputs the punitive categories needed.
+
+    Every new scoring input multiplies that risk, so compare the call sites at
+    the source level.
+    """
+    import ast
+    import pathlib
+
+    routers = pathlib.Path(__file__).resolve().parents[1] / "app" / "routers"
+    call_sites = []
+    for path in (routers / "analysis.py", routers / "portfolio_analysis.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", None) == "build_composite_extras"):
+                call_sites.append(
+                    (path.name, node.lineno,
+                     frozenset(kw.arg for kw in node.keywords if kw.arg))
+                )
+
+    assert len(call_sites) == 3, (
+        f"expected 3 build_composite_extras call sites (detail, batch, "
+        f"portfolio), found {len(call_sites)}: "
+        f"{[(f, ln) for f, ln, _ in call_sites]}"
+    )
+
+    distinct = {kwargs for _, _, kwargs in call_sites}
+    if len(distinct) > 1:
+        shared = frozenset.intersection(*distinct)
+        detail = "\n".join(
+            f"  {f}:{ln} extra={sorted(kw - shared)}"
+            for f, ln, kw in call_sites
+        )
+        raise AssertionError(
+            "scoring paths disagree on which inputs they pass — the dropped "
+            f"input's category will score differently per page:\n{detail}"
+        )
+
+
 def test_all_eight_categories_score_with_full_inputs(stock_df, bench_close):
     """
     Every category must be scorable from the shared builder's output. If one
@@ -509,6 +563,9 @@ def test_all_eight_categories_score_with_full_inputs(stock_df, bench_close):
         egx30_close=bench_close,
         risk_free_rate_pct=25.0,
         pe_ratio=12.0,
+        dividend_yield=3.1,
+        loss_making=False,
+        index_membership="EGX30",
     )
     result = compute_composite(indicators, extras=built["extras"])
 
@@ -524,7 +581,8 @@ def test_effective_weight_equals_raw_when_nothing_dropped(stock_df, bench_close)
     indicators = compute_all(stock_df)
     built = build_composite_extras(
         stock_df, indicators, egx30_close=bench_close,
-        risk_free_rate_pct=25.0, pe_ratio=12.0,
+        risk_free_rate_pct=25.0, pe_ratio=12.0, dividend_yield=3.1,
+        loss_making=False, index_membership="EGX30",
     )
     result = compute_composite(indicators, extras=built["extras"])
     for name, cat in result["categories"].items():
@@ -539,7 +597,8 @@ def test_builder_includes_every_scoring_input(stock_df, bench_close):
     indicators = compute_all(stock_df)
     extras = build_composite_extras(
         stock_df, indicators, egx30_close=bench_close,
-        risk_free_rate_pct=25.0, pe_ratio=10.0,
+        risk_free_rate_pct=25.0, pe_ratio=10.0, dividend_yield=3.1,
+        loss_making=False, index_membership="EGX30",
     )["extras"]
 
     required = {
@@ -548,7 +607,8 @@ def test_builder_includes_every_scoring_input(stock_df, bench_close):
         "multi_timeframe", "trend_consistency", "current_drawdown_pct",
         "annualized_return_pct", "volatility_annualized_pct",
         "atr_pct_of_price", "history_days", "risk_free_rate_pct",
-        "relative_strength", "pe_ratio",
+        "relative_strength", "pe_ratio", "dividend_yield", "loss_making",
+        "liquidity",
     }
     assert required <= set(extras)
 
@@ -797,3 +857,433 @@ def test_single_pivot_reports_strength_one():
     """
     sr = {"supports": [{"price": 90.0, "strength": 1}], "resistances": []}
     assert compute_key_levels(100.0, sr)["nearest_support"]["strength"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Index membership — feeds the index-aware liquidity floors
+# ---------------------------------------------------------------------------
+
+def test_index_membership_reads_the_static_file():
+    assert get_index_membership("COMI") == "EGX30"
+    assert get_index_membership("comi") == "EGX30"
+
+
+def test_index_membership_does_no_network(monkeypatch):
+    """
+    This lookup runs once per symbol on the dashboard batch path. Routing it
+    through tickers._load_tickers() would put every card behind a 10 s
+    TradingView POST on a cold container — invisible in dev, lethal on Vercel.
+    """
+    import urllib.request
+
+    import app.core.index_membership as im
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("index membership lookup attempted a network call")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    monkeypatch.setattr(im, "_MEMBERSHIP", None)  # force a real (re)load
+
+    assert im.get_index_membership("COMI") == "EGX30"
+
+
+def test_unknown_symbol_is_none_not_a_guessed_tier():
+    """
+    None means "unknown", and liquidity_score applies its EGX100 default —
+    today's behaviour for every symbol. Guessing EGX30 here would silence
+    genuine thin-volume warnings on unrecognised names.
+    """
+    assert get_index_membership("ZZZZ_NOT_A_SYMBOL") is None
+    assert get_index_membership("") is None
+
+
+def test_liquidity_uses_the_stocks_own_index_floors():
+    """
+    The bug this fixes: portfolio_analysis passed index_membership=None, so
+    every holding was measured against EGX100 floors. A 40k-shares/day stock
+    is normal for NILEX and thin for EGX30 — one blanket floor cannot say both.
+    """
+    vol = pd.Series([40_000.0] * 30)
+
+    assert liquidity_score(vol, index_membership="EGX30")["thin"] is True
+    assert liquidity_score(vol, index_membership="NILEX")["thin"] is False
+
+
+def test_dead_sessions_beat_the_average():
+    """
+    MEGM has been frozen at 12.54 with zero volume since January 2022, yet one
+    old block trade left it averaging ~99k shares/day — comfortably "low", not
+    thin. An average hides zeros; a stock you cannot trade must say so.
+    """
+    vol = pd.Series([0.0] * 19 + [1_981_600.0])
+    result = liquidity_score(vol, index_membership="EGX100", lookback=20)
+
+    assert result["thin"] is True, f"suspended stock read as {result}"
+    assert result["dead_sessions"] == 19
+
+
+def test_normal_trading_reports_no_dead_sessions():
+    vol = pd.Series([2_000_000.0] * 30)
+    assert liquidity_score(vol, index_membership="EGX30")["dead_sessions"] == 0
+
+
+def test_frozen_price_is_not_called_a_downtrend():
+    """
+    trend_consistency counted bars where close > SMA20. On a frozen price they
+    are EQUAL, so it scored 0.0 — which score_quality reads as "price below
+    SMA20 on 100% of last 20 days, steady downtrend" and penalises. A price
+    that never moved is not falling.
+    """
+    n = 300
+    idx = pd.date_range("2024-01-01", periods=n, freq="B")
+    close = pd.Series(np.full(n, 12.54), index=idx)
+    df = pd.DataFrame({"open": close, "high": close, "low": close,
+                       "close": close, "volume": np.zeros(n)}, index=idx)
+
+    extras = build_composite_extras(df, compute_all(df), interval="Daily")["extras"]
+    assert extras["trend_consistency"] is None
+
+    _, reasons = score_quality(None, extras["trend_consistency"], None)
+    assert not any("downtrend" in r.lower() for r in reasons)
+
+
+def test_liquidity_reports_which_floor_it_used():
+    """The warning text says "thin for an EGX30 name" — it needs the tier."""
+    vol = pd.Series([40_000.0] * 30)
+    assert liquidity_score(vol, index_membership="NILEX")["index_membership"] == "NILEX"
+    # Unknown tier falls back to EGX100 and says so, rather than claiming None.
+    assert liquidity_score(vol, index_membership=None)["index_membership"] == "EGX100"
+
+
+# ---------------------------------------------------------------------------
+# Liquidity as a scoring input — penalty-only
+# ---------------------------------------------------------------------------
+
+def _volume_inputs():
+    """A neutral-ish set of the other score_volume inputs."""
+    return dict(obv_rising=True, price_rising_20d=True, mfi_val=50.0,
+                volume_price={"classification": "normal", "volume_ratio": 1.0,
+                              "price_change_pct": 0.1})
+
+
+def test_liquidity_band_is_penalty_only():
+    """
+    ~95% of EGX names are normally liquid. If normal liquidity scored points,
+    every one of them would drift for no information — and the liquidity
+    reason would cancel against the directional bands beside it.
+    """
+    v = _volume_inputs()
+    baseline, _ = score_volume(v["obv_rising"], v["price_rising_20d"],
+                               v["mfi_val"], v["volume_price"])
+    normal = {"avg_volume": 2_000_000, "classification": "normal",
+              "thin": False, "index_membership": "EGX30"}
+    low = {"avg_volume": 60_000, "classification": "low",
+           "thin": False, "index_membership": "EGX100"}
+    thin = {"avg_volume": 8_000, "classification": "thin",
+            "thin": True, "index_membership": "EGX30"}
+
+    normal_score, _ = score_volume(v["obv_rising"], v["price_rising_20d"],
+                                   v["mfi_val"], v["volume_price"], liquidity=normal)
+    low_score, low_reasons = score_volume(v["obv_rising"], v["price_rising_20d"],
+                                          v["mfi_val"], v["volume_price"], liquidity=low)
+    thin_score, thin_reasons = score_volume(v["obv_rising"], v["price_rising_20d"],
+                                            v["mfi_val"], v["volume_price"], liquidity=thin)
+
+    assert normal_score == baseline, "normal liquidity must not move the score"
+    assert low_score == baseline, "the 'low' tier must not move the score"
+    assert thin_score < baseline, "thin liquidity must penalise"
+
+    # ...but 'low' still explains itself, and 'thin' names its index tier.
+    assert any("Modest liquidity" in r for r in low_reasons)
+    assert any("EGX30" in r for r in thin_reasons)
+
+
+def test_liquidity_cannot_carry_the_volume_category():
+    """
+    With no OBV/MFI/volume-price data the category must stay unscored. If
+    liquidity alone could carry it, a data-less stock would score 38 on one
+    reason and the category would claim its full weight.
+    """
+    thin = {"avg_volume": 8_000, "classification": "thin",
+            "thin": True, "index_membership": "EGX30"}
+    score, _ = score_volume(None, None, None, None, liquidity=thin)
+    assert score is None
+
+
+def test_liquidity_is_per_day_on_every_interval():
+    """
+    The floors are shares/DAY. Without normalising, a weekly bar's volume (a
+    week's worth) would make the same stock look ~5x more liquid on the Weekly
+    view than on its own Daily view.
+
+    Uses a business-day frame, not the calendar-day module fixture: the
+    252/52 conversion encodes ~5 TRADING days per week, which is what real
+    EGX data has.
+    """
+    n = 400
+    idx = pd.date_range("2024-01-01", periods=n, freq="B")
+    close = pd.Series(np.linspace(100.0, 130.0, n), index=idx)
+    df = pd.DataFrame(
+        {"open": close, "high": close * 1.01, "low": close * 0.99,
+         "close": close, "volume": np.full(n, 200_000.0)},
+        index=idx,
+    )
+
+    daily = build_composite_extras(df, compute_all(df),
+                                   interval="Daily")["liquidity"]
+
+    weekly_df = df.resample("W-THU").agg(
+        {"open": "first", "high": "max", "low": "min",
+         "close": "last", "volume": "sum"}
+    ).dropna()
+    weekly = build_composite_extras(weekly_df, compute_all(weekly_df),
+                                    interval="Weekly")["liquidity"]
+
+    assert daily["avg_volume"] is not None and weekly["avg_volume"] is not None
+    ratio = weekly["avg_volume"] / daily["avg_volume"]
+    assert 0.9 < ratio < 1.1, (
+        f"weekly reports {ratio:.2f}x the daily shares/day — not normalised"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fundamentals bands — P/E recentred on the EGX median, DY non-monotonic
+# ---------------------------------------------------------------------------
+
+def test_pe_band_is_centred_on_the_egx_median():
+    """
+    The old band gave +8 to anything under P/E 20 — which is most of a market
+    whose median is 12.4. Simply HAVING P/E data was worth points, and only
+    ~22% of EGX stocks have it, so the app ranked covered stocks above
+    uncovered ones for a reason unrelated to their merit.
+    """
+    score, _ = score_quality(None, None, None, pe_ratio=12.4)
+    assert 45 <= score <= 55, f"median EGX P/E should be ~neutral, got {score}"
+
+
+def test_implausibly_low_pe_is_not_a_bargain():
+    """
+    MEGM trades at P/E 0.7. Under the old band that was "+15 very cheap on
+    earnings" — the app calling a distressed situation a quality stock.
+    """
+    distressed, reasons = score_quality(None, None, None, pe_ratio=0.7)
+    genuinely_cheap, _ = score_quality(None, None, None, pe_ratio=6.0)
+    assert distressed < genuinely_cheap
+    assert any("recurring" in r for r in reasons)
+
+
+def test_expensive_pe_is_penalised():
+    cheap, _ = score_quality(None, None, None, pe_ratio=6.0)
+    rich, _ = score_quality(None, None, None, pe_ratio=45.0)
+    assert rich < cheap
+
+
+def test_loss_making_comes_from_eps_not_negative_pe():
+    """
+    The fundamentals feed reports a NULL P/E for loss-makers, never a negative
+    one, so the old `pe_ratio < 0` test could never fire. EPS carries it now.
+    """
+    # A flat technical baseline so both branches score the category — with
+    # every other input None the category is legitimately unscoreable.
+    healthy, _ = score_quality(None, None, -0.05)
+    losing, reasons = score_quality(None, None, -0.05, loss_making=True)
+    assert losing < healthy
+    assert any("loss-making" in r.lower() for r in reasons)
+
+
+def test_quality_dividend_band_is_not_monotonic():
+    """
+    A 42% yield is a special dividend or a collapsed share price, not income
+    quality. More yield must NOT mean more points all the way up.
+    """
+    scores = {dy: score_quality(None, None, None, dividend_yield=dy)[0]
+              for dy in (3.0, 6.0, 12.0, 25.0, 45.0)}
+    assert scores[6.0] > scores[3.0]
+    assert scores[45.0] < scores[6.0], f"extreme yield scored high: {scores}"
+    assert scores[25.0] < scores[12.0]
+
+
+def test_extreme_dividend_yield_is_not_read_as_quality():
+    """The live MEGM case: DY 42.55% on a P/E of 0.7."""
+    score, reasons = score_quality(None, None, None,
+                                   pe_ratio=0.7, dividend_yield=42.55)
+    assert score <= 60, f"MEGM scored {score} on quality"
+    text = " ".join(reasons).lower()
+    assert "special" in text or "collapsed" in text
+
+
+def test_zero_dividend_is_not_penalised():
+    """
+    Under the old EGX feed a printed "0" was a no-data sentinel. From the new
+    source 0.0 is real: the company pays nothing, which is normal for a growth
+    company and not a quality defect. Only None means unknown.
+    """
+    pays_nothing, pn_reasons = score_quality(None, None, -0.05, dividend_yield=0.0)
+    unknown, _ = score_quality(None, None, -0.05, dividend_yield=None)
+    assert pays_nothing == unknown
+    assert not any("dividend" in r.lower() for r in pn_reasons)
+
+
+def test_median_dividend_payer_gets_a_modest_bonus():
+    """Framing check: a 3% yield is worth something, but it is not 'income'."""
+    score, reasons = score_quality(None, None, None, dividend_yield=3.12)
+    assert score > 50
+    assert any("median" in r.lower() for r in reasons)
+
+
+# ---------------------------------------------------------------------------
+# 52-week positioning
+# ---------------------------------------------------------------------------
+
+def test_drawdown_peak_uses_intraday_highs():
+    """
+    score_quality used to say "near recent peak" off max(close) while
+    StatsPanel rendered "52W High" off max(high) — two numbers for one fact on
+    the same screen.
+    """
+    n = 300
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    close = pd.Series(np.full(n, 100.0), index=idx)
+    high = close.copy()
+    low = close.copy()
+    high.iloc[100] = 130.0          # a spike no close ever reached
+    df = pd.DataFrame({"open": close, "high": high, "low": low,
+                       "close": close, "volume": np.full(n, 200_000.0)},
+                      index=idx)
+
+    built = build_composite_extras(df, compute_all(df), interval="Daily")
+    assert built["high_52w"] == pytest.approx(130.0)
+    # 100 vs a 130 peak = -23%, not the 0% a close-only peak would report.
+    assert built["extras"]["current_drawdown_pct"] == pytest.approx(-30.0 / 130.0, abs=1e-6)
+
+
+def test_drawdown_reasons_say_52_week_high():
+    _, reasons = score_quality(None, None, -0.35)
+    assert any("52-week high" in r for r in reasons)
+    _, near = score_quality(None, None, -0.01)
+    assert any("52-week high" in r for r in near)
+
+
+# ---------------------------------------------------------------------------
+# Fundamentals feed — the never-wipe guarantee
+# ---------------------------------------------------------------------------
+
+class _FakeDB:
+    """Records every statement so a test can assert what was (not) written."""
+
+    def __init__(self):
+        self.statements = []
+
+    def execute(self, sql, params=None):
+        self.statements.append((" ".join(sql.split()), params))
+        return self
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+    def commit(self):
+        pass
+
+    def upserts_into(self, table):
+        return [s for s, _ in self.statements if f"INTO {table}" in s]
+
+    def setting(self, key):
+        for sql, params in self.statements:
+            if "INTO settings" in sql and params and params[0] == key:
+                return params[1]
+        return None
+
+
+def test_fundamentals_refresh_never_wipes_on_failure(monkeypatch):
+    """
+    The module's headline guarantee, previously untested: a failed refresh must
+    leave last-known-good rows alone. The read path serving stale P/E is fine;
+    serving "no data" because the feed blinked is not.
+    """
+    import app.core.pe_fetch as pf
+
+    def _boom():
+        raise RuntimeError("scanner unreachable")
+
+    monkeypatch.setattr(pf, "fetch_fundamentals_rows", _boom)
+
+    db = _FakeDB()
+    result = pf.refresh_pe_data(db)
+
+    assert result["success"] is False
+    assert not any("DELETE" in s or "TRUNCATE" in s for s, _ in db.statements)
+    assert not db.upserts_into("pe_data")
+    assert db.setting("pe_last_attempt_status").startswith("error")
+    # A failed attempt must NOT advance the success timestamp, or the
+    # freshness banner would go quiet while the data rotted.
+    assert db.setting("pe_last_successful_fetch") is None
+
+
+def test_partial_feed_response_is_rejected_without_writing():
+    """
+    A truncated response that refreshes 5 symbols and silently leaves 288 stale
+    is worse than "everything is stale" — nothing on screen distinguishes the
+    fresh rows from the rotten ones.
+    """
+    import app.core.pe_fetch as pf
+
+    rows = [{"symbol": f"SYM{i}", "company_name": "x", "pe_ratio": 10.0,
+             "dividend_yield": 3.0, "loss_making": False} for i in range(5)]
+
+    db = _FakeDB()
+    result = pf.refresh_pe_data(db, rows=rows)
+
+    assert result["success"] is False
+    assert not db.upserts_into("pe_data")
+    assert "only 5 rows" in db.setting("pe_last_attempt_status")
+
+
+def test_rows_with_no_fundamentals_are_not_stored():
+    """
+    An all-null row makes get_pe_for_symbol return a truthy dict of Nones,
+    which the response body ships to the frontend as an empty P/E card.
+    """
+    import app.core.pe_fetch as pf
+
+    rows = [{"symbol": f"SYM{i}", "company_name": "x", "pe_ratio": None,
+             "dividend_yield": None, "loss_making": None} for i in range(150)]
+    rows[0].update(pe_ratio=12.0)
+
+    db = _FakeDB()
+    result = pf.refresh_pe_data(db, rows=rows)
+
+    assert result["success"] is True
+    assert result["count"] == 1
+    assert result["skipped_empty"] == 149
+
+
+def test_absurd_pe_is_dropped_at_ingest():
+    """
+    The live EGX maximum is ~2756. The reason string renders the raw number,
+    so "P/E 2756.0" would read as a broken app rather than a real valuation.
+    """
+    import app.core.pe_fetch as pf
+
+    assert pf._clean_float(2756.2, maximum=pf.PE_SANITY_MAX) is None
+    assert pf._clean_float(12.4, maximum=pf.PE_SANITY_MAX) == 12.4
+    # 0.0 survives for dividend yield — it means "pays nothing", not "no data".
+    assert pf._clean_float(0.0, maximum=pf.DY_SANITY_MAX) == 0.0
+
+
+def test_analysis_router_does_not_redefine_bars_per_year():
+    """
+    The 52-week window is defined once, in extras_builder.BARS_PER_YEAR. A
+    second copy in the router is how the score's drawdown and the displayed
+    52W High drifted apart.
+    """
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "app" / "routers" / "analysis.py").read_text(encoding="utf-8")
+    assert '"Weekly": 52' not in src, (
+        "analysis.py redefines the bars-per-year table — import "
+        "extras_builder.BARS_PER_YEAR instead"
+    )

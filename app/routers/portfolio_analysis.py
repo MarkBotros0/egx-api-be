@@ -17,6 +17,7 @@ from app.core.macro_fetch import fetch_macro
 from app.core.composite import compute_composite, get_weights_from_db, DEFAULT_WEIGHTS
 from app.core.levels import compute_key_levels, compute_entry_exit
 from app.core.extras_builder import build_composite_extras
+from app.core.index_membership import get_index_membership
 from app.core.pe_fetch import get_pe_for_symbol
 from app.core.constants import (
     BIG_LOSS_PCT,
@@ -45,7 +46,6 @@ from app.core.indicators import (
     support_resistance, fibonacci_levels, ma_crossovers,
     macd as calc_macd, bollinger_bands as calc_bollinger,
     adx as calc_adx, mfi as calc_mfi,
-    liquidity_score as calc_liquidity,
 )
 
 router = APIRouter()
@@ -315,10 +315,6 @@ def _analyze(holdings):
             }
 
             liquidity_h = None
-            try:
-                liquidity_h = calc_liquidity(df["volume"], index_membership=None, lookback=20)
-            except Exception:
-                liquidity_h = None
 
             pe_info_h = None
             try:
@@ -340,11 +336,17 @@ def _analyze(holdings):
                     include_multi_timeframe=True,
                     risk_free_rate_pct=risk_free_rate_pct,
                     pe_ratio=pe_info_h.get("pe_ratio") if pe_info_h else None,
+                    dividend_yield=pe_info_h.get("dividend_yield") if pe_info_h else None,
+                    loss_making=pe_info_h.get("loss_making") if pe_info_h else None,
+                    index_membership=get_index_membership(symbol),
                     divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
                 )
                 divergences_h = built_h["divergences"]
                 volume_price_h = built_h["volume_price"]
                 rs_h = built_h["extras"].get("relative_strength")
+                # From the builder, so the thin-volume warning and the liquidity
+                # penalty inside score_volume can never disagree.
+                liquidity_h = built_h["liquidity"]
                 composite_h = compute_composite(
                     holding_indicators,
                     extras=built_h["extras"],
@@ -418,6 +420,7 @@ def _analyze(holdings):
                 "key_levels": key_levels_h,
                 "entry_exit": entry_exit_h,
                 "pe": pe_info_h,
+                "liquidity": liquidity_h,
             }
             stock_analyses.append(analysis)
 
@@ -750,23 +753,49 @@ def _analyze(holdings):
                     "learn_concept": "liquidity"})
 
             # P/E signals — only fired when the EGX P/E scrape has a row for the symbol.
+            # Loss-making comes from diluted EPS: the fundamentals feed reports
+            # a NULL P/E for loss-makers, never a negative one, so the old
+            # `pe < 0` branch could never fire.
+            if pe_info_h and pe_info_h.get("loss_making"):
+                signals.append({"type": "pe_loss_making", "severity": "warning", "symbol": symbol,
+                    "message": f"{symbol} is loss-making over the last twelve months.",
+                    "explanation": "The company isn't profitable right now, so earnings-based valuation doesn't apply — lean on trend, relative strength, and macro instead.",
+                    "learn_concept": "pe_ratio"})
+
+            # Bands match score_quality's, which are centred on the EGX median
+            # P/E of ~12 rather than a developed-market idea of cheap.
             if pe_info_h and pe_info_h.get("pe_ratio") is not None:
                 pe = float(pe_info_h["pe_ratio"])
-                if pe < 0:
-                    signals.append({"type": "pe_loss_making", "severity": "warning", "symbol": symbol,
-                        "message": f"{symbol} is loss-making (P/E {pe:.1f}).",
-                        "explanation": "A negative P/E means the company isn't profitable right now. Earnings-based valuation doesn't apply — lean on trend, relative strength, and macro instead.",
+                if pe < 3:
+                    signals.append({"type": "pe_implausibly_low", "severity": "warning", "symbol": symbol,
+                        "message": f"{symbol} P/E is {pe:.1f} — implausibly low, not a bargain.",
+                        "explanation": "A P/E under 3 on the EGX almost always means the earnings were one-off, or the share price has already collapsed. Check the last results before treating this as cheap.",
                         "learn_concept": "pe_ratio"})
-                elif pe < 10:
+                elif pe < 8:
                     signals.append({"type": "pe_undervalued", "severity": "opportunity", "symbol": symbol,
-                        "message": f"{symbol} P/E is {pe:.1f} — potentially undervalued on earnings.",
+                        "message": f"{symbol} P/E is {pe:.1f} — cheap versus the EGX median of ~12.",
                         "explanation": "A low P/E can indicate value, but it can also mean the market expects earnings to fall. Always combine with trend and relative strength before acting.",
                         "learn_concept": "pe_ratio"})
-                elif pe > 30:
+                elif pe >= 25:
                     signals.append({"type": "pe_overvalued", "severity": "warning", "symbol": symbol,
-                        "message": f"{symbol} P/E is {pe:.1f} — expensive vs earnings.",
+                        "message": f"{symbol} P/E is {pe:.1f} — expensive versus the EGX median of ~12.",
                         "explanation": "A high P/E means the market is paying a lot for each EGP of current earnings. Only justified by strong, confirmed growth expectations.",
                         "learn_concept": "pe_ratio"})
+
+            # Dividend yield. Framed as evidence of cash generation, never as
+            # income — no EGX yield competes with a ~25% T-bill.
+            if pe_info_h and pe_info_h.get("dividend_yield") is not None:
+                dy = float(pe_info_h["dividend_yield"])
+                if dy >= 15:
+                    signals.append({"type": "dividend_yield_extreme", "severity": "warning", "symbol": symbol,
+                        "message": f"{symbol} yields {dy:.1f}% — check before counting on it.",
+                        "explanation": "A yield this high is usually a one-off special dividend, or it only looks high because the share price collapsed. Confirm the payout recurs before treating it as a reason to hold.",
+                        "learn_concept": "dividend_yield"})
+                elif dy >= 4:
+                    signals.append({"type": "dividend_yield_solid", "severity": "info", "symbol": symbol,
+                        "message": f"{symbol} yields {dy:.1f}% — an above-median EGX payer.",
+                        "explanation": "Read this as evidence the company generates real cash and returns it, not as income: even this yield loses to the ~25% T-bill. It is a quality marker, not a reason to buy on its own.",
+                        "learn_concept": "dividend_yield"})
 
         except Exception as e:
             stock_analyses.append({"symbol": symbol, "error": f"Analysis failed: {str(e)}"})

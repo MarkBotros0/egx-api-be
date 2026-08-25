@@ -126,10 +126,12 @@ def init_db(db: _DB) -> None:
         )
     """)
 
-    # Scraped from egx.com.eg/en/MarketPECompanies.aspx. The page exposes only
-    # Company Name | P/E | DY%. No symbol is on the page — `symbol` here is the
-    # egxpy-compatible code resolved by name matching (see pe_fetch.match_symbol).
-    # A row with pe_ratio IS NULL means the page showed "0" (no data / loss-making).
+    # Fundamentals from the TradingView scanner (see core/pe_fetch.py). `symbol`
+    # is the exact ticker as returned by the feed — no name matching involved.
+    # Null semantics: pe_ratio IS NULL means no trailing P/E (usually a
+    # loss-maker); dividend_yield = 0.0 is REAL data meaning "pays nothing",
+    # and only NULL means unknown; loss_making comes from diluted EPS, because
+    # this source reports null rather than a negative P/E.
     db.execute("""
         CREATE TABLE IF NOT EXISTS pe_data (
             symbol TEXT PRIMARY KEY,
@@ -139,9 +141,12 @@ def init_db(db: _DB) -> None:
             updated_at TEXT NOT NULL
         )
     """)
+    # Additive and idempotent, matching the rest of init_db — there is no
+    # migration framework, so new columns land on the next cold start.
+    db.execute("ALTER TABLE pe_data ADD COLUMN IF NOT EXISTS loss_making BOOLEAN")
     db.execute("CREATE INDEX IF NOT EXISTS idx_pe_data_updated ON pe_data(updated_at)")
 
-    for key in ("pe_last_successful_fetch", "pe_last_attempt_status", "pe_unmatched_names"):
+    for key in ("pe_last_successful_fetch", "pe_last_attempt_status"):
         db.execute(
             "INSERT INTO settings (key, value) VALUES (%s, '') ON CONFLICT (key) DO NOTHING",
             (key,),
