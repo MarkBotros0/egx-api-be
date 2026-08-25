@@ -73,7 +73,7 @@ def _get_egx30_close(exchange: str, interval: str, bars: int):
     against the identical benchmark series.
     """
     try:
-        from egxpy.download import get_OHLCV_data
+        from app.vendor.egxpy import get_OHLCV_data
         ck = make_key("egx30", exchange, interval, bars)
         egx30_df = get(ck)
         if egx30_df is None:
@@ -106,7 +106,7 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict,
     divergence documented in core/extras_builder.py.
     """
     try:
-        from egxpy.download import get_OHLCV_data
+        from app.vendor.egxpy import get_OHLCV_data
 
         df = get_OHLCV_data(symbol, "EGX", interval, INTERNAL_BARS_MIN)
         if df is None or df.empty:
@@ -313,7 +313,7 @@ def get_analysis(
         if cached:
             return cached
 
-        from egxpy.download import get_OHLCV_data
+        from app.vendor.egxpy import get_OHLCV_data
         import pandas as pd
 
         internal_bars = max(bars, INTERNAL_BARS_MIN)

@@ -88,7 +88,7 @@ def _analyze(holdings):
     if not holdings:
         raise HTTPException(status_code=400, detail="No holdings provided")
 
-    from egxpy.download import get_OHLCV_data
+    from app.vendor.egxpy import get_OHLCV_data
     from app.core.cache import get as cache_get, set as cache_set, make_key
     import pandas as pd
     import numpy as np

@@ -48,7 +48,7 @@ def get_historical(
         if cached:
             return cached
 
-        from egxpy.download import get_EGXdata
+        from app.vendor.egxpy import get_EGXdata
 
         df = get_EGXdata(syms, interval, start_date, end_date)
 

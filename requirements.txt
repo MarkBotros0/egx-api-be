@@ -9,4 +9,7 @@ psycopg[binary]>=3.1
 psycopg_pool>=3.2
 pyjwt>=2.9.0
 bcrypt>=4.0.0
-egxpy @ git+https://github.com/egxlytics/egxpy.git
+# egxpy is vendored at app/vendor/egxpy — its upstream repo
+# (github.com/egxlytics/egxpy) no longer exists, so it cannot be installed.
+# See app/vendor/egxpy/__init__.py. These are the deps it needs:
+tvDatafeed @ git+https://github.com/rongardF/tvdatafeed.git@main

@@ -49,7 +49,7 @@ def get_intraday(
         if cached:
             return cached
 
-        from egxpy.download import get_EGX_intraday_data
+        from app.vendor.egxpy import get_EGX_intraday_data
 
         df = get_EGX_intraday_data(syms, interval, start_date, end_date)
 

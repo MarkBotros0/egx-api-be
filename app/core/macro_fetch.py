@@ -69,7 +69,7 @@ def fetch_macro(db):
 def _fetch_egx30():
     """Fetch EGX30 index data via egxpy."""
     try:
-        from egxpy.download import get_OHLCV_data
+        from app.vendor.egxpy import get_OHLCV_data
         df = get_OHLCV_data("EGX30", "EGX", "Daily", 30)
         if df is None or df.empty:
             return {"value": None, "change_pct": None, "direction": None}
@@ -106,7 +106,7 @@ def _fetch_egx30():
 def _fetch_usdegp():
     """Fetch USD/EGP exchange rate — best-effort via egxpy."""
     try:
-        from egxpy.download import get_OHLCV_data
+        from app.vendor.egxpy import get_OHLCV_data
         df = get_OHLCV_data("USDEGP", "FX_IDC", "Daily", 10)
         if df is None or df.empty:
             return {"value": None, "change_pct": None, "direction": None}

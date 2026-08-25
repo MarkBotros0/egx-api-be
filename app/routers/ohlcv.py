@@ -34,7 +34,7 @@ def get_ohlcv(
         if cached:
             return cached
 
-        from egxpy.download import get_OHLCV_data
+        from app.vendor.egxpy import get_OHLCV_data
 
         df = get_OHLCV_data(symbol, exchange, interval, bars)
 
