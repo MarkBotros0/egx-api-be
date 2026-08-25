@@ -239,7 +239,7 @@ def _analyze(holdings):
 
             sr = support_resistance(df["high"], df["low"], close)
             fib = fibonacci_levels(df["high"], df["low"])
-            key_levels_h = compute_key_levels(current_price, sr)
+            key_levels_h = compute_key_levels(current_price, sr, high=df["high"], low=df["low"])
             entry_exit_h = compute_entry_exit(
                 current_price, sr,
                 rsi_latest=current_rsi,
@@ -544,6 +544,15 @@ def _analyze(holdings):
                         "message": msg,
                         "explanation": "When a stock breaks below a support level, it often continues falling.",
                         "learn_concept": "support_resistance"})
+
+            # Nothing overhead at all: the stock is at/near new highs and has
+            # no prior level to push back against it. The card used to bury
+            # this by naming a long-cleared level as "nearest resistance".
+            if key_levels_h.get("clear_air_above"):
+                signals.append({"type": "clear_air_above", "severity": "opportunity", "symbol": symbol,
+                    "message": f"{symbol} has no resistance overhead — it is trading above every level in its recent history.",
+                    "explanation": "Nothing in the past year of trading sits above this price to act as a ceiling, so there is no obvious level where sellers have previously stepped in. That removes a headwind, but it also means there is no chart-based profit target above — set your target from your own plan, and trail your stop up rather than waiting for a level that isn't there.",
+                    "learn_concept": "support_resistance"})
 
             nr_sig = key_levels_h.get("nearest_resistance")
             if nr_sig:

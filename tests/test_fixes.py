@@ -726,3 +726,74 @@ def test_short_weekly_history_is_gated_out():
         extras["history_days"],
     )
     assert score is None
+
+
+# ---------------------------------------------------------------------------
+# Key levels — breakouts, level age, and honest strength
+# ---------------------------------------------------------------------------
+
+def test_clear_air_above_when_price_is_above_every_resistance():
+    """
+    On a breakout the fallback "nearest resistance" is a level the stock
+    cleared long ago — for one real EGX name it sat 27% BELOW the price.
+    Reporting that as resistance buries the headline, so the flag lets the
+    UI lead with "no resistance overhead" instead.
+    """
+    sr = {
+        "supports": [{"price": 80.0, "strength": 2}],
+        "resistances": [{"price": 93.0, "strength": 3}],
+    }
+    levels = compute_key_levels(126.60, sr)
+
+    assert levels["clear_air_above"] is True
+    # The fallback level is still reported, but flagged as broken by its sign.
+    assert levels["nearest_resistance"]["distance_pct"] < 0
+
+
+def test_not_clear_air_when_resistance_sits_above():
+    sr = {
+        "supports": [{"price": 120.0, "strength": 2}],
+        "resistances": [{"price": 145.0, "strength": 2}],
+    }
+    levels = compute_key_levels(140.0, sr)
+
+    assert levels["clear_air_above"] is False
+    assert levels["nearest_resistance"]["distance_pct"] > 0
+
+
+def test_clear_air_below_when_price_is_under_every_support():
+    sr = {"supports": [{"price": 100.0, "strength": 3}], "resistances": []}
+    levels = compute_key_levels(80.0, sr)
+    assert levels["clear_air_below"] is True
+
+
+def test_levels_report_how_stale_they_are():
+    """A level from last week and one from last spring must be distinguishable."""
+    n = 200
+    idx = pd.date_range("2024-01-01", periods=n, freq="B")
+    low = pd.Series(np.full(n, 100.0), index=idx)
+    high = pd.Series(np.full(n, 101.0), index=idx)
+    # Only bar 150 dips to 90 — 49 bars before the end.
+    low.iloc[150] = 90.0
+
+    sr = {"supports": [{"price": 90.0, "strength": 1}], "resistances": []}
+    levels = compute_key_levels(100.5, sr, high=high, low=low)
+
+    assert levels["nearest_support"]["bars_ago"] == n - 1 - 150
+
+
+def test_bars_ago_is_none_without_ohlcv():
+    """Callers that don't pass high/low still work; age is simply unknown."""
+    sr = {"supports": [{"price": 90.0, "strength": 1}], "resistances": []}
+    levels = compute_key_levels(100.0, sr)
+    assert levels["nearest_support"]["bars_ago"] is None
+
+
+def test_single_pivot_reports_strength_one():
+    """
+    Strength 1 means one bounce, not a tested floor. The UI relies on this to
+    say "touched once — weak level" rather than "Tested 1x", which read like
+    a credential for what is barely evidence.
+    """
+    sr = {"supports": [{"price": 90.0, "strength": 1}], "resistances": []}
+    assert compute_key_levels(100.0, sr)["nearest_support"]["strength"] == 1

@@ -447,7 +447,9 @@ def get_analysis(
         rsi_latest = _last_non_null(indicators_full.get("rsi"))
         stoch_k_latest = _last_non_null(indicators_full.get("stochastic_k"))
         atr_latest = _last_non_null(indicators_full.get("atr"))
-        key_levels = compute_key_levels(float(close_full.iloc[-1]), sr)
+        key_levels = compute_key_levels(
+            float(close_full.iloc[-1]), sr, high=df["high"], low=df["low"]
+        )
         entry_exit = compute_entry_exit(
             float(close_full.iloc[-1]), sr,
             rsi_latest=rsi_latest,

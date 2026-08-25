@@ -50,25 +50,59 @@ def _distance_pct(current: float, target: float) -> float:
     return (target - current) / current * 100.0
 
 
-def compute_key_levels(current_price: float, support_resistance: dict) -> dict:
+def _bars_since_touched(level_price: float, high=None, low=None):
+    """
+    How many bars ago price last traded through `level_price`.
+
+    A level from last week and one from last spring are not equally relevant,
+    but they render identically without this. Returns None when the caller
+    didn't supply the high/low series.
+    """
+    if high is None or low is None:
+        return None
+    try:
+        highs = list(high.values)
+        lows = list(low.values)
+        n = len(highs)
+        for i in range(n - 1, -1, -1):
+            if lows[i] <= level_price <= highs[i]:
+                return n - 1 - i
+    except Exception:
+        return None
+    return None
+
+
+def compute_key_levels(current_price: float, support_resistance: dict,
+                       high=None, low=None) -> dict:
     """
     Summarize the nearest support/resistance for UI display.
 
     `support_resistance` is the dict returned by indicators.support_resistance:
     `{"supports": [{price, strength}, ...], "resistances": [...]}`.
 
+    `high`/`low` are optional OHLCV series. When supplied, each level gains a
+    `bars_ago` field so the UI can show how stale it is.
+
     Returns:
         {
           "current_price": float,
-          "nearest_support": {"price", "distance_pct", "strength"} | None,
-          "nearest_resistance": {"price", "distance_pct", "strength"} | None,
+          "nearest_support": {"price", "distance_pct", "strength", "bars_ago"} | None,
+          "nearest_resistance": {...} | None,
           "room_to_support_pct": float | None,     # how far below current (negative)
           "room_to_resistance_pct": float | None,  # how far above current (positive)
+          "clear_air_above": bool,   # no resistance ABOVE price at all
+          "clear_air_below": bool,   # no support BELOW price at all
         }
 
     `distance_pct` is signed: negative for supports (below price), positive
     for resistances (above price). When price has broken through a level,
     the sign flips and the caller can detect it.
+
+    `clear_air_above` is the important one. When a stock breaks to new highs
+    there is genuinely nothing overhead, and the "nearest resistance" we fall
+    back to is a level it cleared long ago — for one EGX name, 27% BELOW the
+    current price. Reporting that as resistance buries the actual headline,
+    so the flag lets the UI lead with "no resistance overhead" instead.
     """
     supports = (support_resistance or {}).get("supports") or []
     resistances = (support_resistance or {}).get("resistances") or []
@@ -94,6 +128,7 @@ def compute_key_levels(current_price: float, support_resistance: dict) -> dict:
             "price": round(ns_price, 2),
             "distance_pct": round(_distance_pct(current_price, ns_price), 2),
             "strength": int(nearest_support_raw.get("strength", 1)),
+            "bars_ago": _bars_since_touched(ns_price, high, low),
         }
         room_to_support = ns["distance_pct"]
 
@@ -105,6 +140,7 @@ def compute_key_levels(current_price: float, support_resistance: dict) -> dict:
             "price": round(nr_price, 2),
             "distance_pct": round(_distance_pct(current_price, nr_price), 2),
             "strength": int(nearest_resistance_raw.get("strength", 1)),
+            "bars_ago": _bars_since_touched(nr_price, high, low),
         }
         room_to_resistance = nr["distance_pct"]
 
@@ -114,6 +150,8 @@ def compute_key_levels(current_price: float, support_resistance: dict) -> dict:
         "nearest_resistance": nr,
         "room_to_support_pct": room_to_support,
         "room_to_resistance_pct": room_to_resistance,
+        "clear_air_above": not above,
+        "clear_air_below": not below,
     }
 
 

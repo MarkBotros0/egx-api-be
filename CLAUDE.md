@@ -159,7 +159,13 @@ Response shape (see `AnalysisResponse` in types.ts):
   key_levels, entry_exit }
 ```
 
-- **`key_levels`** — `{current_price, nearest_support, nearest_resistance, room_to_support_pct, room_to_resistance_pct}`. Nearest levels are `{price, distance_pct (signed), strength}` or null. Computed by `levels.compute_key_levels` from `support_resistance`. Consumed by `KeyLevelsCard`.
+- **`key_levels`** — `{current_price, nearest_support, nearest_resistance, room_to_support_pct, room_to_resistance_pct, clear_air_above, clear_air_below}`. Nearest levels are `{price, distance_pct (signed), strength, bars_ago}` or null. Computed by `levels.compute_key_levels` from `support_resistance`; pass `high`/`low` so `bars_ago` is populated. Consumed by `KeyLevelsCard`.
+
+  **`clear_air_above` matters.** When a stock breaks to new highs there is genuinely nothing overhead, and the "nearest resistance" fallback returns a level it cleared long ago — on SWDY that was 27% BELOW the price, rendered in loss-red. The card now leads with "No resistance above" instead, and `portfolio_analysis` emits a `clear_air_above` opportunity signal. This is the same blind spot that made Max Buy Price reject every breakout; see *Removed: Max Buy Price*.
+
+  **Level quality is visible.** `strength` 1 is a single pivot, not a tested floor — the card says "Touched once — weak level" and reserves "Tested Nx" for 2+. On live EGX data most detected supports are strength 1 and about two months old, which the user can now see. `bars_ago` renders as "~8 weeks ago" / "~6 months ago".
+
+  **Known limit:** pivot detection needs ~20 bars either side, so **levels formed in the last month cannot be detected**. The Key Levels tooltip says so.
 - **`entry_exit`** — `{entry_zone, exit_zone}`. Each zone: `{active, confidence, price_range, suggested_stop_loss (entry only), reasons}`. Confidence is `low`/`medium`/`high` or null. Entry zone active when price ≤5% above support AND RSI/Stoch not overbought. Exit zone active when price ≤3% below resistance AND RSI/Stoch overbought. Computed by `levels.compute_entry_exit`. Consumed by `EntryExitCard`.
 
 ### GET /api/settings?section=weights, PUT /api/settings?section=weights
