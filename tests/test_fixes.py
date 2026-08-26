@@ -1543,3 +1543,237 @@ def test_regime_reader_ignores_error_entries():
         assert read_cached_scores(["ZZZZ"], "Daily") == {}
     finally:
         cache._store.pop(key, None)
+
+
+# ---------------------------------------------------------------------------
+# Backtest disk cache — "unreadable" must never masquerade as "no data"
+# ---------------------------------------------------------------------------
+#
+# What happened on 2026-08-26: scripts/.cache/*.pkl had been written by the
+# project venv (pandas 3.0.2). Running `python -m scripts.factor_test` with the
+# system Python (pandas 2.3.3) made every unpickle raise
+#
+#     NotImplementedError: (<StringDtype(storage='python', na_value=nan)>, ...)
+#
+# load_history() caught it with a bare `except Exception: return None`, which is
+# also how it reports "this symbol genuinely has no data". The run printed
+# "FATAL: no benchmark history" and stopped — but had the benchmark happened to
+# be readable, it would have produced a panel missing most of the universe with
+# nothing on screen saying so. A backtest that quietly runs on 10% of its data
+# is worse than one that crashes.
+
+def _bt():
+    """The backtest module, imported lazily so a scripts/ import error is local."""
+    import scripts.backtest as bt
+    return bt
+
+
+def test_cached_none_still_means_no_data(tmp_path, monkeypatch):
+    """
+    The feed legitimately returns nothing for some symbols, and _fetch_worker
+    pickles None to record that. That path must keep returning None — the fix
+    narrows what gets swallowed, it does not stop tolerating empty symbols.
+    """
+    import pickle
+
+    bt = _bt()
+    monkeypatch.setattr(bt, "CACHE_DIR", str(tmp_path))
+    with open(bt._cache_path("NODATA"), "wb") as f:
+        pickle.dump(None, f)
+
+    assert bt.load_history("NODATA") is None
+
+
+def test_cached_frame_round_trips(tmp_path, monkeypatch):
+    """The happy path, so the other tests are about failure and not about I/O."""
+    import pickle
+
+    bt = _bt()
+    monkeypatch.setattr(bt, "CACHE_DIR", str(tmp_path))
+    df = _make_ohlcv(n=10)
+    with open(bt._cache_path("OK"), "wb") as f:
+        pickle.dump(df, f)
+
+    got = bt.load_history("OK")
+    assert got is not None and len(got) == 10
+
+
+def test_unreadable_cache_entry_raises_instead_of_returning_none(tmp_path, monkeypatch):
+    """
+    A corrupt entry must be distinguishable from an empty one. Returning None
+    for both is what let a run report "no data" for the whole universe.
+    """
+    bt = _bt()
+    monkeypatch.setattr(bt, "CACHE_DIR", str(tmp_path))
+    with open(bt._cache_path("CORRUPT"), "wb") as f:
+        f.write(b"this is not a pickle")
+
+    with pytest.raises(bt.CacheUnreadableError):
+        bt.load_history("CORRUPT")
+
+
+def test_unreadable_cache_raises_even_for_a_non_pickle_error(tmp_path, monkeypatch):
+    """
+    The real failure was NotImplementedError raised by pandas' own unpickling
+    of a StringDtype — NOT pickle.UnpicklingError. Narrowing the except clause
+    to pickle's own errors would re-swallow exactly this incident.
+    """
+    import pickle
+
+    bt = _bt()
+    monkeypatch.setattr(bt, "CACHE_DIR", str(tmp_path))
+    with open(bt._cache_path("PANDAS"), "wb") as f:
+        pickle.dump(None, f)
+
+    def boom(_f):
+        raise NotImplementedError("(<StringDtype(storage='python')>, array([]))")
+
+    monkeypatch.setattr(pickle, "load", boom)
+
+    with pytest.raises(bt.CacheUnreadableError):
+        bt.load_history("PANDAS")
+
+
+def test_unreadable_message_names_the_file_the_cause_and_the_remedy(tmp_path, monkeypatch):
+    """
+    The message is the whole point: whoever hits this needs to know which file,
+    that pandas versions are the likely cause, and what to do about it.
+    """
+    bt = _bt()
+    monkeypatch.setattr(bt, "CACHE_DIR", str(tmp_path))
+    with open(bt._cache_path("CORRUPT"), "wb") as f:
+        f.write(b"not a pickle")
+
+    with pytest.raises(bt.CacheUnreadableError) as exc:
+        bt.load_history("CORRUPT")
+
+    msg = str(exc.value)
+    assert "CORRUPT.pkl" in msg
+    assert "pandas" in msg
+    assert pd.__version__ in msg, "the running pandas version is the key clue"
+    assert ".venv" in msg or "delete" in msg, "no remedy offered"
+
+
+def test_a_matching_stamp_does_not_blame_pandas_versions(tmp_path, monkeypatch):
+    """
+    A truncated or half-written entry is unreadable under the SAME pandas that
+    wrote it. Offering the version explanation there sends the reader off to
+    compare interpreters that already agree, and the real remedy — delete that
+    one file and re-fetch it — never gets stated.
+    """
+    bt = _bt()
+    monkeypatch.setattr(bt, "CACHE_DIR", str(tmp_path))
+    bt.write_cache_stamp()                       # stamp == the running versions
+    with open(bt._cache_path("TRUNC"), "wb") as f:
+        f.write(b"half a pickle")
+
+    with pytest.raises(bt.CacheUnreadableError) as exc:
+        bt.load_history("TRUNC")
+
+    msg = str(exc.value)
+    assert "TRUNC.pkl" in msg
+    assert "not portable across pandas versions" not in msg
+    assert "TRUNC.pkl" in msg.split("Delete")[-1] or "re-fetch" in msg
+
+
+def test_an_unknown_writer_still_offers_the_version_explanation(tmp_path, monkeypatch):
+    """
+    Unstamped is the state every pre-existing cache is in, and it is exactly the
+    state the 2026-08-26 run was in. Mismatch is unprovable there, so the
+    explanation must still be offered.
+    """
+    bt = _bt()
+    monkeypatch.setattr(bt, "CACHE_DIR", str(tmp_path))
+    with open(bt._cache_path("OLD"), "wb") as f:
+        f.write(b"half a pickle")
+
+    with pytest.raises(bt.CacheUnreadableError) as exc:
+        bt.load_history("OLD")
+
+    assert "pandas" in str(exc.value)
+
+
+def test_a_missing_cache_file_is_not_an_unreadable_one(tmp_path, monkeypatch):
+    """
+    A stalled fetch leaves no file at all. That is 'no data', not corruption —
+    raising there would turn every fetch timeout into a crash.
+    """
+    bt = _bt()
+    monkeypatch.setattr(bt, "CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(bt, "fetch_batch", lambda syms: 0)
+
+    assert bt.load_history("NEVERFETCHED") is None
+
+
+# --- the version stamp, since the cache is version-coupled by construction ---
+
+def test_stamp_mismatch_is_reported(tmp_path, monkeypatch):
+    """The cache is coupled to the pandas that wrote it; say so before the run."""
+    import json
+
+    bt = _bt()
+    monkeypatch.setattr(bt, "CACHE_DIR", str(tmp_path))
+    (tmp_path / "VERSION").write_text(
+        json.dumps({"pandas": "0.0.1", "python": "3.0.0"}), encoding="utf-8")
+
+    warning = bt.cache_stamp_warning()
+    assert warning is not None
+    assert "0.0.1" in warning and pd.__version__ in warning
+
+
+def test_matching_stamp_is_silent(tmp_path, monkeypatch):
+    bt = _bt()
+    monkeypatch.setattr(bt, "CACHE_DIR", str(tmp_path))
+    bt.write_cache_stamp()
+
+    assert bt.cache_stamp_warning() is None
+
+
+def test_an_unstamped_cache_is_not_an_error(tmp_path, monkeypatch):
+    """
+    Caches written before stamping existed have no VERSION file. Unknown is not
+    mismatched — warning on it would train the reader to ignore the warning.
+    """
+    bt = _bt()
+    monkeypatch.setattr(bt, "CACHE_DIR", str(tmp_path))
+
+    assert bt.cache_stamp_warning() is None
+
+
+# --- the end-of-run tally, so a partial panel can never look complete ---
+
+def test_the_error_survives_a_worker_process_boundary():
+    """
+    score_symbol runs in a ProcessPoolExecutor child, so this error is raised in
+    one process and caught in another — which means it gets pickled. Give it a
+    custom __init__ taking anything but a single message and the parent's
+    `except CacheUnreadableError` stops matching, and every unreadable entry
+    silently falls through to the generic handler that does not tally.
+    """
+    import pickle
+
+    bt = _bt()
+    err = bt.CacheUnreadableError("some/path.pkl could not be unpickled")
+    revived = pickle.loads(pickle.dumps(err))
+
+    assert isinstance(revived, bt.CacheUnreadableError)
+    assert str(revived) == str(err)
+
+
+def test_no_failures_produces_no_report():
+    assert _bt().cache_failure_report({}, total=300) is None
+
+
+def test_failure_report_names_the_count_and_calls_the_panel_partial():
+    """
+    Per-symbol errors scroll past during a half-hour run. The summary at the
+    bottom is the thing that is actually read, so the count has to be there.
+    """
+    bt = _bt()
+    report = bt.cache_failure_report(
+        {"COMI": "boom", "SWDY": "boom", "ABUK": "boom"}, total=300)
+
+    assert report is not None
+    assert "3" in report and "300" in report
+    assert "PARTIAL" in report.upper()
+    assert "COMI" in report

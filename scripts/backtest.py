@@ -108,6 +108,179 @@ def _cache_path(symbol: str) -> str:
     return os.path.join(CACHE_DIR, f"{symbol.upper()}.pkl")
 
 
+class CacheUnreadableError(RuntimeError):
+    """
+    A cache entry exists but could not be unpickled.
+
+    Deliberately NOT the same outcome as a cached None, which means the feed
+    genuinely had no data for that symbol. `load_history` used to collapse the
+    two into a bare `except Exception: return None`, and on 2026-08-26 that bit:
+    the pickles had been written by the project venv (pandas 3.0.2) and a run
+    under the system Python (pandas 2.3.3) raised
+
+        NotImplementedError: (<StringDtype(storage='python', na_value=nan)>, ...)
+
+    on EVERY entry. Swallowed, that read as "the entire EGX has no history".
+    The run happened to die on the benchmark and print "FATAL: no benchmark
+    history"; had the benchmark been readable it would have built a panel
+    missing most of the universe with nothing on screen saying so. A backtest
+    that quietly runs on 10% of its data is worse than one that crashes.
+    """
+
+
+# The cache is version-coupled by construction — pickled DataFrames do not move
+# between pandas versions — so record what wrote it.
+#
+# Limitation worth knowing: this is one stamp for a whole directory, written by
+# whoever first fetched into it. Fetch new symbols under a different pandas and
+# the directory becomes genuinely mixed while the stamp still names the original
+# writer. The stamp is therefore advisory; `_read_cache` raising is the
+# guarantee.
+
+def _stamp_path() -> str:
+    return os.path.join(CACHE_DIR, "VERSION")
+
+
+def _running_versions() -> dict:
+    return {"pandas": pd.__version__, "python": sys.version.split()[0]}
+
+
+def write_cache_stamp() -> None:
+    """
+    Record the interpreter writing cache entries, if not already recorded.
+
+    Called only where entries are actually written. Stamping on a plain read
+    would claim this interpreter wrote entries it did not.
+    """
+    path = _stamp_path()
+    if os.path.exists(path):
+        return
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(_running_versions(), f)
+    except OSError:
+        pass          # a diagnostic, never a reason to fail a run
+
+
+def read_cache_stamp() -> dict:
+    """The recorded versions, or {} if unstamped or unparseable."""
+    try:
+        with open(_stamp_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        # Swallowing is right HERE and nowhere else in this section: the stamp
+        # is a hint about data, not the data. Absent means unknown, and
+        # `cache_stamp_warning` treats unknown as silent.
+        return {}
+
+
+def cache_stamp_warning() -> str | None:
+    """
+    One line naming an interpreter mismatch before a long run starts, or None.
+
+    An unstamped cache is unknown, not mismatched — warning on it would train
+    the reader to ignore the warning.
+    """
+    stamp = read_cache_stamp()
+    if not stamp:
+        return None
+    now = _running_versions()
+    diff = [k for k in ("pandas", "python") if stamp.get(k) and stamp[k] != now[k]]
+    if not diff:
+        return None
+    moved = ", ".join(f"{k} {stamp[k]} -> {now[k]}" for k in diff)
+    return (
+        f"WARNING: {CACHE_DIR} was written by a different interpreter ({moved}).\n"
+        f"         Pickled frames are not portable across pandas versions. If "
+        f"reads fail, re-run\n"
+        f"         with the venv that wrote the cache, or delete the cache and "
+        f"re-fetch."
+    )
+
+
+def _unreadable_message(path: str, exc: BaseException) -> str:
+    """
+    Say what is actually known, and only offer the version theory when it is
+    live. Under the SAME pandas that wrote the cache, an unreadable entry is a
+    truncated or half-written file — sending the reader off to compare
+    interpreters that already agree buries the one-file remedy.
+    """
+    stamp = read_cache_stamp()
+    head = f"{path} exists but could not be unpickled: {type(exc).__name__}: {exc}"
+
+    if stamp.get("pandas") == pd.__version__:
+        return (
+            f"{head}\n"
+            f"  The cache was written by this same pandas ({pd.__version__}), so "
+            f"this is a corrupt\n"
+            f"  or half-written entry rather than a version mismatch. Delete "
+            f"{path}\n"
+            f"  and re-fetch that symbol."
+        )
+
+    wrote = (f"was written by pandas {stamp['pandas']}" if stamp.get("pandas")
+             else "predates the VERSION stamp, so its writer is unknown")
+    return (
+        f"{head}\n"
+        f"  The cache {wrote}; this process is running pandas {pd.__version__}.\n"
+        f"  Pickled DataFrames are not portable across pandas versions. Re-run "
+        f"with the venv\n"
+        f"  that wrote the cache (./.venv/Scripts/python.exe -m scripts.backtest), "
+        f"or delete\n"
+        f"  {CACHE_DIR} and re-fetch."
+    )
+
+
+def _read_cache(path: str):
+    """
+    Unpickle one cache entry.
+
+    Returns the cached object, which is legitimately None for a symbol the feed
+    had no data for. A missing file is None too — a stalled fetch writes
+    nothing, and absence is not corruption. Anything else raises: an entry we
+    cannot read is a fact about this run, and must never be reported as a fact
+    about the market.
+
+    The except is broad on purpose. The failure that motivated this was
+    NotImplementedError raised by pandas' own unpickling, not
+    pickle.UnpicklingError, so narrowing to pickle's own errors would re-swallow
+    exactly the incident.
+    """
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        raise CacheUnreadableError(_unreadable_message(path, exc)) from exc
+
+
+def cache_failure_report(failures: dict, total: int) -> str | None:
+    """
+    The end-of-run tally of unreadable entries, or None if every symbol loaded.
+
+    Per-symbol errors scroll past during a run that takes half an hour; the
+    block at the bottom is what actually gets read. It has to state the count
+    against the universe size, or a panel built from a fraction of the universe
+    reads as a complete one.
+    """
+    if not failures:
+        return None
+    shown = sorted(failures)[:10]
+    more = len(failures) - len(shown)
+    return (
+        "\n" + "!" * 74 + "\n"
+        f"PARTIAL PANEL — {len(failures)} of {total} symbols had an UNREADABLE "
+        f"cache entry and\ncontributed no rows. They are missing from every "
+        f"number above; do not read\nthis run as covering the universe.\n"
+        f"  affected: {', '.join(shown)}"
+        f"{f' (+{more} more)' if more else ''}\n\n"
+        f"  {next(iter(failures.values()))}\n"
+        + "!" * 74
+    )
+
+
 def _fetch_worker(symbols: list) -> None:
     """
     Child-process body: fetch a BATCH, writing each symbol as it completes.
@@ -159,6 +332,7 @@ def fetch_batch(symbols: list) -> int:
     if not todo:
         return len(symbols)
 
+    write_cache_stamp()
     proc = mp.Process(target=_fetch_worker, args=(todo,), daemon=True)
     proc.start()
 
@@ -179,7 +353,12 @@ def fetch_batch(symbols: list) -> int:
 
 def load_history(symbol: str, refetch: bool = False):
     """
-    Daily OHLCV for one symbol, from the disk cache. None if unavailable.
+    Daily OHLCV for one symbol, from the disk cache.
+
+    None means no data — either the feed had none for this symbol, or the fetch
+    stalled and wrote nothing. An entry that exists but cannot be read raises
+    CacheUnreadableError instead; see that class for what conflating the two
+    cost. Callers that treat None as "skip this symbol" must NOT catch it.
 
     Read-only by design: workers must never fetch. main() warms the cache
     serially first, because parallel cold fetches would multiply the vendored
@@ -187,18 +366,10 @@ def load_history(symbol: str, refetch: bool = False):
     """
     path = _cache_path(symbol)
     if not refetch and os.path.exists(path):
-        try:
-            with open(path, "rb") as f:
-                return pickle.load(f)
-        except Exception:
-            return None
+        return _read_cache(path)
 
     fetch_batch([symbol])
-    try:
-        with open(path, "rb") as f:
-            return pickle.load(f)
-    except Exception:
-        return None
+    return _read_cache(path)
 
 
 def universe() -> list:
@@ -439,6 +610,9 @@ def main():
     args = ap.parse_args()
 
     os.makedirs(CACHE_DIR, exist_ok=True)
+    stamp_warning = cache_stamp_warning()
+    if stamp_warning:
+        print(stamp_warning)
 
     syms = universe()
     if args.quick:
@@ -477,18 +651,29 @@ def main():
           f"({dates[0].date()} .. {dates[-1].date()}) ...")
     t0 = time.time()
     rows = []
+    # Tracked separately from ordinary per-symbol errors: an unreadable cache
+    # means we never saw that symbol's data at all, which changes what the panel
+    # is rather than what one symbol scored.
+    unreadable: dict = {}
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         futs = {pool.submit(score_symbol, s, bench_close, dates): s for s in syms}
         for n, fut in enumerate(as_completed(futs), 1):
             try:
                 rows.extend(fut.result())
+            except CacheUnreadableError as e:
+                unreadable[futs[fut]] = str(e)
+                print(f"  {futs[fut]}: CACHE UNREADABLE\n{e}")
             except Exception as e:
                 print(f"  {futs[fut]}: {type(e).__name__} {e}")
             if n % 50 == 0:
                 print(f"  {n}/{len(syms)} symbols  ({time.time()-t0:.0f}s)")
 
+    report = cache_failure_report(unreadable, len(syms))
+
     if not rows:
         print("FATAL: no scored rows produced")
+        if report:
+            print(report)
         return 1
 
     panel = pd.DataFrame(rows)
@@ -497,6 +682,12 @@ def main():
           f"{panel['symbol'].nunique()} symbols, {panel['date'].nunique()} dates")
     print(f"span: {panel['date'].min().date()} .. {panel['date'].max().date()}")
     print(f"saved -> {args.out}")
+
+    if report:
+        # Last thing printed, and a non-zero exit, so an incomplete panel is not
+        # picked up by analyze_backtest as if it covered the universe.
+        print(report)
+        return 1
     return 0
 
 
