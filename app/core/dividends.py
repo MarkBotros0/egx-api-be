@@ -204,3 +204,59 @@ def summarize_realized(priced_sales: list, dividends: list) -> dict:
         "worst_trade": min(priced_sales, key=lambda s: s["realized_pnl"]) if priced_sales else None,
         "by_symbol": rollup,
     }
+
+
+# --- the one spelling of the dividend queries ---------------------------
+#
+# These live beside the maths, the same shape as core/holdings.py, because
+# THREE routers read dividends — dividends.py, sales.py and
+# portfolio_analysis.py. One spelling here is what stops three growing there.
+
+DIVIDEND_COLUMNS = (
+    "id, symbol, name, sector, amount, pay_date, shares, notes, created_at"
+)
+
+
+def row_to_dividend(row) -> dict:
+    """Map a DIVIDEND_COLUMNS row tuple to the dict the API returns."""
+    return {
+        "id": row[0],
+        "symbol": row[1],
+        "name": row[2],
+        "sector": row[3],
+        "amount": row[4],
+        "pay_date": row[5],
+        "shares": row[6],
+        "notes": row[7],
+        "created_at": row[8],
+    }
+
+
+def fetch_dividends(db, user_id: str) -> list:
+    """This user's dividends, enriched, newest pay_date first."""
+    if not user_id:
+        return []
+    rows = db.execute(
+        f"SELECT {DIVIDEND_COLUMNS} FROM portfolio_dividends "
+        "WHERE user_id = %s ORDER BY pay_date DESC, created_at DESC",
+        (user_id,),
+    ).fetchall()
+    return [enrich_dividend(row_to_dividend(r)) for r in rows]
+
+
+def fetch_dividend_totals(db, user_id: str) -> dict:
+    """
+    {symbol: total EGP collected}. Empty dict when there is no user.
+
+    Used by portfolio_analysis to put a figure against each open holding. One
+    indexed aggregate with no price fetch, so it costs nothing against the 30 s
+    Vercel budget.
+    """
+    if not user_id:
+        return {}
+    rows = db.execute(
+        "SELECT symbol, SUM(amount) FROM portfolio_dividends "
+        "WHERE user_id = %s GROUP BY symbol",
+        (user_id,),
+    ).fetchall()
+    return {r[0]: round(float(r[1] or 0), 2) for r in rows}
