@@ -14,6 +14,7 @@ from app.core.db import get_db
 from app.core.json_encoding import NaNSafeJSONResponse
 from app.routers import (
     auth,
+    users,
     tickers,
     ohlcv,
     macro,
@@ -56,6 +57,7 @@ except Exception as e:
 
 for router_module in (
     auth,
+    users,
     tickers,
     ohlcv,
     macro,

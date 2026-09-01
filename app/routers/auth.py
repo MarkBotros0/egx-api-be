@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.core.auth import (
+    ROLE_USER,
     CurrentUser,
     create_access_token,
     get_current_user,
@@ -32,21 +33,24 @@ def login(body: LoginRequest):
     username = body.username.lower().strip()
     db = get_db()
     row = db.execute(
-        "SELECT id, username, password_hash FROM users WHERE username = %s",
+        "SELECT id, username, password_hash, role, is_active FROM users WHERE username = %s",
         (username,),
     ).fetchone()
     if not row or not verify_password(body.password, row[2]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    user_id, user_name = row[0], row[1]
+    if not row[4]:
+        raise HTTPException(status_code=403, detail="This account has been disabled.")
+
+    user_id, user_name, role = row[0], row[1], row[3] or ROLE_USER
     token = create_access_token(user_id, user_name)
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {"id": user_id, "username": user_name},
+        "user": {"id": user_id, "username": user_name, "role": role},
     }
 
 
 @router.get("/api/auth/me")
 def me(user: CurrentUser = Depends(get_current_user)):
-    return {"id": user.id, "username": user.username}
+    return {"id": user.id, "username": user.username, "role": user.role}

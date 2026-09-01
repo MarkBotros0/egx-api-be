@@ -8,9 +8,10 @@ PUT  /api/settings?section=weights   — Update weights (normalized to 100)
 """
 
 from typing import Optional, Any
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from app.core.auth import CurrentUser, get_current_user, require_admin
 from app.core.db import get_db
 from app.core.composite import (
     CATEGORY_ORDER,
@@ -33,11 +34,14 @@ class WeightsUpdate(BaseModel):
 
 
 @router.get("/api/settings")
-def get_settings(section: Optional[str] = Query(None)):
+def get_settings(
+    section: Optional[str] = Query(None),
+    user: CurrentUser = Depends(get_current_user),
+):
     try:
         if section == "weights":
             db = get_db()
-            raw = get_weights_from_db(db)
+            raw = get_weights_from_db(db, user.id)
             normalized = normalize_weights(raw)
             return {
                 "weights": normalized,
@@ -55,7 +59,11 @@ def get_settings(section: Optional[str] = Query(None)):
 
 
 @router.put("/api/settings")
-def put_settings(body: dict, section: Optional[str] = Query(None)):
+def put_settings(
+    body: dict,
+    section: Optional[str] = Query(None),
+    user: CurrentUser = Depends(get_current_user),
+):
     try:
         if section == "weights":
             weights_in = body.get("weights")
@@ -79,18 +87,27 @@ def put_settings(body: dict, section: Optional[str] = Query(None)):
                 raise HTTPException(status_code=400, detail="No valid weight values provided")
 
             db = get_db()
-            current = get_weights_from_db(db)
+            current = get_weights_from_db(db, user.id)
             current.update(sanitized)
             normalized = normalize_weights(current)
 
+            # Written to user_settings, not settings: weights are a preference,
+            # and before this each save silently rescored every other user's
+            # stocks too.
             for key, value in normalized.items():
                 db.execute(
-                    "INSERT INTO settings (key, value) VALUES (%s, %s) "
-                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-                    (f"weight_{key}", str(value)),
+                    "INSERT INTO user_settings (user_id, key, value) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (user_id, key) DO UPDATE SET value = EXCLUDED.value",
+                    (user.id, f"weight_{key}", str(value)),
                 )
             db.commit()
             return {"weights": normalized, "raw": current}
+
+        # Everything else in `settings` is global and shared — currency, the
+        # risk-free rate (also the CBE rate on the macro card and the bar
+        # realized trades are graded against), and the P/E feed status. One
+        # user must not be able to move those for everyone.
+        _ = require_admin(user)
 
         key = body.get("key")
         value = body.get("value")

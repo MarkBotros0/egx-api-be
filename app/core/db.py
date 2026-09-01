@@ -98,6 +98,16 @@ def init_db(db: _DB) -> None:
             created_at TEXT NOT NULL
         )
     """)
+    # Additive and idempotent, matching the rest of init_db — there is no
+    # migration framework, so new columns land on the next cold start.
+    #
+    # `role` is NOT settable through the admin API: it is stamped from the
+    # AUTH_ADMINS env var at boot (see core/auth.seed_users_from_env), which
+    # makes privilege escalation through /api/users structurally impossible
+    # and keeps admin status declared in one auditable place that survives a
+    # DB reset.
+    db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'")
+    db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE")
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS portfolio (
@@ -148,6 +158,30 @@ def init_db(db: _DB) -> None:
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        )
+    """)
+
+    # Per-user overrides of the keys in `settings` that are genuinely a
+    # PREFERENCE rather than a fact — today that is the composite weight_*
+    # keys and nothing else.
+    #
+    # A separate table rather than a user_id column on `settings`: changing
+    # that table's primary key is not idempotent in Postgres, and keeping
+    # `settings` as the global tier gives the migration for free. The read
+    # chain is user_settings -> settings -> DEFAULT_WEIGHTS per key
+    # (composite.get_weights_from_db), so an existing install's saved weights
+    # stay everyone's starting point and nobody's scores jump on deploy.
+    #
+    # risk_free_rate deliberately does NOT live here. It is the Sharpe hurdle,
+    # the CBE policy rate the macro card renders, AND the bar realized trades
+    # are graded against — a market fact, not a preference. Per-user values
+    # would mean each user grading their own trades against a different bar.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id TEXT NOT NULL,
+            key     TEXT NOT NULL,
+            value   TEXT NOT NULL,
+            PRIMARY KEY (user_id, key)
         )
     """)
 

@@ -995,21 +995,51 @@ def compute_composite(indicators: dict, extras: Optional[dict] = None,
 # DB helper
 # ---------------------------------------------------------------------------
 
-def get_weights_from_db(db) -> dict:
+def get_weights_from_db(db, user_id: str = None) -> dict:
     """
-    Read weight_* rows from the settings table. Missing rows fall back to
-    DEFAULT_WEIGHTS per-key — so existing DBs with only the original 5 keys
-    will gracefully inherit defaults for new categories. Non-numeric values
-    also fall back to default.
+    Resolve this user's composite weights.
+
+    Read chain, PER KEY: user_settings (this user's override) -> settings (the
+    global value) -> DEFAULT_WEIGHTS.
+
+    The middle tier is what makes weights per-user without moving anyone's
+    scores on deploy: an install's existing saved weights stay everyone's
+    starting point until a user touches their own sliders. The per-key
+    granularity also means extending CATEGORY_ORDER from 5 to 8 still
+    gracefully inherits defaults for the new categories, as before.
+
+    `user_id=None` means the anonymous/global context — used by the public
+    dashboard path and by the market-regime reader, whose bands were
+    calibrated at default weights.
     """
     try:
+        # The %% is load-bearing. _DB.execute always passes a params tuple, so
+        # psycopg parses the string for placeholders and a lone %' raises
+        # ProgrammingError — which the except below swallowed into
+        # DEFAULT_WEIGHTS. Saved weights were therefore NEVER read back: every
+        # score in the app was computed at Beginner Safe defaults no matter
+        # what the sliders said. tests pin this.
         rows = db.execute(
-            "SELECT key, value FROM settings WHERE key LIKE 'weight_%'"
+            "SELECT key, value FROM settings WHERE key LIKE 'weight_%%'"
         ).fetchall()
     except Exception:
         return dict(DEFAULT_WEIGHTS)
 
     lookup = {r[0]: r[1] for r in rows}
+
+    if user_id:
+        try:
+            user_rows = db.execute(
+                "SELECT key, value FROM user_settings "
+                "WHERE user_id = %s AND key LIKE 'weight_%%'",
+                (user_id,),
+            ).fetchall()
+            lookup.update({r[0]: r[1] for r in user_rows})
+        except Exception:
+            # A missing user_settings table (cold DB) must not take scoring
+            # down — the global tier is a correct answer.
+            pass
+
     out = {}
     for name in CATEGORY_ORDER:
         raw = lookup.get(f"weight_{name}")

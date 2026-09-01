@@ -9,6 +9,7 @@ through /api/auth/login.
 
 import hashlib
 import os
+import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -16,18 +17,38 @@ from typing import Optional
 
 import bcrypt
 import jwt
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 
 
 AUTH_SECRET = os.environ.get("AUTH_SECRET", "")
 JWT_ALGORITHM = "HS256"
 TOKEN_LIFETIME_DAYS = 30
 
+ROLE_USER = "user"
+ROLE_ADMIN = "admin"
+
+# Ambiguous glyphs removed: a generated password gets read off a screen and
+# typed by hand, so 0/O and 1/l/I cost support time for no entropy worth
+# keeping. 16 chars of this alphabet is ~91 bits.
+_PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+GENERATED_PASSWORD_LENGTH = 16
+
 
 @dataclass
 class CurrentUser:
     id: str
     username: str
+    role: str = ROLE_USER
+    is_active: bool = True
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == ROLE_ADMIN
+
+
+def generate_password(length: int = GENERATED_PASSWORD_LENGTH) -> str:
+    """A random password for an admin to hand to a user. Never stored raw."""
+    return "".join(secrets.choice(_PASSWORD_ALPHABET) for _ in range(length))
 
 
 def _prehash(password: str) -> bytes:
@@ -66,6 +87,9 @@ def create_access_token(user_id: str, username: str) -> str:
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(days=TOKEN_LIFETIME_DAYS)).timestamp()),
     }
+    # Role and active-state are deliberately NOT claims. Tokens live 30 days,
+    # so a claim would mean disabling a user does nothing for a month — see
+    # get_current_user, which reads them from the row on every request.
     return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
 
 
@@ -79,7 +103,29 @@ def _decode_token(token: str) -> dict:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
+def _load_user(user_id: str) -> Optional[CurrentUser]:
+    """Read the live user row. Returns None if missing or disabled."""
+    from app.core.db import get_db
+
+    row = get_db().execute(
+        "SELECT id, username, role, is_active FROM users WHERE id = %s",
+        (user_id,),
+    ).fetchone()
+    if not row or not row[3]:
+        return None
+    return CurrentUser(id=row[0], username=row[1], role=row[2] or ROLE_USER,
+                       is_active=bool(row[3]))
+
+
 def get_current_user(authorization: Optional[str] = Header(None)) -> CurrentUser:
+    """
+    Resolve the caller, reading role and active-state from the DB.
+
+    The row is re-read on every request rather than trusted from the token.
+    Tokens live 30 days, so carrying `role`/`is_active` as claims would mean an
+    admin disabling a user changes nothing for a month — "disable" would be a
+    lie. This is one indexed primary-key lookup on a pooled connection.
+    """
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
     token = authorization.split(" ", 1)[1].strip()
@@ -88,22 +134,61 @@ def get_current_user(authorization: Optional[str] = Header(None)) -> CurrentUser
     username = payload.get("username")
     if not user_id or not username:
         raise HTTPException(status_code=401, detail="Invalid token payload")
-    return CurrentUser(id=user_id, username=username)
+
+    user = _load_user(user_id)
+    if user is None:
+        # Same message for "deleted" and "disabled" — the distinction is not
+        # the caller's business, and either way they must log in again.
+        raise HTTPException(status_code=401, detail="Account is not active")
+    return user
+
+
+def get_optional_user(authorization: Optional[str] = Header(None)) -> Optional[CurrentUser]:
+    """
+    The caller if they present a valid token, otherwise None — never raises.
+
+    /api/analysis needs this: the dashboard is a public page (middleware.ts
+    guards only /portfolio), so requiring auth there would break anonymous
+    browsing. Anonymous callers score under the global/default weights.
+    """
+    if not authorization:
+        return None
+    try:
+        return get_current_user(authorization)
+    except HTTPException:
+        return None
+
+
+def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+
+def _parse_admin_usernames() -> set:
+    raw = os.environ.get("AUTH_ADMINS", "").strip()
+    return {u.strip().lower() for u in raw.split(",") if u.strip()}
 
 
 def seed_users_from_env(db) -> None:
-    """Upsert users from the AUTH_USERS env var.
+    """Create users from AUTH_USERS and stamp admin roles from AUTH_ADMINS.
 
-    Format: `AUTH_USERS=alice:pw1,bob:pw2`
+    Format: `AUTH_USERS=alice:pw1,bob:pw2` — each entry `username:password`.
+            `AUTH_ADMINS=alice` — comma-separated usernames.
 
-    Each entry is `username:password`. Existing users get their password hash
-    refreshed on every boot, so rotating a password is as simple as editing
-    the env var and restarting the backend. Users not listed in AUTH_USERS
-    are left alone — remove them manually from the DB if needed.
+    Passwords here are for BOOTSTRAP only. An existing user's password hash is
+    never touched: admins reset passwords through /api/users, and rewriting the
+    hash on every boot (as this used to do) would silently revert every reset
+    on the next cold start. To change a password, use the admin tab.
+
+    AUTH_ADMINS is authoritative for admin status and is re-applied on every
+    boot, so it survives a DB reset and you cannot lock yourself out by
+    fumbling a role in the database. Demotion of unlisted users only happens
+    when AUTH_ADMINS is non-empty — a blank or unset var must never strip
+    every admin and leave the app unmanageable.
     """
+    admins = _parse_admin_usernames()
     raw = os.environ.get("AUTH_USERS", "").strip()
-    if not raw:
-        return
 
     now = datetime.utcnow().isoformat() + "Z"
     for entry in raw.split(","):
@@ -116,18 +201,25 @@ def seed_users_from_env(db) -> None:
         if not username or not password:
             continue
 
-        password_hash = hash_password(password)
         existing = db.execute(
             "SELECT id FROM users WHERE username = %s", (username,)
         ).fetchone()
-        if existing:
+        if not existing:
             db.execute(
-                "UPDATE users SET password_hash = %s WHERE username = %s",
-                (password_hash, username),
+                "INSERT INTO users (id, username, password_hash, created_at, role, is_active) "
+                "VALUES (%s, %s, %s, %s, %s, TRUE)",
+                (str(uuid.uuid4()), username, hash_password(password), now,
+                 ROLE_ADMIN if username in admins else ROLE_USER),
             )
-        else:
-            db.execute(
-                "INSERT INTO users (id, username, password_hash, created_at) VALUES (%s, %s, %s, %s)",
-                (str(uuid.uuid4()), username, password_hash, now),
-            )
+
+    if admins:
+        db.execute(
+            "UPDATE users SET role = %s WHERE username = ANY(%s) AND role <> %s",
+            (ROLE_ADMIN, list(admins), ROLE_ADMIN),
+        )
+        db.execute(
+            "UPDATE users SET role = %s WHERE NOT (username = ANY(%s)) AND role <> %s",
+            (ROLE_USER, list(admins), ROLE_USER),
+        )
+
     db.commit()

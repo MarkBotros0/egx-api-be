@@ -67,6 +67,8 @@ egx-api-be/                     # Python FastAPI backend
       settings.py               # GET/PUT /api/settings  (weights live here too, section=weights)
       macro.py                  # GET /api/macro
       watchlist.py              # GET/POST/DELETE /api/watchlist
+      auth.py                   # POST /api/auth/login ; GET /api/auth/me
+      users.py                  # Admin-only user management (/api/users)
     schemas/                    # (empty — Pydantic response shapes are inline dicts)
 
 egx-api-fe/                     # Next.js frontend
@@ -115,8 +117,12 @@ public/                         # Static assets, PWA manifest
 
 ### Portfolio (`src/app/portfolio/page.tsx`)
 - Add/Edit/Delete holdings with live re-analysis after each change
-- **Target Price** and **Stop Loss** tracked per holding (optional) — drive distance calculations and stop-loss/target-hit signals
-- **Notes** field per holding for custom annotations
+- **Target Price**, **Stop Loss** and **Notes** are still stored per holding and
+  still drive distance calculations and stop-loss/target-hit signals, but
+  **`AddHoldingForm` no longer exposes them** (2026-09-01 — the add/edit form is
+  deliberately down to symbol, quantity, buy price, buy date). Existing values
+  are carried through the edit payload unchanged so an edit cannot wipe them;
+  nothing in the UI can set a new one today.
 - **Sell** action per holding (full or partial) → `RealizedGainsCard` + collapsed `ClosedPositionsTable`.
 - Mobile: FAB (floating action button) to add; full-screen modal form
 - Desktop: inline form, top-right "+ Add Stock" button
@@ -220,7 +226,64 @@ Trades held under 30 days report no annualized figure at all
 Returns `{ egx30, usd_egp, interest_rate }`. 1-hour cache in `macro_data` table. Graceful degradation (returns null values if source fails).
 
 ### GET /api/settings, PUT /api/settings
-Key-value settings. Pre-seeded: `currency=EGP`, `risk_free_rate=25`.
+
+Both routes require a token. `?section=weights` reads and writes the CALLER'S
+own weights (see *Auth, roles and per-user settings*); the generic
+`{key, value}` form writes the global `settings` table and requires an **admin**,
+because everything left in there is shared — `currency`, `risk_free_rate` and
+the `pe_last_*` feed status. Pre-seeded: `currency=EGP`, `risk_free_rate=25`.
+
+### Auth, roles and user management
+
+**The app is multi-user with JWT auth.** Login is `POST /api/auth/login`
+(bcrypt over a SHA-256 pre-hash, HS256 token, 30-day life); `GET /api/auth/me`
+returns `{id, username, role}`. There is no registration endpoint — accounts
+come from an admin or from the env seed.
+
+Two roles, `user` and `admin`, on `users.role`.
+
+**Admin status comes ONLY from the `AUTH_ADMINS` env var**, applied at boot by
+`core/auth.seed_users_from_env` and re-asserted on every boot, so it survives a
+DB reset and cannot be fumbled in the database. No API route writes a role —
+`tests/test_users_and_roles.py::test_the_admin_api_cannot_grant_admin` greps for
+`SET role` and fails if one appears. That makes privilege escalation through
+`/api/users` structurally impossible, and it is why the admin tab has no
+role picker. Demotion of unlisted users happens **only when `AUTH_ADMINS` is
+non-empty** — a blank var must never strip every admin and leave the app
+unmanageable.
+
+**`AUTH_USERS=alice:pw1,bob:pw2` only CREATES users that don't exist.** It no
+longer refreshes password hashes on boot. It used to, and that would silently
+revert every admin password reset on the next cold start.
+
+**Role and active-state are read from the DB on every request, never from the
+token** (`core/auth.get_current_user` → `_load_user`). A 30-day token means
+claims would let a disabled user keep working for a month, so "disable" would
+be a lie. Cost is one indexed PK lookup on a pooled connection.
+
+Dependencies in `core/auth.py`:
+- `get_current_user` — 401 unless a valid token maps to an **active** row
+- `require_admin` — the above plus 403 for non-admins
+- `get_optional_user` — returns `None` instead of raising. `/api/analysis` uses
+  this: the dashboard is a public page (middleware guards only `/portfolio` and
+  `/admin`), so demanding a token there would break anonymous browsing.
+
+### /api/users — admin only
+
+`GET` list · `POST` create · `POST /{id}/password` reset · `PATCH /{id}`
+enable/disable · `DELETE /{id}`.
+
+- A generated password (`core/auth.generate_password`, 16 chars, no `0O1lI`) is
+  returned **exactly once**, in the response to the call that created it. Only
+  the bcrypt hash is stored, so it can never be read back — `PasswordRevealDialog`
+  says so on screen.
+- **`DELETE` removes `portfolio_sales`, `portfolio`, `watchlist` and
+  `user_settings` first, then the user, all in one `db.transaction()`.** No
+  table has an FK to `users`, so nothing cascades and the rows would otherwise
+  survive as invisible orphans. Sales go before holdings, matching the
+  direction the sale-undo path depends on.
+- Guards: you cannot disable or delete **yourself**, or the **last active
+  admin** — either would leave the app with nobody able to administer it.
 
 ### GET /api/watchlist, POST, DELETE
 User's watched symbols, stored in the `watchlist` table in Turso.
@@ -376,7 +439,9 @@ PRESETS = {
 **Orchestrator:**
 - `compute_composite(indicators, extras, weights, macro=None)` — calls all 8 scorers, renormalizes weights across categories that returned non-None, applies **macro modulation** post-hoc, and returns `{score, signal, categories, weights, macro_adjustment, macro_context}`
 - **Macro modulation** (`apply_macro_modulation`): applied after the weighted sum, based on EGX30 trend. **Bullish and Sideways are both 1.0× no-ops** — a neutral market must leave scores alone, otherwise every stock carries a permanent penalty. **Bearish shifts the whole distribution down**: above 50 scores are damped 15% toward neutral, below 50 they are pushed a further 15% away from it. Note this is deliberately asymmetric — it is a shift-down, not a symmetric pull-to-neutral. The delta is surfaced to UI as `macro_adjustment`.
-- `get_weights_from_db(db)` — reads `weight_*` keys; **per-key fallback to DEFAULT_WEIGHTS**, so extending CATEGORY_ORDER from 5 → 8 did not break existing DBs (missing new keys just inherit the Beginner Safe defaults).
+- `get_weights_from_db(db, user_id=None)` — **weights are PER-USER.** Read chain, per key: `user_settings` for this user → global `settings` → `DEFAULT_WEIGHTS`. The middle tier is what let weights become per-user without moving anyone's scores on deploy, and the per-key granularity is why extending CATEGORY_ORDER from 5 → 8 did not break existing DBs. `user_id=None` is the anonymous/global context, used by the public dashboard and by the market-regime reader.
+
+  **Passing `user_id` is how a score becomes the caller's.** `/api/analysis` gets it from `get_optional_user`, `portfolio_analysis` from its existing `user`. Forget it in a new scoring path and that page silently serves default-weighted scores while every other page serves the user's — the same class of divergence as *One Score Per Stock*.
 - `weights_hash(weights)` — short hash for cache key invalidation; extended automatically to the 8 keys.
 
 Signal bands are **half-open with the lower bound inclusive**, applied AFTER macro modulation:
@@ -535,7 +600,7 @@ The Learn page's "How to Take a Decision" section and the in-app signals both fo
 2. **Read the composite BREAKDOWN, not the number.** The category reasons are checkable facts; the blended score is not predictive (see the signal-band note). A low score is **not** a sell signal — historically the lowest-scoring EGX stocks bounced about as often as the highest.
 3. **Check Risk-Adjusted.** Is annualized return comfortably above the ~25% T-bill? If not, be sceptical.
 4. **Check Relative Strength.** Is the stock a leader (outperforming EGX30) or a laggard (underperforming by >10%)?
-5. **Set the stop-loss BEFORE buying.** The house convention is **1.5× ATR below the nearest support** (`STOP_LOSS_ATR_MULTIPLIER` in `core/constants.py`) — anchored to support, not to your entry price, so the number is objective and computable before you buy. `levels.compute_entry_exit`, `entry_price.compute_max_buy_price` and the `atr_stop` signal all use that one constant. Enter the value on the Portfolio add form.
+5. **Set the stop-loss BEFORE buying.** The house convention is **1.5× ATR below the nearest support** (`STOP_LOSS_ATR_MULTIPLIER` in `core/constants.py`) — anchored to support, not to your entry price, so the number is objective and computable before you buy. `levels.compute_entry_exit`, `entry_price.compute_max_buy_price` and the `atr_stop` signal all use that one constant. (The Portfolio add form no longer has a stop-loss field — see the Portfolio section.)
 6. **Size the position at 5–10% max** per stock (2–3% for thin-liquidity / NILEX names).
 
 ## Portfolio Risk Metrics (`egx-api-be/app/routers/portfolio_analysis.py`)
@@ -598,8 +663,15 @@ Components in `src/app/components/`:
 - `RealizedGainsCard` — Summary of banked gains/losses (the "Winnings" card)
 - `ClosedPositionsTable` — Collapsed table of past sales, expandable per row
 
+**Admin (admin role only):**
+- `AdminUsersTable` — desktop table / mobile cards. Actions per user: reset password, disable/enable, delete. Hides the destructive actions on your own row (the backend guards them anyway).
+- `CreateUserModal` — full-screen on mobile, card on desktop. Leaving the password blank is the intended path; the backend generates one.
+- `PasswordRevealDialog` — shows a generated password ONCE with a copy button, and says plainly that it cannot be shown again. Used by both create and reset.
+- Page at `src/app/admin/page.tsx`, gated on `isAdmin` from `useAuth()`.
+
 **UI helpers:**
-- `Navbar`, `BottomTabBar` — mobile bottom nav, desktop top nav
+- `Navbar`, `BottomTabBar` — mobile bottom nav, desktop top nav. Both append a "Users" entry when `isAdmin`; the bottom bar drops its tab min-width from 64px to 56px at 5 tabs so the labels don't truncate on a 360px screen.
+- `AuthProvider` — token + user in localStorage, an `egx.auth.present` cookie for middleware, `useAuth()` → `{user, isAuthenticated, isAdmin, login, logout}`. Re-reads the role from `/api/auth/me` on every load, so a role change lands on next refresh.
 - `LearnTooltip` — dashed-underline hover tooltip used everywhere for inline education
 - `LoadingSkeleton` — Card/Chart/Table skeletons
 - `StockCard`, `Watchlist`, `IndexFilter`, `SectorFilter`, `StatsPanel`
@@ -627,9 +699,21 @@ Tailwind with custom colors (`tailwind.config.ts`):
 
 Fonts: Outfit (sans), JetBrains Mono (mono).
 
-## Database Schema (`api/_db.py`)
+## Database Schema (`app/core/db.py`)
 
 ```sql
+users (id, username UNIQUE, password_hash, created_at, role, is_active)
+                 -- role: 'user' | 'admin'. Stamped from the AUTH_ADMINS env
+                 -- var at boot and NEVER written by an API route.
+                 -- is_active: FALSE blocks login AND invalidates any token
+                 -- already issued, because get_current_user re-reads this row.
+                 -- Both added by ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
+user_settings (user_id, key, value, PRIMARY KEY (user_id, key))
+                 -- Per-user overrides of the `settings` keys that are a
+                 -- PREFERENCE rather than a fact — today only weight_*.
+                 -- A separate table, not a user_id column on `settings`:
+                 -- changing that PK is not idempotent in Postgres, and keeping
+                 -- `settings` as the global tier makes the migration free.
 portfolio (id, symbol, name, buy_price, buy_date, quantity, notes, sector,
            target_price, stop_loss, created_at, updated_at)
 portfolio_sales (id, user_id, holding_id, symbol, name, sector, quantity,
@@ -772,6 +856,8 @@ Synced to Turso via `/api/watchlist` and exposed through `WatchlistProvider` (wr
 - **Composite score is educational only:** always note the disclaimer when surfacing scores to users — it does not predict future price; no fundamentals or news are considered.
 - **Vercel timeout budget:** all three scoring paths now use identical inputs (see *One score per stock* below), so the levers are `BATCH_WORKERS` and the `include_multi_timeframe=False` escape hatch on `build_composite_extras` — **not** shrinking a single path's window, which is what caused the scores to diverge in the first place.
 - **Missing data / short history:** `compute_composite` renormalizes weights across only available categories when a scorer returns None — scores on NILEX tickers with <50 bars will have reduced category coverage.
+- **A literal `%` in SQL MUST be written `%%`.** `_DB.execute` always passes a params tuple, so psycopg parses every query for placeholders and a lone `%` raises `ProgrammingError: only '%s', '%b', '%t' are allowed as placeholders`. This is not hypothetical: `LIKE 'weight_%'` in `get_weights_from_db` raised on **every** call and the `except Exception: return DEFAULT_WEIGHTS` around it swallowed the error, so saved composite weights were never read back — every score in the app was computed at Beginner Safe defaults no matter what the sliders said, from the day the weights modal shipped until 2026-09-01. `tests/test_users_and_roles.py::test_no_sql_has_an_unescaped_percent` walks the AST of every `execute()` call and fails on a bare `%`.
+- **A bare `except` around a DB read hides exactly this.** When a fallback is silent, a query that never once succeeded looks identical to one returning defaults. Prefer letting it raise, or assert the happy path in a test.
 
 ## Not Present / Deliberately Missing
 
@@ -780,6 +866,9 @@ Synced to Turso via `/api/watchlist` and exposed through `WatchlistProvider` (wr
 - External TA libraries (ta-lib, pandas-ta) — everything is from-scratch for learning
 - Per-stock composite score on the dashboard (StockCard accepts the prop but dashboard doesn't batch-fetch scores — out of scope)
 - A single "max buy price" number (removed — see *Removed: Max Buy Price*)
+- **Self-service password change.** Only an admin can set or reset a password; there is no "change my password" screen and no forced change on first login.
+- **Role editing in the UI.** Admin status is `AUTH_ADMINS` only — deliberate, see *Auth, roles and user management*.
+- **Per-user `risk_free_rate` or `currency`.** The T-bill rate is the Sharpe hurdle, the CBE policy rate on the macro card, AND the bar realized trades are graded against — a market fact, not a preference. Per-user values would mean each user grading their own trades against a different bar.
 
 ## Starting Points for Common Questions
 

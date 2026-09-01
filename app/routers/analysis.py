@@ -8,8 +8,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core.auth import CurrentUser, get_optional_user
 from app.core.cache import get, set, make_key
 from app.core.constants import (
     BATCH_DEADLINE_SECONDS,
@@ -158,7 +159,7 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict,
         return symbol, {"error": str(e)}
 
 
-def scoring_cache_context():
+def scoring_cache_context(user_id: str = None):
     """
     The three non-price inputs that make a composite score what it is:
     weights, macro regime, risk-free rate. Returns (weights, macro, tags).
@@ -167,10 +168,16 @@ def scoring_cache_context():
     and `read_cached_scores` (which READS them) derive the key from one place.
     Building the key twice is how a reader silently gets zero hits forever and
     a feature quietly reports "no data" while the data is right there.
+
+    `user_id` selects whose weights apply. It does NOT need to enter the cache
+    key: `composite_cache_key` already folds in `weights_hash(weights)`, so two
+    users with different sliders land on different keys automatically, and two
+    users with the same sliders correctly SHARE one entry. Adding user_id would
+    fragment the cache for no gain.
     """
     try:
         db = get_db()
-        weights = get_weights_from_db(db)
+        weights = get_weights_from_db(db, user_id)
     except Exception:
         db = None
         weights = dict(DEFAULT_WEIGHTS)
@@ -203,8 +210,14 @@ def read_cached_scores(symbols: list, interval: str = "Daily") -> dict:
     400 s against a cold cache, because each symbol pulls 400 bars through a
     client that retries hard on socket timeouts. So the reading consumes what
     the dashboard has already scored and reports its coverage honestly.
+
+    Pinned to the ANONYMOUS weights context (user_id=None). The regime bands
+    were calibrated by scripts/backtest.py at default weights; averaging scores
+    computed under one user's custom sliders would invalidate that calibration.
+    Anonymous dashboard traffic is what warms these entries, so the reader
+    keeps hitting them.
     """
-    _, _, _, _, tags = scoring_cache_context()
+    _, _, _, _, tags = scoring_cache_context(None)
     out = {}
     for sym in symbols:
         cached = get(composite_cache_key(sym, interval, tags))
@@ -213,7 +226,7 @@ def read_cached_scores(symbols: list, interval: str = "Daily") -> dict:
     return out
 
 
-def _handle_batch(symbols_str: str, interval: str):
+def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
     symbols = [s.strip().upper() for s in symbols_str.split(",") if s.strip()]
     if not symbols:
         raise HTTPException(status_code=400, detail="Missing required parameter: symbols")
@@ -227,7 +240,7 @@ def _handle_batch(symbols_str: str, interval: str):
     # bearish flip, or a settings change, serves stale scores for the whole
     # TTL. Derived through the shared helper so `read_cached_scores` cannot
     # spell the same key differently and silently find nothing.
-    db, weights, macro, risk_free_rate_pct, tags = scoring_cache_context()
+    db, weights, macro, risk_free_rate_pct, tags = scoring_cache_context(user_id)
 
     # EGX30 fetched ONCE for the whole batch (not per symbol) and under the
     # same cache key /api/analysis uses, so relative strength is measured
@@ -318,11 +331,17 @@ def get_analysis(
     bars: int = Query(200),
     mode: Optional[str] = Query(None),
     symbols: Optional[str] = Query(None),
+    # Optional, not required: the dashboard is a public page (middleware.ts
+    # guards only /portfolio), so demanding a token here would break anonymous
+    # browsing. Anonymous callers score under the global/default weights.
+    user: Optional[CurrentUser] = Depends(get_optional_user),
 ):
     try:
+        user_id = user.id if user else None
+
         # Batch mode
         if mode == "batch":
-            return _handle_batch(symbols or "", interval.capitalize())
+            return _handle_batch(symbols or "", interval.capitalize(), user_id)
 
         if not symbol:
             raise HTTPException(status_code=400, detail="Missing required parameter: symbol")
@@ -333,7 +352,7 @@ def get_analysis(
         bars = min(max(bars, USER_BARS_MIN), USER_BARS_MAX)
 
         db = get_db()
-        weights = get_weights_from_db(db)
+        weights = get_weights_from_db(db, user_id)
         w_hash = weights_hash(weights)
 
         # Macro regime and the T-bill rate are both SCORING INPUTS (macro

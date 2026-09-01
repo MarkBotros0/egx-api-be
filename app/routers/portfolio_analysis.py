@@ -57,7 +57,7 @@ from app.core.indicators import (
 router = APIRouter()
 
 
-def _analyze(holdings):
+def _analyze(holdings, user_id: str = None):
     if not holdings:
         raise HTTPException(status_code=400, detail="No holdings provided")
 
@@ -109,7 +109,7 @@ def _analyze(holdings):
     risk_free_rate_pct = risk_free_annual * 100
 
     try:
-        weights = get_weights_from_db(get_db())
+        weights = get_weights_from_db(get_db(), user_id)
     except Exception:
         weights = dict(DEFAULT_WEIGHTS)
 
@@ -1075,7 +1075,7 @@ def get_portfolio_analysis(user: CurrentUser = Depends(get_current_user)):
     try:
         db = get_db()
         holdings = fetch_open_holdings(db, user.id)
-        return _analyze(holdings)
+        return _analyze(holdings, user.id)
     except HTTPException:
         raise
     except Exception as e:
@@ -1089,7 +1089,7 @@ def post_portfolio_analysis(
 ):
     try:
         holdings = body.get("portfolio", [])
-        return _analyze(holdings)
+        return _analyze(holdings, user.id)
     except HTTPException:
         raise
     except Exception as e:
