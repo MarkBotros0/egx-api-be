@@ -1,13 +1,18 @@
 """
-Sales ledger — record what was sold and report realized gains.
+The realized ledger — what was closed, what was paid out, and what that came to.
 
 POST   /api/sales          — record a full or partial sell
-GET    /api/sales          — every sale plus the realized-gains summary
+GET    /api/sales          — closed trades AND dividends, plus the combined summary
 DELETE /api/sales?id=xxx   — undo a sale, restoring the shares
 
+The GET serves BOTH ledgers on purpose. The Winnings headline is capital gains
+plus dividends, and computing that sum here keeps it in tested Python — done in
+the browser it would be the one number on the page with no test behind it.
+Writes are split: sales here, dividends in routers/dividends.py.
+
 Deliberately separate from /api/portfolio_analysis, which is the heaviest
-endpoint in the app and flirts with the 30 s Vercel timeout. Realized gains
-need NO price fetch, so the Winnings card paints even on a run where the
+endpoint in the app and flirts with the 30 s Vercel timeout. Neither ledger
+needs a price fetch, so the Winnings card paints even on a run where the
 analysis times out.
 
 Every route is scoped by the caller's user_id from the JWT.
@@ -22,7 +27,7 @@ from app.core.auth import CurrentUser, get_current_user
 from app.core.constants import DEFAULT_RISK_FREE_RATE_PCT
 from app.core.db import get_db
 from app.core.holdings import HOLDING_COLUMNS, row_to_holding
-from app.core.dividends import summarize_realized
+from app.core.dividends import fetch_dividends, summarize_realized
 from app.core.sales import (
     SaleValidationError,
     compute_sale_metrics,
@@ -151,6 +156,7 @@ def get_sales(user: CurrentUser = Depends(get_current_user)):
 
         rfr = _risk_free_rate_pct(db)
         priced = [compute_sale_metrics(_row_to_sale(r), rfr) for r in rows]
+        dividends = fetch_dividends(db, user.id)
 
         currency_row = db.execute(
             "SELECT value FROM settings WHERE key = 'currency'"
@@ -158,7 +164,8 @@ def get_sales(user: CurrentUser = Depends(get_current_user)):
 
         return {
             "sales": priced,
-            "summary": summarize_realized(priced, []),
+            "dividends": dividends,
+            "summary": summarize_realized(priced, dividends),
             "currency": currency_row[0] if currency_row else "EGP",
             "risk_free_rate_pct": rfr,
         }
