@@ -97,9 +97,12 @@ def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
                 (clean["quantity"], now, holding_id, user.id, clean["quantity"]),
             ).fetchone()
             if updated is None:
+                # `validate_sale` already checked the quantity against the row
+                # read above, so reaching here means a concurrent sell moved
+                # the count underneath us. Quoting `holding['quantity']` would
+                # print "You hold 100 shares — you cannot sell 100."
                 raise SaleValidationError(
-                    f"You hold {holding['quantity']} shares — "
-                    f"you cannot sell {clean['quantity']}."
+                    "Not enough shares remaining — refresh and try again."
                 )
 
             tx.execute(

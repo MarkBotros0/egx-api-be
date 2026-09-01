@@ -144,7 +144,14 @@ def _analyze(holdings):
             # depend on how long the user had owned the stock.
             df = get_OHLCV_data(symbol, "EGX", "Daily", INTERNAL_BARS_MIN)
             if df is None or df.empty:
-                stock_analyses.append({"symbol": symbol, "error": "Could not fetch market data"})
+                # `id` travels with the error row on purpose: the spec promises
+                # a sale can be recorded even when the price feed is down, and
+                # the Sell button on the error row needs the holding id.
+                stock_analyses.append({
+                    "id": h.get("id"),
+                    "symbol": symbol,
+                    "error": "Could not fetch market data",
+                })
                 excluded_holdings.append({
                     "symbol": symbol,
                     "invested": round(invested, 2),
@@ -777,7 +784,12 @@ def _analyze(holdings):
                         "learn_concept": "dividend_yield"})
 
         except Exception as e:
-            stock_analyses.append({"symbol": symbol, "error": f"Analysis failed: {str(e)}"})
+            # See above — the id keeps the Sell action reachable on error rows.
+            stock_analyses.append({
+                "id": h.get("id"),
+                "symbol": symbol,
+                "error": f"Analysis failed: {str(e)}",
+            })
             if not counted_in_totals:
                 excluded_holdings.append({
                     "symbol": symbol,
