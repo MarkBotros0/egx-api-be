@@ -142,3 +142,209 @@ def test_open_holdings_filter_is_spelled_once():
         assert "fetch_open_holdings" in src, (
             f"{name} must read holdings through core.holdings.fetch_open_holdings"
         )
+
+
+from app.core.sales import (
+    SaleValidationError,
+    compute_sale_metrics,
+    summarize_sales,
+    validate_sale,
+)
+
+TODAY = date(2026, 9, 1)
+
+
+def _holding(quantity=100, buy_price=50.0, buy_date="2026-01-01"):
+    return {
+        "id": "h1", "symbol": "COMI", "name": "Commercial International Bank",
+        "sector": "Banks", "quantity": quantity, "buy_price": buy_price,
+        "buy_date": buy_date,
+    }
+
+
+def _sale(quantity=100, buy_price=50.0, sell_price=60.0,
+          buy_date="2026-01-01", sell_date="2026-09-01", symbol="COMI"):
+    return {
+        "id": "s1", "holding_id": "h1", "symbol": symbol,
+        "name": "Commercial International Bank", "sector": "Banks",
+        "quantity": quantity, "buy_price": buy_price, "buy_date": buy_date,
+        "sell_price": sell_price, "sell_date": sell_date, "notes": "",
+        "created_at": "2026-09-01T00:00:00Z",
+    }
+
+
+# ---- validation ----
+
+def test_partial_sell_is_accepted():
+    out = validate_sale(holding=_holding(quantity=100), quantity=40,
+                        sell_price=60.0, sell_date="2026-09-01", today=TODAY)
+    assert out == {"quantity": 40, "sell_price": 60.0, "sell_date": "2026-09-01"}
+
+
+def test_selling_the_whole_position_is_accepted():
+    out = validate_sale(holding=_holding(quantity=100), quantity=100,
+                        sell_price=60.0, sell_date="2026-09-01", today=TODAY)
+    assert out["quantity"] == 100
+
+
+def test_over_selling_is_rejected_and_names_the_remaining_quantity():
+    with pytest.raises(SaleValidationError) as exc:
+        validate_sale(holding=_holding(quantity=100), quantity=101,
+                      sell_price=60.0, sell_date="2026-09-01", today=TODAY)
+    assert "100" in str(exc.value)
+
+
+@pytest.mark.parametrize("bad_quantity", [0, -5, "abc", None, 1.5])
+def test_non_positive_or_non_integer_quantity_is_rejected(bad_quantity):
+    with pytest.raises(SaleValidationError):
+        validate_sale(holding=_holding(), quantity=bad_quantity,
+                      sell_price=60.0, sell_date="2026-09-01", today=TODAY)
+
+
+@pytest.mark.parametrize("bad_price", [0, -1.0, "abc", None])
+def test_non_positive_sell_price_is_rejected(bad_price):
+    with pytest.raises(SaleValidationError):
+        validate_sale(holding=_holding(), quantity=10,
+                      sell_price=bad_price, sell_date="2026-09-01", today=TODAY)
+
+
+def test_sell_date_before_buy_date_is_rejected():
+    with pytest.raises(SaleValidationError):
+        validate_sale(holding=_holding(buy_date="2026-06-01"), quantity=10,
+                      sell_price=60.0, sell_date="2026-05-31", today=TODAY)
+
+
+def test_future_sell_date_is_rejected():
+    with pytest.raises(SaleValidationError):
+        validate_sale(holding=_holding(), quantity=10, sell_price=60.0,
+                      sell_date="2026-09-02", today=TODAY)
+
+
+def test_sell_date_defaults_to_today():
+    out = validate_sale(holding=_holding(), quantity=10, sell_price=60.0,
+                        sell_date=None, today=TODAY)
+    assert out["sell_date"] == "2026-09-01"
+
+
+def test_unparseable_sell_date_is_rejected():
+    with pytest.raises(SaleValidationError):
+        validate_sale(holding=_holding(), quantity=10, sell_price=60.0,
+                      sell_date="tomorrow", today=TODAY)
+
+
+# ---- per-sale metrics ----
+
+def test_realized_pnl_and_pct():
+    m = compute_sale_metrics(_sale(quantity=100, buy_price=50.0, sell_price=60.0),
+                             risk_free_rate_pct=25.0)
+    assert m["cost"] == 5000.0
+    assert m["proceeds"] == 6000.0
+    assert m["realized_pnl"] == 1000.0
+    assert m["realized_pnl_pct"] == pytest.approx(20.0)
+
+
+def test_a_loss_is_negative_not_absolute():
+    m = compute_sale_metrics(_sale(buy_price=60.0, sell_price=50.0),
+                             risk_free_rate_pct=25.0)
+    assert m["realized_pnl"] == -1000.0
+    assert m["realized_pnl_pct"] == pytest.approx(-16.67, abs=0.01)
+
+
+def test_a_two_year_eight_percent_win_did_not_beat_the_t_bill():
+    # The reason the T-bill line exists at all.
+    m = compute_sale_metrics(
+        _sale(buy_price=100.0, sell_price=108.0,
+              buy_date="2024-09-01", sell_date="2026-09-01"),
+        risk_free_rate_pct=25.0,
+    )
+    assert m["realized_pnl"] > 0
+    assert m["beat_t_bill"] is False
+
+
+def test_a_quick_flip_reports_no_annualized_figure():
+    m = compute_sale_metrics(
+        _sale(buy_date="2026-08-20", sell_date="2026-09-01"),
+        risk_free_rate_pct=25.0,
+    )
+    assert m["days_held"] == 12
+    assert m["annualized_return_pct"] is None
+    assert m["beat_t_bill"] is None
+
+
+def test_zero_buy_price_reports_null_pct_but_exact_egp():
+    m = compute_sale_metrics(_sale(buy_price=0.0, sell_price=60.0),
+                             risk_free_rate_pct=25.0)
+    assert m["realized_pnl_pct"] is None
+    assert m["realized_pnl"] == 6000.0
+
+
+def test_metrics_preserve_the_original_sale_fields():
+    m = compute_sale_metrics(_sale(), risk_free_rate_pct=25.0)
+    assert m["id"] == "s1" and m["symbol"] == "COMI"
+
+
+# ---- summary ----
+
+def test_empty_summary_is_zeroed_not_null():
+    s = summarize_sales([])
+    assert s["total_realized_pnl"] == 0
+    assert s["total_realized_pnl_pct"] is None
+    assert s["win_count"] == 0 and s["loss_count"] == 0
+    assert s["by_symbol"] == []
+    assert s["best_trade"] is None and s["worst_trade"] is None
+
+
+def test_total_pct_is_cost_weighted_not_a_mean_of_percentages():
+    # 10000 cost -> +1000 (+10%), 1000 cost -> +500 (+50%).
+    # Mean of percentages says +30%. Cost-weighted truth is +13.64%.
+    priced = [
+        compute_sale_metrics(_sale(quantity=100, buy_price=100.0, sell_price=110.0), 25.0),
+        compute_sale_metrics(_sale(quantity=10, buy_price=100.0, sell_price=150.0,
+                                   symbol="SWDY"), 25.0),
+    ]
+    s = summarize_sales(priced)
+    assert s["total_realized_pnl"] == 1500.0
+    assert s["total_realized_pnl_pct"] == pytest.approx(13.64, abs=0.01)
+
+
+def test_wins_and_losses_are_counted_and_extremes_identified():
+    priced = [
+        compute_sale_metrics(_sale(quantity=10, buy_price=50.0, sell_price=60.0), 25.0),
+        compute_sale_metrics(_sale(quantity=10, buy_price=50.0, sell_price=40.0,
+                                   symbol="SWDY"), 25.0),
+    ]
+    s = summarize_sales(priced)
+    assert s["win_count"] == 1 and s["loss_count"] == 1
+    assert s["best_trade"]["symbol"] == "COMI"
+    assert s["worst_trade"]["symbol"] == "SWDY"
+
+
+def test_by_symbol_aggregates_multiple_sales_and_sorts_by_pnl():
+    priced = [
+        compute_sale_metrics(_sale(quantity=10, buy_price=50.0, sell_price=60.0), 25.0),
+        compute_sale_metrics(_sale(quantity=10, buy_price=50.0, sell_price=70.0), 25.0),
+        compute_sale_metrics(_sale(quantity=10, buy_price=50.0, sell_price=55.0,
+                                   symbol="SWDY"), 25.0),
+    ]
+    s = summarize_sales(priced)
+    assert [b["symbol"] for b in s["by_symbol"]] == ["COMI", "SWDY"]
+    comi = s["by_symbol"][0]
+    assert comi["sales_count"] == 2 and comi["quantity"] == 20
+    assert comi["realized_pnl"] == 300.0
+    assert comi["realized_pnl_pct"] == pytest.approx(30.0)
+
+
+def test_t_bill_counts_ignore_trades_too_short_to_annualize():
+    priced = [
+        # Two years, +8% — annualizable, loses to the T-bill.
+        compute_sale_metrics(_sale(buy_price=100.0, sell_price=108.0,
+                                   buy_date="2024-09-01", sell_date="2026-09-01"), 25.0),
+        # One year, +40% — annualizable, beats it.
+        compute_sale_metrics(_sale(buy_price=100.0, sell_price=140.0,
+                                   buy_date="2025-09-01", sell_date="2026-09-01"), 25.0),
+        # Twelve days — not annualizable, must not count either way.
+        compute_sale_metrics(_sale(buy_date="2026-08-20", sell_date="2026-09-01"), 25.0),
+    ]
+    s = summarize_sales(priced)
+    assert s["annualizable_count"] == 2
+    assert s["beat_t_bill_count"] == 1
