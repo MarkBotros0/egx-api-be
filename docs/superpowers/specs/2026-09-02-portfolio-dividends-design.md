@@ -312,8 +312,9 @@ export interface Dividend {
 `SalesSummary` gains `total_dividends`, `dividend_count`, `total_winnings`.
 `SymbolRealized` gains `dividends`, `total_winnings`.
 `SalesResponse` gains `dividends: Dividend[]`.
-`StockAnalysis` gains `dividends_collected: number` and
-`dividends_symbol_shared: boolean`.
+`HoldingAnalysis` — the per-holding interface, **not** `StockAnalysis` — gains
+`dividends_collected: number` and `dividends_symbol_shared: boolean`, both
+optional so a stale cached analysis response still type-checks.
 
 Every nullable field is typed `| null`, matching the existing sales types.
 
@@ -369,9 +370,22 @@ amount, per-share (when known), notes.
 
 ### `HoldingsTable`
 
-A dividends-collected figure per holding, in the expanded detail on mobile and
-as a column on desktop. Suppressed entirely when `dividends_collected` is 0, so
-the table does not grow a column of zeros for a user who records none.
+A dividends-collected figure per holding, shown two ways and **without adding a
+table column**:
+
+1. A small pill beside the symbol — mobile card header and desktop Symbol cell —
+   rendered only when `dividends_collected > 0`.
+2. A full labelled line in the expanded detail, both breakpoints.
+
+**No new `<th>`.** The desktop table already coordinates `colSpan={12}` on the
+expanded row against `colSpan={10}` on the error row; a thirteenth column means
+editing both in lockstep, and CLAUDE.md already records a colSpan mismatch in
+this exact file as a shipped bug. A pill carries the same information at no
+structural risk. Dividends are a per-holding fact worth seeing, not a column
+worth scanning and sorting.
+
+Suppressed entirely when `dividends_collected` is 0, so a user who records none
+sees today's table unchanged.
 
 **Shared-symbol labelling.** When `dividends_symbol_shared` is true, the figure
 is labelled as the symbol's total (e.g. `COMI total`) rather than presented as
@@ -383,6 +397,18 @@ not per purchase lot.
 Dividends arrive with the existing `loadSales` call, so no new independent
 loader and no new failure mode. New state for the add-dividend modal only.
 `DividendsTable` renders beside `ClosedPositionsTable`.
+
+**Three existing render gates key off `sales.sales.length` and must widen**, or
+a user whose only record is a dividend sees nothing:
+
+| Location | Today | Must become |
+|---|---|---|
+| Never-traded empty state | `!sales?.sales.length` | also requires no dividends |
+| `RealizedGainsCard` (full page) | `sales.sales.length > 0` | `\|\| sales.dividends.length > 0` |
+| Sold-out branch | renders when `sales` | unchanged, but must render `DividendsTable` too |
+
+The sold-out branch matters: a user who sold everything but still collects on a
+past position must keep both histories on screen.
 
 ### Learn page
 
