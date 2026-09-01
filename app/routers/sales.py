@@ -170,18 +170,14 @@ def delete_sale(id: str = Query(...), user: CurrentUser = Depends(get_current_us
         db = get_db()
         with db.transaction() as tx:
             row = tx.execute(
-                "SELECT holding_id, quantity FROM portfolio_sales "
-                "WHERE id = %s AND user_id = %s",
+                "DELETE FROM portfolio_sales WHERE id = %s AND user_id = %s "
+                "RETURNING holding_id, quantity",
                 (id, user.id),
             ).fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail=f"Sale not found: {id}")
             holding_id, quantity = row[0], int(row[1])
 
-            tx.execute(
-                "DELETE FROM portfolio_sales WHERE id = %s AND user_id = %s",
-                (id, user.id),
-            )
             # If the user hard-deleted the holding, there is nothing to restore
             # the shares to — the sale still goes, and restored stays None.
             restored = tx.execute(
