@@ -6,19 +6,25 @@ POST — Accept holdings in request body (body: {portfolio: [...]})
 """
 
 import zlib
-from datetime import date, datetime
-from typing import Optional, List
+from datetime import date
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
+from app.core.holdings import fetch_open_holdings
 from app.core.macro_fetch import fetch_macro
 from app.core.composite import compute_composite, get_weights_from_db, DEFAULT_WEIGHTS
 from app.core.levels import compute_key_levels, compute_entry_exit
 from app.core.extras_builder import build_composite_extras
 from app.core.index_membership import get_index_membership
 from app.core.pe_fetch import get_pe_for_symbol
+from app.core.returns import (  # noqa: F401  (MIN_DAYS_FOR_ANNUALIZATION re-exported)
+    MIN_DAYS_FOR_ANNUALIZATION,
+    annualized_return as _annualized_return,
+    days_between as _days_between,
+)
 from app.core.constants import (
     BIG_LOSS_PCT,
     CORRELATION_HIGH_THRESHOLD,
@@ -49,39 +55,6 @@ from app.core.indicators import (
 )
 
 router = APIRouter()
-
-
-def _days_between(date_str: str, today: date) -> int:
-    try:
-        d = datetime.strptime(date_str[:10], "%Y-%m-%d").date()
-        return (today - d).days
-    except Exception:
-        return 0
-
-
-# Below this many days held, annualizing a position's return produces
-# nonsense (a +5% week annualizes to five figures). The signal layer and the
-# UI both suppress the number instead of showing it.
-MIN_DAYS_FOR_ANNUALIZATION = 30
-
-
-def _annualized_return(total_return_pct: float, days_held: int) -> Optional[float]:
-    """
-    Annualize a POSITION's return over calendar days held.
-
-    Note this is a different quantity from indicators.annualized_return(),
-    which annualizes the STOCK's market return over trading bars. The two
-    answer different questions ("how did my purchase do" vs "how did the
-    stock do") and must not be compared to each other.
-
-    Returns None when the holding is too young to annualize meaningfully.
-    """
-    if days_held < MIN_DAYS_FOR_ANNUALIZATION:
-        return None
-    base = 1 + total_return_pct / 100
-    if base <= 0:
-        return -100.0
-    return (base ** (365 / days_held) - 1) * 100
 
 
 def _analyze(holdings):
@@ -171,7 +144,14 @@ def _analyze(holdings):
             # depend on how long the user had owned the stock.
             df = get_OHLCV_data(symbol, "EGX", "Daily", INTERNAL_BARS_MIN)
             if df is None or df.empty:
-                stock_analyses.append({"symbol": symbol, "error": "Could not fetch market data"})
+                # `id` travels with the error row on purpose: the spec promises
+                # a sale can be recorded even when the price feed is down, and
+                # the Sell button on the error row needs the holding id.
+                stock_analyses.append({
+                    "id": h.get("id"),
+                    "symbol": symbol,
+                    "error": "Could not fetch market data",
+                })
                 excluded_holdings.append({
                     "symbol": symbol,
                     "invested": round(invested, 2),
@@ -804,7 +784,12 @@ def _analyze(holdings):
                         "learn_concept": "dividend_yield"})
 
         except Exception as e:
-            stock_analyses.append({"symbol": symbol, "error": f"Analysis failed: {str(e)}"})
+            # See above — the id keeps the Sell action reachable on error rows.
+            stock_analyses.append({
+                "id": h.get("id"),
+                "symbol": symbol,
+                "error": f"Analysis failed: {str(e)}",
+            })
             if not counted_in_totals:
                 excluded_holdings.append({
                     "symbol": symbol,
@@ -1089,20 +1074,7 @@ def _analyze(holdings):
 def get_portfolio_analysis(user: CurrentUser = Depends(get_current_user)):
     try:
         db = get_db()
-        rows = db.execute(
-            "SELECT id, symbol, name, buy_price, buy_date, quantity, notes, sector, "
-            "target_price, stop_loss, created_at, updated_at FROM portfolio "
-            "WHERE user_id = %s",
-            (user.id,),
-        ).fetchall()
-        holdings = [
-            {
-                "id": r[0], "symbol": r[1], "name": r[2], "buy_price": r[3],
-                "buy_date": r[4], "quantity": r[5], "notes": r[6], "sector": r[7],
-                "target_price": r[8], "stop_loss": r[9],
-            }
-            for r in rows
-        ]
+        holdings = fetch_open_holdings(db, user.id)
         return _analyze(holdings)
     except HTTPException:
         raise

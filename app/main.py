@@ -25,6 +25,7 @@ from app.routers import (
     intraday,
     analysis,
     portfolio_analysis,
+    sales,
     pe,
     market_regime,
 )
@@ -66,6 +67,7 @@ for router_module in (
     intraday,
     analysis,
     portfolio_analysis,
+    sales,
     pe,
     market_regime,
 ):

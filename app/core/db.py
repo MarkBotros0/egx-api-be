@@ -8,6 +8,7 @@ off Turso. Connections run with autocommit=True, so `commit()` is a no-op.
 """
 
 import os
+from contextlib import contextmanager
 from psycopg_pool import ConnectionPool
 
 from app.core.constants import DEFAULT_RISK_FREE_RATE_PCT
@@ -29,6 +30,20 @@ class _Result:
         return self._rows
 
 
+class _Tx:
+    """Statement executor bound to one connection inside a transaction."""
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql: str, params=()):
+        cur = self._conn.execute(sql, params)
+        rows = cur.fetchall() if cur.description else []
+        return _Result(rows)
+
+
 class _DB:
     def __init__(self, pool: ConnectionPool):
         self._pool = pool
@@ -42,6 +57,20 @@ class _DB:
     def commit(self):
         # autocommit is enabled on pool connections; retained for API parity
         pass
+
+    @contextmanager
+    def transaction(self):
+        """
+        Run several statements on ONE connection inside a real transaction.
+
+        execute() takes a fresh pooled connection per call and the pool runs
+        with autocommit, so two related writes issued through it can half-land
+        — recording a sale without decrementing the holding would invent
+        shares. Anything that must be all-or-nothing goes through here.
+        """
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                yield _Tx(conn)
 
 
 def _get_pool() -> ConnectionPool:
@@ -88,6 +117,32 @@ def init_db(db: _DB) -> None:
         )
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_user ON portfolio(user_id)")
+
+    # Append-only ledger of sales. Cost basis is SNAPSHOTTED (buy_price,
+    # buy_date, name, sector) rather than joined from portfolio: a sale is a
+    # historical fact and must not change when the user later edits or deletes
+    # the holding it came from. Same principle as fundamentals_history.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_sales (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            holding_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            name TEXT NOT NULL,
+            sector TEXT DEFAULT '',
+            quantity INTEGER NOT NULL,
+            buy_price DOUBLE PRECISION NOT NULL,
+            buy_date TEXT NOT NULL,
+            sell_price DOUBLE PRECISION NOT NULL,
+            sell_date TEXT NOT NULL,
+            notes TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_portfolio_sales_user "
+        "ON portfolio_sales(user_id)"
+    )
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS settings (
