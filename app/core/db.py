@@ -118,6 +118,32 @@ def init_db(db: _DB) -> None:
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_user ON portfolio(user_id)")
 
+    # Append-only ledger of sales. Cost basis is SNAPSHOTTED (buy_price,
+    # buy_date, name, sector) rather than joined from portfolio: a sale is a
+    # historical fact and must not change when the user later edits or deletes
+    # the holding it came from. Same principle as fundamentals_history.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_sales (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            holding_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            name TEXT NOT NULL,
+            sector TEXT DEFAULT '',
+            quantity INTEGER NOT NULL,
+            buy_price DOUBLE PRECISION NOT NULL,
+            buy_date TEXT NOT NULL,
+            sell_price DOUBLE PRECISION NOT NULL,
+            sell_date TEXT NOT NULL,
+            notes TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_portfolio_sales_user "
+        "ON portfolio_sales(user_id)"
+    )
+
     db.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
