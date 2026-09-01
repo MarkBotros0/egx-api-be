@@ -52,10 +52,12 @@ egx-api-be/                     # Python FastAPI backend
       holdings.py               # The one spelling of the open-holdings query
       returns.py                # Position-level return maths, shared open/closed
       sales.py                  # Realized-gains maths (pure)
+      dividends.py              # Dividend ledger maths + the one spelling of its queries
     routers/
       analysis.py               # GET /api/analysis (single stock + batch mode)
       portfolio.py              # CRUD /api/portfolio
       sales.py                  # GET/POST/DELETE /api/sales (realized gains)
+      dividends.py              # POST/DELETE /api/dividends
       portfolio_analysis.py     # GET/POST /api/portfolio_analysis
       pe.py                     # GET /api/pe ; POST /api/pe/refresh (cron-triggered)
       market_regime.py          # GET /api/market_regime (market-wide condition reading)
@@ -124,6 +126,7 @@ public/                         # Static assets, PWA manifest
   are carried through the edit payload unchanged so an edit cannot wipe them;
   nothing in the UI can set a new one today.
 - **Sell** action per holding (full or partial) → `RealizedGainsCard` + collapsed `ClosedPositionsTable`.
+- **Dividend** action per holding → records cash received (`AddDividendForm`), rolls into `RealizedGainsCard`'s combined headline, and lists in the collapsed `DividendsTable`.
 - Mobile: FAB (floating action button) to add; full-screen modal form
 - Desktop: inline form, top-right "+ Add Stock" button
 - Sections stacked: MacroCard → PortfolioSummary → RiskDashboard → HoldingsTable → CorrelationHeatmap → MonteCarloChart → AdvicePanel
@@ -213,6 +216,48 @@ portfolio-level annualized return: annualized figures over trades of different
 lengths cannot honestly be averaged. `total_realized_pnl_pct` is cost-weighted.
 Trades held under 30 days report no annualized figure at all
 (`MIN_DAYS_FOR_ANNUALIZATION` in `core/returns.py`).
+
+`GET /api/sales` now also returns `dividends`, and `summary` is built by
+`summarize_realized` (which replaced `summarize_sales`) — it owns both
+ledgers so the combined headline is computed once, in tested Python, rather
+than re-derived in the browser. `total_realized_pnl_pct`, `beat_t_bill_count`
+/ `annualizable_count` and `best_trade` / `worst_trade` all stay
+**capital-gains-only**: a dividend has no cost basis and no holding period to
+annualize against, so folding it into those figures would either invent a
+basis or silently change what "return" means mid-metric.
+
+### POST /api/dividends, DELETE
+
+Records cash a company paid the user for holding it — "profit share".
+
+**A dividend is not a sale.** It reduces no position and closes no cost basis,
+so it lives in `portfolio_dividends` and is anchored to the **symbol**, with no
+`holding_id`. A sale carries one because undo must restore shares to a specific
+position; a dividend restores nothing, so the column would buy no behaviour —
+and would cost correctness, since deleting a holding would then destroy the
+record of money genuinely received. Symbol-anchoring means dividend history
+survives selling out entirely.
+
+A single INSERT, so unlike `POST /api/sales` there is nothing for
+`db.transaction()` to keep atomic.
+
+`amount` is **the total EGP that actually landed**, already net of Egypt's
+5–10% dividend withholding tax. The app computes no tax and must never present
+this as gross. `shares` is optional and used only to display a per-share figure.
+
+**Duplicate guard:** an exact `symbol + pay_date + amount` repeat returns **409**.
+The primary surface is a phone, and a double-tapped submit is the likeliest way
+this ledger goes wrong — a duplicate sale at least leaves a wrong share count,
+a duplicate dividend leaves no trace at all.
+
+**Reads are on `GET /api/sales`**, which serves both ledgers so the combined
+headline is computed in tested Python rather than in the browser.
+
+**Accepted display consequence:** nothing stops two `portfolio` rows sharing a
+symbol. When that happens the per-holding figure is that SYMBOL's total, labelled
+"(all lots)". Splitting it by today's share count would be fiction — the counts
+differed when the dividend was paid. No aggregate is affected: every total sums
+the ledger directly and never reaches it through holdings.
 
 ### GET /api/portfolio_analysis
 **The heaviest endpoint.** Per-holding analysis + portfolio-level risk metrics + Monte Carlo + macro + signals.
@@ -338,11 +383,11 @@ enable/disable · `DELETE /{id}`.
   returned **exactly once**, in the response to the call that created it. Only
   the bcrypt hash is stored, so it can never be read back — `PasswordRevealDialog`
   says so on screen.
-- **`DELETE` removes `portfolio_sales`, `portfolio`, `watchlist` and
-  `user_settings` first, then the user, all in one `db.transaction()`.** No
-  table has an FK to `users`, so nothing cascades and the rows would otherwise
-  survive as invisible orphans. Sales go before holdings, matching the
-  direction the sale-undo path depends on.
+- **`DELETE` removes `portfolio_sales`, `portfolio_dividends`, `portfolio`,
+  `watchlist` and `user_settings` first, then the user, all in one
+  `db.transaction()`.** No table has an FK to `users`, so nothing cascades and
+  the rows would otherwise survive as invisible orphans. Sales and dividends go
+  before holdings, matching the direction the sale-undo path depends on.
 - Guards: you cannot disable or delete **yourself**, or the **last active
   admin** — either would leave the app with nobody able to administer it.
 
@@ -716,13 +761,15 @@ Components in `src/app/components/`:
 **Portfolio views:**
 - `PortfolioSummary` — Totals + avg composite score tile + sector allocation pie/stacked bar
 - `RiskDashboard` — Sharpe/Sortino/MaxDD/VaR/Current DD grid
-- `HoldingsTable` — Full table desktop (Score column with gauge + signal), cards mobile (gauge in card header + expanded detail). Error rows use `colSpan={10}` plus a dedicated Actions cell, so a holding whose price feed is down can still be sold. `onSell` opens `SellHoldingForm` per holding.
+- `HoldingsTable` — Full table desktop (Score column with gauge + signal), cards mobile (gauge in card header + expanded detail). Error rows use `colSpan={10}` plus a dedicated Actions cell, coordinated against the expanded detail row's `colSpan={12}` — both must total the table's 12 columns, and a mismatch between the two is a bug this project has already shipped once. Dividends render as a per-symbol `DividendPill` next to the symbol, not as a new column, precisely to avoid touching either colSpan. `onSell` opens `SellHoldingForm`, `onAddDividend` opens `AddDividendForm`, per holding.
 - `MacroCard` — EGX30/USD-EGP/CBE rate indicator row
 - `AdvicePanel` — Signals rendered with severity styles + learn links
 - `AddHoldingForm` — Full-screen modal on mobile, inline on desktop
 - `SellHoldingForm` — Records a full or partial sell against a holding
-- `RealizedGainsCard` — Summary of banked gains/losses (the "Winnings" card)
+- `AddDividendForm` — Records a dividend payment (symbol, amount received, pay date, optional shares/notes) against a holding
+- `RealizedGainsCard` — Summary of banked gains/losses (the "Winnings" card). Headline is now **gains + dividends**: `total_dividends` and `dividend_count` from `summarize_realized` render alongside the capital-gains figure, clearly separated, never blended into one number.
 - `ClosedPositionsTable` — Collapsed table of past sales, expandable per row
+- `DividendsTable` — Collapsed table of past dividend payments, expandable per row, mirroring `ClosedPositionsTable`'s pattern
 
 **Admin (admin role only):**
 - `AdminUsersTable` — desktop table / mobile cards. Actions per user: reset password, disable/enable, delete. Hides the destructive actions on your own row (the backend guards them anyway).
@@ -785,6 +832,18 @@ portfolio_sales (id, user_id, holding_id, symbol, name, sector, quantity,
                  -- portfolio.quantity = 0 means fully sold; the row is kept
                  -- as the undo anchor and filtered out of every read by
                  -- core/holdings.fetch_open_holdings.
+portfolio_dividends (id, user_id, symbol, name, sector, amount, pay_date,
+                     shares, notes, created_at)
+                 -- Cash the company paid for holding it. Anchored to the
+                 -- SYMBOL, deliberately with NO holding_id: a dividend
+                 -- restores nothing on undo, so the column would buy no
+                 -- behaviour and would cost correctness — deleting a holding
+                 -- would destroy the record of money genuinely received.
+                 -- amount   -> total EGP that ACTUALLY LANDED, already net of
+                 --             the 5-10% withholding tax. Never gross.
+                 -- shares   -> optional, display only. amount is never
+                 --             derived from it.
+                 -- An exact symbol+pay_date+amount repeat is rejected 409.
 settings  (key, value)   -- pre-seeded: currency, risk_free_rate,
                          --             weight_trend, weight_momentum, weight_volume,
                          --             weight_volatility, weight_divergence,
