@@ -49,9 +49,13 @@ egx-api-be/                     # Python FastAPI backend
       regime.py                 # Market-condition reading: bands + the evidence behind them
       constants.py              # Shared constants (thresholds, lookbacks)
       json_encoding.py          # Float/NaN JSON safety helpers
+      holdings.py               # The one spelling of the open-holdings query
+      returns.py                # Position-level return maths, shared open/closed
+      sales.py                  # Realized-gains maths (pure)
     routers/
       analysis.py               # GET /api/analysis (single stock + batch mode)
       portfolio.py              # CRUD /api/portfolio
+      sales.py                  # GET/POST/DELETE /api/sales (realized gains)
       portfolio_analysis.py     # GET/POST /api/portfolio_analysis
       pe.py                     # GET /api/pe ; POST /api/pe/refresh (cron-triggered)
       market_regime.py          # GET /api/market_regime (market-wide condition reading)
@@ -113,7 +117,7 @@ public/                         # Static assets, PWA manifest
 - Add/Edit/Delete holdings with live re-analysis after each change
 - **Target Price** and **Stop Loss** tracked per holding (optional) — drive distance calculations and stop-loss/target-hit signals
 - **Notes** field per holding for custom annotations
-- Cash balance management via `updateCash()` → `PUT /api/settings`
+- **Sell** action per holding (full or partial) → `RealizedGainsCard` + collapsed `ClosedPositionsTable`.
 - Mobile: FAB (floating action button) to add; full-screen modal form
 - Desktop: inline form, top-right "+ Add Stock" button
 - Sections stacked: MacroCard → PortfolioSummary → RiskDashboard → HoldingsTable → CorrelationHeatmap → MonteCarloChart → AdvicePanel
@@ -181,6 +185,29 @@ Composite score weights (stored as `weight_*` keys in the `settings` table). Han
 ### GET /api/portfolio, POST/PUT/DELETE
 CRUD for holdings. Stored in `portfolio` table in Turso.
 
+### GET /api/sales, POST, DELETE
+
+Realized gains ledger. `POST` records a full or partial sell: it inserts a
+`portfolio_sales` row snapshotting the cost basis and decrements
+`portfolio.quantity`, **both inside one `db.transaction()`** — `db.commit()` is
+a no-op and each `execute()` takes its own autocommit connection, so without
+the transaction a failure between the two statements would invent or lose
+shares. The `quantity >= %s` guard lives in the UPDATE's WHERE clause, so two
+rapid submits cannot both succeed.
+
+A full sell sets `quantity = 0` rather than deleting the row: the holding stays
+as the anchor that makes `DELETE /api/sales` restore the position exactly, with
+its target price, stop loss and notes intact.
+
+Deliberately separate from `/api/portfolio_analysis` — realized gains need no
+price fetch, so the Winnings card paints even when the analysis times out.
+
+`summary` reports `beat_t_bill_count` of `annualizable_count`, **not** a
+portfolio-level annualized return: annualized figures over trades of different
+lengths cannot honestly be averaged. `total_realized_pnl_pct` is cost-weighted.
+Trades held under 30 days report no annualized figure at all
+(`MIN_DAYS_FOR_ANNUALIZATION` in `core/returns.py`).
+
 ### GET /api/portfolio_analysis
 **The heaviest endpoint.** Per-holding analysis + portfolio-level risk metrics + Monte Carlo + macro + signals.
 - Fetches OHLCV for each holding sequentially (cache helps)
@@ -193,7 +220,7 @@ CRUD for holdings. Stored in `portfolio` table in Turso.
 Returns `{ egx30, usd_egp, interest_rate }`. 1-hour cache in `macro_data` table. Graceful degradation (returns null values if source fails).
 
 ### GET /api/settings, PUT /api/settings
-Key-value settings. Pre-seeded: `cash_available=50000`, `currency=EGP`, `risk_free_rate=25`.
+Key-value settings. Pre-seeded: `currency=EGP`, `risk_free_rate=25`.
 
 ### GET /api/watchlist, POST, DELETE
 User's watched symbols, stored in the `watchlist` table in Turso.
@@ -563,10 +590,13 @@ Components in `src/app/components/`:
 **Portfolio views:**
 - `PortfolioSummary` — Totals + avg composite score tile + sector allocation pie/stacked bar
 - `RiskDashboard` — Sharpe/Sortino/MaxDD/VaR/Current DD grid
-- `HoldingsTable` — Full table desktop (Score column with gauge + signal), cards mobile (gauge in card header + expanded detail). Error rows use `colSpan={11}`.
+- `HoldingsTable` — Full table desktop (Score column with gauge + signal), cards mobile (gauge in card header + expanded detail). Error rows use `colSpan={11}`. `onSell` opens `SellHoldingForm` per holding.
 - `MacroCard` — EGX30/USD-EGP/CBE rate indicator row
 - `AdvicePanel` — Signals rendered with severity styles + learn links
 - `AddHoldingForm` — Full-screen modal on mobile, inline on desktop
+- `SellHoldingForm` — Records a full or partial sell against a holding
+- `RealizedGainsCard` — Summary of banked gains/losses (the "Winnings" card)
+- `ClosedPositionsTable` — Collapsed table of past sales, expandable per row
 
 **UI helpers:**
 - `Navbar`, `BottomTabBar` — mobile bottom nav, desktop top nav
@@ -602,7 +632,15 @@ Fonts: Outfit (sans), JetBrains Mono (mono).
 ```sql
 portfolio (id, symbol, name, buy_price, buy_date, quantity, notes, sector,
            target_price, stop_loss, created_at, updated_at)
-settings  (key, value)   -- pre-seeded: cash_available, currency, risk_free_rate,
+portfolio_sales (id, user_id, holding_id, symbol, name, sector, quantity,
+                 buy_price, buy_date, sell_price, sell_date, notes, created_at)
+                 -- Cost basis is SNAPSHOTTED, not joined: a sale is a
+                 -- historical fact and must not change when the holding it
+                 -- came from is later edited or deleted.
+                 -- portfolio.quantity = 0 means fully sold; the row is kept
+                 -- as the undo anchor and filtered out of every read by
+                 -- core/holdings.fetch_open_holdings.
+settings  (key, value)   -- pre-seeded: currency, risk_free_rate,
                          --             weight_trend, weight_momentum, weight_volume,
                          --             weight_volatility, weight_divergence,
                          --             weight_quality, weight_risk_adjusted,
@@ -723,7 +761,7 @@ Synced to Turso via `/api/watchlist` and exposed through `WatchlistProvider` (wr
 - **All P&L in EGP.** Egypt's currency is the Egyptian pound.
 - **EGX trading hours:** Sun–Thu, 10:00 AM – 2:30 PM Cairo time. EGX30 only updates during these hours.
 - **T+2 settlement:** mentioned on Learn page but not enforced in portfolio logic
-- **No auth:** app is single-user, all portfolio data is in one Turso database. Auth would be needed before multi-tenant use.
+- **Auth:** every router scopes its queries by `user.id` from a JWT Bearer token (`app/routers/portfolio.py` and the rest); `app/main.py` calls `seed_users_from_env` to provision users.
 - **Composite score is educational only:** always note the disclaimer when surfacing scores to users — it does not predict future price; no fundamentals or news are considered.
 - **Vercel timeout budget:** all three scoring paths now use identical inputs (see *One score per stock* below), so the levers are `BATCH_WORKERS` and the `include_multi_timeframe=False` escape hatch on `build_composite_extras` — **not** shrinking a single path's window, which is what caused the scores to diverge in the first place.
 - **Missing data / short history:** `compute_composite` renormalizes weights across only available categories when a scorer returns None — scores on NILEX tickers with <50 bars will have reduced category coverage.
