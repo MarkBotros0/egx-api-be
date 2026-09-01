@@ -770,7 +770,6 @@ Synced to Turso via `/api/watchlist` and exposed through `WatchlistProvider` (wr
 
 - Real-time streaming quotes (egxpy is polling, not streaming)
 - Order placement (this is analysis-only; user trades through Thndr app separately)
-- Multi-user authentication
 - External TA libraries (ta-lib, pandas-ta) — everything is from-scratch for learning
 - Per-stock composite score on the dashboard (StockCard accepts the prop but dashboard doesn't batch-fetch scores — out of scope)
 - A single "max buy price" number (removed — see *Removed: Max Buy Price*)
