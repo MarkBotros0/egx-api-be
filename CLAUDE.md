@@ -590,7 +590,7 @@ Components in `src/app/components/`:
 **Portfolio views:**
 - `PortfolioSummary` — Totals + avg composite score tile + sector allocation pie/stacked bar
 - `RiskDashboard` — Sharpe/Sortino/MaxDD/VaR/Current DD grid
-- `HoldingsTable` — Full table desktop (Score column with gauge + signal), cards mobile (gauge in card header + expanded detail). Error rows use `colSpan={11}`. `onSell` opens `SellHoldingForm` per holding.
+- `HoldingsTable` — Full table desktop (Score column with gauge + signal), cards mobile (gauge in card header + expanded detail). Error rows use `colSpan={10}` plus a dedicated Actions cell, so a holding whose price feed is down can still be sold. `onSell` opens `SellHoldingForm` per holding.
 - `MacroCard` — EGX30/USD-EGP/CBE rate indicator row
 - `AdvicePanel` — Signals rendered with severity styles + learn links
 - `AddHoldingForm` — Full-screen modal on mobile, inline on desktop
@@ -762,6 +762,13 @@ Synced to Turso via `/api/watchlist` and exposed through `WatchlistProvider` (wr
 - **EGX trading hours:** Sun–Thu, 10:00 AM – 2:30 PM Cairo time. EGX30 only updates during these hours.
 - **T+2 settlement:** mentioned on Learn page but not enforced in portfolio logic
 - **Auth:** every router scopes its queries by `user.id` from a JWT Bearer token (`app/routers/portfolio.py` and the rest); `app/main.py` calls `seed_users_from_env` to provision users.
+- **Pushing: switch to the `MarkBotros0` GitHub account first.** Both repos are
+  owned by `MarkBotros0`, but the machine has several `gh` accounts
+  authenticated at once and the active one is often `mark-aigorithm`, which
+  gets `remote: Permission to MarkBotros0/egx-api-be.git denied` and a 403.
+  Run `gh auth switch --user MarkBotros0` before `git push`. Check with
+  `gh auth status` — the account marked `Active account: true` is the one git
+  will use.
 - **Composite score is educational only:** always note the disclaimer when surfacing scores to users — it does not predict future price; no fundamentals or news are considered.
 - **Vercel timeout budget:** all three scoring paths now use identical inputs (see *One score per stock* below), so the levers are `BATCH_WORKERS` and the `include_multi_timeframe=False` escape hatch on `build_composite_extras` — **not** shrinking a single path's window, which is what caused the scores to diverge in the first place.
 - **Missing data / short history:** `compute_composite` renormalizes weights across only available categories when a scorer returns None — scores on NILEX tickers with <50 bars will have reduced category coverage.
