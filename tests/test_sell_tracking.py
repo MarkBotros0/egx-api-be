@@ -81,3 +81,41 @@ def test_transaction_rolls_back_on_error():
 
     assert pool.conns[0].rolled_back
     assert not pool.conns[0].committed
+
+
+from app.core.returns import (
+    MIN_DAYS_FOR_ANNUALIZATION,
+    annualized_return,
+    days_between,
+)
+
+
+def test_annualization_is_suppressed_below_thirty_days():
+    # A +5% week annualizes to five figures. The UI must show nothing.
+    assert annualized_return(5.0, 29) is None
+    assert annualized_return(5.0, MIN_DAYS_FOR_ANNUALIZATION) is not None
+
+
+def test_annualized_return_over_one_year_is_the_plain_return():
+    assert annualized_return(10.0, 365) == pytest.approx(10.0, abs=0.01)
+
+
+def test_two_year_gain_annualizes_below_the_t_bill():
+    # The whole point of the T-bill line: +8% held two years LOST to cash.
+    ann = annualized_return(8.0, 730)
+    assert ann == pytest.approx(3.92, abs=0.05)
+    assert ann < 25.0
+
+
+def test_total_loss_floors_at_minus_one_hundred():
+    assert annualized_return(-100.0, 365) == -100.0
+    assert annualized_return(-150.0, 365) == -100.0
+
+
+def test_days_between_counts_calendar_days():
+    assert days_between("2026-01-01", date(2026, 1, 31)) == 30
+    assert days_between("2026-01-01T00:00:00Z", date(2026, 1, 31)) == 30
+
+
+def test_days_between_returns_zero_on_unparseable_input():
+    assert days_between("not-a-date", date(2026, 1, 31)) == 0
