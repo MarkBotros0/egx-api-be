@@ -16,41 +16,19 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
+from app.core.holdings import HOLDING_COLUMNS, fetch_open_holdings, row_to_holding
 
 router = APIRouter()
-
-
-def _row_to_dict(row):
-    return {
-        "id": row[0],
-        "symbol": row[1],
-        "name": row[2],
-        "buy_price": row[3],
-        "buy_date": row[4],
-        "quantity": row[5],
-        "notes": row[6],
-        "sector": row[7],
-        "target_price": row[8],
-        "stop_loss": row[9],
-        "created_at": row[10],
-        "updated_at": row[11],
-    }
 
 
 @router.get("/api/portfolio")
 def get_portfolio(user: CurrentUser = Depends(get_current_user)):
     try:
         db = get_db()
-        rows = db.execute(
-            "SELECT id, symbol, name, buy_price, buy_date, quantity, notes, sector, "
-            "target_price, stop_loss, created_at, updated_at FROM portfolio "
-            "WHERE user_id = %s",
-            (user.id,),
-        ).fetchall()
-        holdings = [_row_to_dict(r) for r in rows]
+        holdings = fetch_open_holdings(db, user.id)
 
         settings = db.execute(
-            "SELECT key, value FROM settings WHERE key = 'currency'"
+            "SELECT value FROM settings WHERE key = 'currency'"
         ).fetchone()
         currency = settings[0] if settings else "EGP"
 
@@ -126,9 +104,7 @@ def update_holding(
     try:
         db = get_db()
         row = db.execute(
-            "SELECT id, symbol, name, buy_price, buy_date, quantity, notes, sector, "
-            "target_price, stop_loss, created_at, updated_at FROM portfolio "
-            "WHERE id = %s AND user_id = %s",
+            f"SELECT {HOLDING_COLUMNS} FROM portfolio WHERE id = %s AND user_id = %s",
             (id, user.id),
         ).fetchone()
 
@@ -164,13 +140,11 @@ def update_holding(
         db.commit()
 
         updated = db.execute(
-            "SELECT id, symbol, name, buy_price, buy_date, quantity, notes, sector, "
-            "target_price, stop_loss, created_at, updated_at FROM portfolio "
-            "WHERE id = %s AND user_id = %s",
+            f"SELECT {HOLDING_COLUMNS} FROM portfolio WHERE id = %s AND user_id = %s",
             (id, user.id),
         ).fetchone()
 
-        return _row_to_dict(updated)
+        return row_to_holding(updated)
 
     except HTTPException:
         raise

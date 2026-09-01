@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
+from app.core.holdings import fetch_open_holdings
 from app.core.macro_fetch import fetch_macro
 from app.core.composite import compute_composite, get_weights_from_db, DEFAULT_WEIGHTS
 from app.core.levels import compute_key_levels, compute_entry_exit
@@ -1061,20 +1062,7 @@ def _analyze(holdings):
 def get_portfolio_analysis(user: CurrentUser = Depends(get_current_user)):
     try:
         db = get_db()
-        rows = db.execute(
-            "SELECT id, symbol, name, buy_price, buy_date, quantity, notes, sector, "
-            "target_price, stop_loss, created_at, updated_at FROM portfolio "
-            "WHERE user_id = %s",
-            (user.id,),
-        ).fetchall()
-        holdings = [
-            {
-                "id": r[0], "symbol": r[1], "name": r[2], "buy_price": r[3],
-                "buy_date": r[4], "quantity": r[5], "notes": r[6], "sector": r[7],
-                "target_price": r[8], "stop_loss": r[9],
-            }
-            for r in rows
-        ]
+        holdings = fetch_open_holdings(db, user.id)
         return _analyze(holdings)
     except HTTPException:
         raise

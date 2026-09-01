@@ -119,3 +119,26 @@ def test_days_between_counts_calendar_days():
 
 def test_days_between_returns_zero_on_unparseable_input():
     assert days_between("not-a-date", date(2026, 1, 31)) == 0
+
+
+from pathlib import Path
+
+_ROUTERS = Path(__file__).resolve().parents[1] / "app" / "routers"
+
+
+def test_open_holdings_filter_is_spelled_once():
+    """
+    portfolio.py and portfolio_analysis.py each issue their own SELECT against
+    the portfolio table — portfolio_analysis does NOT call /api/portfolio. If
+    either hand-writes the `quantity > 0` filter, the two can drift and a
+    fully-sold holding reappears in the risk metrics as a phantom position.
+    """
+    for name in ("portfolio.py", "portfolio_analysis.py"):
+        src = (_ROUTERS / name).read_text(encoding="utf-8")
+        assert "quantity > 0" not in src, (
+            f"{name} hand-writes the open-holdings filter; "
+            "call core.holdings.fetch_open_holdings instead"
+        )
+        assert "fetch_open_holdings" in src, (
+            f"{name} must read holdings through core.holdings.fetch_open_holdings"
+        )
