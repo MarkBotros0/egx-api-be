@@ -666,7 +666,7 @@ Components in `src/app/components/`:
 **Admin (admin role only):**
 - `AdminUsersTable` — desktop table / mobile cards. Actions per user: reset password, disable/enable, delete. Hides the destructive actions on your own row (the backend guards them anyway).
 - `CreateUserModal` — full-screen on mobile, card on desktop. Leaving the password blank is the intended path; the backend generates one.
-- `PasswordRevealDialog` — shows a generated password ONCE with a copy button, and says plainly that it cannot be shown again. Used by both create and reset.
+- `PasswordRevealDialog` — shows a generated password ONCE and says plainly that it cannot be shown again. Used by both create and reset. **Copy puts the username AND password in one block** (`Username: x\nPassword: y`) because it gets pasted into a single message; copying the password alone left the admin retyping the username into the same chat. The on-screen block mirrors the copied text exactly, so what is sent is what was checked.
 - Page at `src/app/admin/page.tsx`, gated on `isAdmin` from `useAuth()`.
 
 **UI helpers:**
