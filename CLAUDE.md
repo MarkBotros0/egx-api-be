@@ -233,6 +233,60 @@ own weights (see *Auth, roles and per-user settings*); the generic
 because everything left in there is shared — `currency`, `risk_free_rate` and
 the `pe_last_*` feed status. Pre-seeded: `currency=EGP`, `risk_free_rate=25`.
 
+### The app is CLOSED — read this before adding any route
+
+**Nothing is served to anyone who is not signed in.** There is no public
+surface: no landing page, no public dashboard, no anonymous API.
+
+The backend enforces it in ONE place — `require_authentication`, an HTTP
+middleware in `app/main.py` that rejects every `/api/*` request without a
+valid, active user. The policy itself lives in `core/auth.py`:
+
+```python
+PUBLIC_ENDPOINTS = frozenset({
+    ("POST", "/api/auth/login"),   # the way in
+    ("POST", "/api/pe/refresh"),   # Vercel cron; guarded by PE_REFRESH_SECRET
+})
+```
+
+`OPTIONS` also passes, because a CORS preflight carries no `Authorization`
+header by design and blocking it breaks every browser call including login.
+
+**Default-deny is the whole point.** A router added later is locked until
+someone deliberately opens it, so the failure mode is "it 401s and I notice"
+rather than "it has been serving the dataset to the internet since it
+shipped" — which is exactly what **nine** endpoints (`tickers`, `ohlcv`,
+`analysis`, `compare`, `historical`, `intraday`, `macro`, `market_regime`,
+`pe`) were doing until 2026-09-02, with nothing in the codebase noticing.
+`tests/test_auth_gate.py` walks the app's REAL route table and fails if any
+non-allowlisted route answers an anonymous caller, so the guarantee is
+verified by enumeration rather than by memory.
+
+Routers that need the caller's identity still declare
+`Depends(get_current_user)`. The middleware is a second layer, not a
+replacement — do not remove those.
+
+**Frontend:** `src/middleware.ts` is deny-by-default too. Only `/login` and
+static assets (`/_next`, `/icons`, `/manifest.json`, `/sw.js`, favicons) are
+reachable signed out; everything else redirects to `/login?next=…`. `Navbar`
+and `BottomTabBar` return `null` when unauthenticated so the login page stands
+alone. That redirect is UX only — the `egx.auth.present` cookie is set by
+client JS and carries no signature, so the backend gate is the real guard.
+
+**Logout wipes Cache Storage** (`clearStoredAuth` → `clearCachedResponses`).
+`sw.js` is network-first but FALLS BACK to cache, so without the wipe a
+signed-out person on a shared phone could go offline and have the worker
+re-serve the last dashboard and API responses it saw. Verified: a session
+holding 15 cached entries including `/api/portfolio` drops to just the
+re-cached `/login` page.
+
+**Consequence for `/api/market_regime`:** its cached scores used to be warmed
+by anonymous dashboard traffic. There is no anonymous traffic any more, so the
+reading stays warm only while the signed-in user is on DEFAULT weights (same
+`weights_hash`, same cache key). A user with customised sliders will see the
+card fall back to its last stored reading flagged `stale`. It degrades, it does
+not break.
+
 ### Auth, roles and user management
 
 **The app is multi-user with JWT auth.** Login is `POST /api/auth/login`
@@ -264,9 +318,16 @@ be a lie. Cost is one indexed PK lookup on a pooled connection.
 Dependencies in `core/auth.py`:
 - `get_current_user` — 401 unless a valid token maps to an **active** row
 - `require_admin` — the above plus 403 for non-admins
-- `get_optional_user` — returns `None` instead of raising. `/api/analysis` uses
-  this: the dashboard is a public page (middleware guards only `/portfolio` and
-  `/admin`), so demanding a token there would break anonymous browsing.
+- `get_optional_user` — returns `None` instead of raising. **Currently unused:**
+  `/api/analysis` used it while the dashboard was public, and now requires a
+  real user like everything else. Kept because it is the right tool if a route
+  ever legitimately needs to serve both. Do not reach for it to sidestep the
+  gate — the gate would reject the request before the dependency ran anyway.
+
+Note the **anonymous WEIGHTS context is a different thing** and still exists:
+`get_weights_from_db(db, user_id=None)` and `read_cached_scores` pass `None` so
+the market-regime average stays on the default weights its bands were
+calibrated at. That is about whose sliders apply, not about who may call.
 
 ### /api/users — admin only
 
@@ -846,6 +907,7 @@ Synced to Turso via `/api/watchlist` and exposed through `WatchlistProvider` (wr
 - **EGX trading hours:** Sun–Thu, 10:00 AM – 2:30 PM Cairo time. EGX30 only updates during these hours.
 - **T+2 settlement:** mentioned on Learn page but not enforced in portfolio logic
 - **Auth:** every router scopes its queries by `user.id` from a JWT Bearer token (`app/routers/portfolio.py` and the rest); `app/main.py` calls `seed_users_from_env` to provision users.
+- **The app is closed — see *The app is CLOSED*.** A new router is denied by default; opening it means editing `PUBLIC_ENDPOINTS` in `core/auth.py`, and `tests/test_auth_gate.py` will tell you if you leave something open by accident.
 - **Pushing: switch to the `MarkBotros0` GitHub account first.** Both repos are
   owned by `MarkBotros0`, but the machine has several `gh` accounts
   authenticated at once and the active one is often `mark-aigorithm`, which
@@ -861,6 +923,7 @@ Synced to Turso via `/api/watchlist` and exposed through `WatchlistProvider` (wr
 
 ## Not Present / Deliberately Missing
 
+- **Any public/anonymous surface.** No landing page, no public dashboard, no demo mode, no read-only guest. Signed out, the only thing that exists is the login form.
 - Real-time streaming quotes (egxpy is polling, not streaming)
 - Order placement (this is analysis-only; user trades through Thndr app separately)
 - External TA libraries (ta-lib, pandas-ta) — everything is from-scratch for learning

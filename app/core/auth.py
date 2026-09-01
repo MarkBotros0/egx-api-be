@@ -165,6 +165,45 @@ def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
     return user
 
 
+# ---------------------------------------------------------------------------
+# The app-wide gate
+# ---------------------------------------------------------------------------
+
+# Every /api/* path is CLOSED unless it appears here. The allowlist is spelled
+# as exact (method, path) pairs so a route cannot be opened by accident.
+#
+# Default-deny is the point: a router added later is locked until someone
+# deliberately opens it. The failure mode becomes "it 401s and I notice
+# immediately" rather than "it has been serving the whole dataset to the
+# internet since the day it shipped" — which is what nine of these endpoints
+# were doing before this gate existed.
+PUBLIC_ENDPOINTS = frozenset({
+    ("POST", "/api/auth/login"),      # the way in
+    ("POST", "/api/pe/refresh"),      # Vercel cron; guarded by PE_REFRESH_SECRET
+})
+
+
+def is_public_endpoint(method: str, path: str) -> bool:
+    """True for the handful of routes that must work without a user token."""
+    # Preflights carry no Authorization header by design — blocking them breaks
+    # CORS for every browser call, including the login request itself.
+    if method.upper() == "OPTIONS":
+        return True
+    return (method.upper(), path.rstrip("/") or "/") in PUBLIC_ENDPOINTS
+
+
+def authenticate_request(method: str, path: str, authorization: Optional[str]):
+    """
+    Resolve the caller for a raw request, or return None if the path is open.
+
+    Raises HTTPException(401) when a closed path has no valid, active user.
+    Shared by the ASGI middleware and its tests so the policy is stated once.
+    """
+    if is_public_endpoint(method, path):
+        return None
+    return get_current_user(authorization)
+
+
 def _parse_admin_usernames() -> set:
     raw = os.environ.get("AUTH_ADMINS", "").strip()
     return {u.strip().lower() for u in raw.split(",") if u.strip()}
