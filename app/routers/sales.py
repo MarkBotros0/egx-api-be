@@ -22,10 +22,10 @@ from app.core.auth import CurrentUser, get_current_user
 from app.core.constants import DEFAULT_RISK_FREE_RATE_PCT
 from app.core.db import get_db
 from app.core.holdings import HOLDING_COLUMNS, row_to_holding
+from app.core.dividends import summarize_realized
 from app.core.sales import (
     SaleValidationError,
     compute_sale_metrics,
-    summarize_sales,
     validate_sale,
 )
 
@@ -158,7 +158,7 @@ def get_sales(user: CurrentUser = Depends(get_current_user)):
 
         return {
             "sales": priced,
-            "summary": summarize_sales(priced),
+            "summary": summarize_realized(priced, []),
             "currency": currency_row[0] if currency_row else "EGP",
             "risk_free_rate_pct": rfr,
         }

@@ -151,3 +151,110 @@ def test_a_differing_field_is_not_a_duplicate(candidate):
 
 def test_nothing_is_a_duplicate_of_an_empty_ledger():
     assert not is_duplicate([], {"symbol": "COMI", "pay_date": "2026-08-15", "amount": 1200.0})
+
+
+# --- summarize_realized --------------------------------------------------
+
+from app.core.dividends import summarize_realized
+
+SALES = [
+    # +2,000 on 10,000 cost
+    {"id": "s1", "symbol": "COMI", "name": "CIB", "sector": "Banks", "quantity": 100,
+     "cost": 10000.0, "proceeds": 12000.0, "realized_pnl": 2000.0,
+     "realized_pnl_pct": 20.0, "beat_t_bill": True},
+    # -500 on 5,000 cost
+    {"id": "s2", "symbol": "SWDY", "name": "Elsewedy", "sector": "Industrial", "quantity": 50,
+     "cost": 5000.0, "proceeds": 4500.0, "realized_pnl": -500.0,
+     "realized_pnl_pct": -10.0, "beat_t_bill": False},
+]
+
+DIVIDENDS = [
+    {"id": "d1", "symbol": "COMI", "name": "CIB", "sector": "Banks", "amount": 1200.0,
+     "pay_date": "2026-08-15"},
+    # HRHO was never sold — it must still appear in the breakdown.
+    {"id": "d2", "symbol": "HRHO", "name": "EFG", "sector": "Financials", "amount": 300.0,
+     "pay_date": "2026-07-01"},
+]
+
+
+def test_an_empty_ledger_is_zeroed_not_null():
+    s = summarize_realized([], [])
+    assert s["total_realized_pnl"] == 0.0
+    assert s["total_dividends"] == 0.0
+    assert s["total_winnings"] == 0.0
+    assert s["dividend_count"] == 0
+    assert s["by_symbol"] == []
+    assert s["best_trade"] is None
+
+
+def test_total_winnings_is_gains_plus_dividends():
+    s = summarize_realized(SALES, DIVIDENDS)
+    assert s["total_realized_pnl"] == 1500.0
+    assert s["total_dividends"] == 1500.0
+    assert s["total_winnings"] == 3000.0
+    assert s["dividend_count"] == 2
+
+
+# Dividends have no matching cost in this ledger — the shares producing them may
+# still be held — so adding them to a numerator whose denominator is CLOSED-trade
+# cost would make the percentage describe nothing.
+def test_the_headline_percentage_ignores_dividends():
+    without = summarize_realized(SALES, [])
+    with_divs = summarize_realized(SALES, DIVIDENDS)
+    assert without["total_realized_pnl_pct"] == with_divs["total_realized_pnl_pct"]
+    assert with_divs["total_realized_pnl_pct"] == 10.0  # 1500 / 15000
+
+
+# A dividend maps onto no single trade, so folding it into a per-trade verdict
+# would make the line unverifiable.
+def test_the_t_bill_counts_ignore_dividends():
+    without = summarize_realized(SALES, [])
+    with_divs = summarize_realized(SALES, DIVIDENDS)
+    assert without["beat_t_bill_count"] == with_divs["beat_t_bill_count"] == 1
+    assert without["annualizable_count"] == with_divs["annualizable_count"] == 2
+
+
+def test_best_and_worst_stay_sales_only():
+    s = summarize_realized(SALES, DIVIDENDS)
+    assert s["best_trade"]["id"] == "s1"
+    assert s["worst_trade"]["id"] == "s2"
+
+
+def test_by_symbol_includes_a_symbol_that_was_never_sold():
+    s = summarize_realized(SALES, DIVIDENDS)
+    hrho = next(r for r in s["by_symbol"] if r["symbol"] == "HRHO")
+    assert hrho["sales_count"] == 0
+    assert hrho["cost"] == 0
+    assert hrho["realized_pnl"] == 0
+    assert hrho["realized_pnl_pct"] is None
+    assert hrho["dividends"] == 300.0
+    assert hrho["total_winnings"] == 300.0
+
+
+def test_by_symbol_merges_dividends_into_a_sold_symbol():
+    s = summarize_realized(SALES, DIVIDENDS)
+    comi = next(r for r in s["by_symbol"] if r["symbol"] == "COMI")
+    assert comi["realized_pnl"] == 2000.0
+    assert comi["dividends"] == 1200.0
+    assert comi["total_winnings"] == 3200.0
+
+
+def test_by_symbol_is_sorted_by_total_winnings_descending():
+    s = summarize_realized(SALES, DIVIDENDS)
+    order = [r["symbol"] for r in s["by_symbol"]]
+    assert order == ["COMI", "HRHO", "SWDY"]  # 3200, 300, -500
+
+
+def test_a_dividend_only_ledger_still_produces_a_breakdown():
+    s = summarize_realized([], DIVIDENDS)
+    assert s["total_winnings"] == 1500.0
+    assert len(s["by_symbol"]) == 2
+    assert s["total_realized_pnl_pct"] is None
+
+
+def test_summarize_sales_is_gone_so_there_is_only_one_summariser():
+    import app.core.sales as sales_module
+    assert not hasattr(sales_module, "summarize_sales"), (
+        "Two summarisers producing overlapping Winnings figures is the "
+        "divergence class documented in One Score Per Stock."
+    )

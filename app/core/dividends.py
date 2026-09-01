@@ -120,3 +120,87 @@ def is_duplicate(existing: list, candidate: dict) -> bool:
         ):
             return True
     return False
+
+
+def summarize_realized(priced_sales: list, dividends: list) -> dict:
+    """
+    Roll closed trades AND dividends up into the Winnings card's numbers.
+
+    Takes sales already through sales.compute_sale_metrics, which is where the
+    per-trade T-bill comparison happened, so this needs no rate of its own.
+
+    Three figures deliberately stay capital-gains-only:
+
+      total_realized_pnl_pct  — cost-weighted over CLOSED trades. Dividends have
+                                no matching cost here (the shares may still be
+                                held), so adding them would make the percentage
+                                describe nothing.
+      beat_t_bill_count /     — facts about individual closed trades. A dividend
+      annualizable_count        maps onto no single trade.
+      best_trade / worst_trade — labelled "trade" and returning a whole Sale the
+                                card reads fields off.
+
+    by_symbol is a UNION: a stock you still hold and collect on has no sale, and
+    would otherwise be missing from the breakdown entirely.
+    """
+    total_dividends = sum(float(d.get("amount") or 0) for d in dividends)
+
+    total_cost = sum(s["cost"] for s in priced_sales)
+    total_proceeds = sum(s["proceeds"] for s in priced_sales)
+    total_pnl = total_proceeds - total_cost
+
+    annualizable = [s for s in priced_sales if s["beat_t_bill"] is not None]
+
+    by_symbol: dict = {}
+
+    def _bucket(symbol, name, sector):
+        return by_symbol.setdefault(
+            symbol,
+            {
+                "symbol": symbol, "name": name or symbol, "sector": sector or "",
+                "sales_count": 0, "quantity": 0, "cost": 0.0, "proceeds": 0.0,
+                "dividends": 0.0,
+            },
+        )
+
+    for s in priced_sales:
+        agg = _bucket(s["symbol"], s.get("name"), s.get("sector"))
+        agg["sales_count"] += 1
+        agg["quantity"] += int(s["quantity"])
+        agg["cost"] += s["cost"]
+        agg["proceeds"] += s["proceeds"]
+
+    for d in dividends:
+        agg = _bucket(d["symbol"], d.get("name"), d.get("sector"))
+        agg["dividends"] += float(d.get("amount") or 0)
+
+    rollup = []
+    for agg in by_symbol.values():
+        pnl = agg["proceeds"] - agg["cost"]
+        rollup.append({
+            **agg,
+            "cost": round(agg["cost"], 2),
+            "proceeds": round(agg["proceeds"], 2),
+            "dividends": round(agg["dividends"], 2),
+            "realized_pnl": round(pnl, 2),
+            "realized_pnl_pct": round(pnl / agg["cost"] * 100, 2) if agg["cost"] > 0 else None,
+            "total_winnings": round(pnl + agg["dividends"], 2),
+        })
+    rollup.sort(key=lambda r: r["total_winnings"], reverse=True)
+
+    return {
+        "total_realized_pnl": round(total_pnl, 2),
+        "total_realized_pnl_pct": round(total_pnl / total_cost * 100, 2) if total_cost > 0 else None,
+        "total_proceeds": round(total_proceeds, 2),
+        "total_cost": round(total_cost, 2),
+        "total_dividends": round(total_dividends, 2),
+        "dividend_count": len(dividends),
+        "total_winnings": round(total_pnl + total_dividends, 2),
+        "win_count": sum(1 for s in priced_sales if s["realized_pnl"] > 0),
+        "loss_count": sum(1 for s in priced_sales if s["realized_pnl"] < 0),
+        "beat_t_bill_count": sum(1 for s in annualizable if s["beat_t_bill"]),
+        "annualizable_count": len(annualizable),
+        "best_trade": max(priced_sales, key=lambda s: s["realized_pnl"]) if priced_sales else None,
+        "worst_trade": min(priced_sales, key=lambda s: s["realized_pnl"]) if priced_sales else None,
+        "by_symbol": rollup,
+    }
