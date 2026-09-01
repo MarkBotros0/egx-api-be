@@ -8,6 +8,7 @@ off Turso. Connections run with autocommit=True, so `commit()` is a no-op.
 """
 
 import os
+from contextlib import contextmanager
 from psycopg_pool import ConnectionPool
 
 from app.core.constants import DEFAULT_RISK_FREE_RATE_PCT
@@ -29,6 +30,20 @@ class _Result:
         return self._rows
 
 
+class _Tx:
+    """Statement executor bound to one connection inside a transaction."""
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql: str, params=()):
+        cur = self._conn.execute(sql, params)
+        rows = cur.fetchall() if cur.description else []
+        return _Result(rows)
+
+
 class _DB:
     def __init__(self, pool: ConnectionPool):
         self._pool = pool
@@ -42,6 +57,20 @@ class _DB:
     def commit(self):
         # autocommit is enabled on pool connections; retained for API parity
         pass
+
+    @contextmanager
+    def transaction(self):
+        """
+        Run several statements on ONE connection inside a real transaction.
+
+        execute() takes a fresh pooled connection per call and the pool runs
+        with autocommit, so two related writes issued through it can half-land
+        — recording a sale without decrementing the holding would invent
+        shares. Anything that must be all-or-nothing goes through here.
+        """
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                yield _Tx(conn)
 
 
 def _get_pool() -> ConnectionPool:
