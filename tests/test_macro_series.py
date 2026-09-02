@@ -21,6 +21,7 @@ from app.core.macro_series import (
     get_macro_at,
     get_risk_free_at,
     released_at,
+    upsert_many,
 )
 
 
@@ -107,3 +108,66 @@ def test_every_series_declares_a_label_exchange_lag_and_unit(code):
     label, exchange, lag, unit = SERIES[code]
     assert label and exchange and unit
     assert isinstance(lag, int)
+
+
+class _RecordingDB:
+    """Captures the statement and params a bulk write actually sends."""
+
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, sql, params=()):
+        self.calls.append((sql, params))
+
+
+def test_a_bulk_write_is_one_statement_per_batch_not_one_per_row():
+    """
+    USD/EGP is 5,000 daily bars. At one statement per row the backfill either
+    crawled or was cut off partway: one attempt exited having written two
+    thirds of the series, another lost 3,689 rows when Neon's pooler closed the
+    connection mid-transaction. Batching is what makes the run finish, so it is
+    pinned rather than trusted.
+    """
+    db = _RecordingDB()
+    rows = [(f"2026-01-{d:02d}", float(d)) for d in range(1, 11)]
+
+    assert upsert_many(db, FX_SERIES, rows, source="backfill") == 10
+    assert len(db.calls) == 1, "a batch must cost one round trip, not ten"
+
+    sql, params = db.calls[0]
+    assert sql.count("(%s, %s, %s, %s, %s, %s)") == 10
+    assert len(params) == 60
+    assert "ON CONFLICT (series_code, observed_period) DO UPDATE" in sql
+
+
+def test_a_bulk_write_carries_the_same_release_lag_as_a_single_upsert():
+    """
+    The lag is the reason this table exists. A faster write path that dropped
+    it would put unpublished figures inside every historical read.
+    """
+    db = _RecordingDB()
+    upsert_many(db, "EGIRYY", [("2026-07-01", 14.9)])
+    _, params = db.calls[0]
+    # (code, period, value, released_at, source, updated_at)
+    assert params[1] == "2026-07-01"
+    assert params[3] == released_at("2026-07-01", SERIES["EGIRYY"][2])
+    assert params[3] > params[1], "inflation was stamped as knowable on its own reference date"
+
+
+def test_a_repeated_period_within_one_batch_does_not_abort_it():
+    """
+    Postgres refuses an ON CONFLICT DO UPDATE that would touch the same row
+    twice in one statement, so a feed repeating a date would fail the WHOLE
+    batch — a failure mode per-row upserts never had. Last value wins.
+    """
+    db = _RecordingDB()
+    assert upsert_many(db, FX_SERIES,
+                       [("2026-09-02", 50.0), ("2026-09-02", 51.0)]) == 1
+    _, params = db.calls[0]
+    assert params[2] == 51.0
+
+
+def test_an_empty_batch_writes_nothing():
+    db = _RecordingDB()
+    assert upsert_many(db, FX_SERIES, []) == 0
+    assert db.calls == []

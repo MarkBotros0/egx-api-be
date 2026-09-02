@@ -32,11 +32,16 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.core.macro_series import SERIES, released_at, upsert  # noqa: E402
+from app.core.macro_series import SERIES, released_at, upsert_many  # noqa: E402
 
 # Monthly for economic releases; daily for the FX rate, which is a price.
 _INTERVAL = {"ECONOMICS": "Monthly", "FX_IDC": "Daily"}
 _BARS = {"ECONOMICS": 300, "FX_IDC": 5000}
+
+# Rows per multi-row INSERT, so the FX series is ten round trips rather than
+# 5,000. Six bound parameters per row keeps a batch of 500 far inside
+# Postgres' 65,535-parameter ceiling, and a batch that fails costs only itself.
+WRITE_BATCH = 500
 
 
 def fetch_history(code: str, exchange: str):
@@ -65,6 +70,7 @@ def main() -> int:
         init_db(db)          # idempotent; creates macro_series if absent
 
     total = 0
+    incomplete = []
     for code, (label, exchange, lag, unit) in SERIES.items():
         if args.only and code != args.only.upper():
             continue
@@ -85,22 +91,55 @@ def main() -> int:
 
         if args.dry_run:
             continue
-        written = 0
-        for period, value in series.items():
-            if value != value:                       # NaN
-                continue
+
+        # BATCHED multi-row INSERTs, and the batching is the whole fix.
+        #
+        # Three attempts, two of which lost data:
+        #   1. One `upsert` per row on the pooled connection. 5,000 FX bars is
+        #      5,000 round trips; the run exited 0 having stopped at 2022-10-31,
+        #      because every row after the connection gave out fell into a bare
+        #      `except: continue`.
+        #   2. All 5,000 in ONE transaction. Neon's pooler closed the connection
+        #      partway — "server closed the connection unexpectedly" — losing
+        #      3,689 rows.
+        #   3. 250-row transactions, still one statement per row. Slow enough
+        #      that the run was killed before its first batch committed.
+        #
+        # `upsert_many` sends a batch as a single statement, so the FX series is
+        # ~10 round trips. A batch that fails costs only itself, and a re-run
+        # fills the gaps because every write is an idempotent upsert.
+        written, failed, first_error = 0, 0, None
+        rows = [(p.date().isoformat(), float(v))
+                for p, v in series.items() if v == v]
+        for start in range(0, len(rows), WRITE_BATCH):
+            batch = rows[start:start + WRITE_BATCH]
             try:
-                upsert(db, code, period.date().isoformat(), float(value),
-                       source="backfill")
-                written += 1
-            except Exception:
-                continue
+                written += upsert_many(db, code, batch, source="backfill")
+            except Exception as e:
+                failed += len(batch)
+                if first_error is None:
+                    first_error = f"{type(e).__name__}: {str(e).splitlines()[0]}"
+            print(f"         ... {written:,}/{len(rows):,}", flush=True)
+
         total += written
-        print(f"         wrote {written:,} rows")
+        note = f"         wrote {written:,} rows"
+        if failed:
+            note += f"  ** {failed:,} NOT written — {first_error}"
+        print(note)
+        if failed:
+            incomplete.append(code)
 
     print(f"\n{'would write' if args.dry_run else 'wrote'} {total:,} rows total")
     if args.dry_run:
         print("dry run — nothing was written")
+        return 0
+    if incomplete:
+        # Non-zero exit, so a partial backfill can never be mistaken for a
+        # finished one by whatever ran it. The first version of this script
+        # returned 0 while writing two thirds of the data.
+        print(f"INCOMPLETE: {', '.join(incomplete)}. Re-run — every write is "
+              f"an idempotent upsert, so a second pass fills only the gaps.")
+        return 1
     return 0
 
 

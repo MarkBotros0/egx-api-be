@@ -131,6 +131,61 @@ def upsert(db, series_code: str, period: str, value: float,
     )
 
 
+def upsert_many(db, series_code: str, rows, source: str = "tradingview") -> int:
+    """
+    Many dated observations for ONE series, in a single round trip.
+
+    Same semantics as `upsert` — idempotent on (series_code, observed_period),
+    `released_at` derived from the series' publication lag — expressed as one
+    multi-row INSERT instead of one statement per row.
+
+    THIS IS WHY THE FX BACKFILL FINISHES. USD/EGP is 5,000 daily bars, and at
+    one statement per row over a pooled Neon connection the run either crawled
+    for many minutes or was cut off partway: the first attempt exited having
+    written two thirds of the series, the second lost 3,689 rows when the pooler
+    closed the connection mid-transaction. Batched, the same 5,000 rows land in
+    a handful of round trips, which is short enough that neither failure mode
+    has room to happen.
+
+    Callers still batch (see `scripts/backfill_macro.WRITE_BATCH`) so that one
+    bad batch cannot cost the whole series. Returns the number of rows sent.
+    """
+    # Deduplicate WITHIN the batch, keeping the last value for a period.
+    # Postgres refuses "ON CONFLICT DO UPDATE" that would touch the same row
+    # twice in one statement, so a feed that repeats a date would abort the
+    # whole batch rather than one row. Per-row upserts never had to care.
+    deduped: dict = {}
+    for period, value in rows:
+        deduped[str(period)[:10]] = value
+    rows = list(deduped.items())
+    if not rows:
+        return 0
+    meta = SERIES.get(series_code)
+    lag = meta[2] if meta else 0
+    now = datetime.now(timezone.utc).isoformat()
+
+    params: list = []
+    for period, value in rows:
+        period = str(period)[:10]
+        params.extend([series_code, period, float(value),
+                       released_at(period, lag), source, now])
+    values_sql = ", ".join(["(%s, %s, %s, %s, %s, %s)"] * len(rows))
+    db.execute(
+        f"""
+        INSERT INTO macro_series
+            (series_code, observed_period, value, released_at, source, updated_at)
+        VALUES {values_sql}
+        ON CONFLICT (series_code, observed_period) DO UPDATE SET
+            value       = EXCLUDED.value,
+            released_at = EXCLUDED.released_at,
+            source      = EXCLUDED.source,
+            updated_at  = EXCLUDED.updated_at
+        """,
+        tuple(params),
+    )
+    return len(rows)
+
+
 def refresh_current(db) -> dict:
     """
     Nightly: append today's reading for each ECONOMICS series.

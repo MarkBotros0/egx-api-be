@@ -873,7 +873,24 @@ an FX rate is lag 0 because a price is knowable the day it prints. Read through
 
 Current values ride the nightly `/api/pe/refresh` slot as one POST. History is
 **offline** (`scripts/backfill_macro.py`) because 5,000 FX bars do not fit in 30
-seconds and only need fetching once.
+seconds and only need fetching once. **Seeded and verified 2026-09-02: 6,604
+rows**, all seven series complete, EGUR reaching back to 1993-06.
+
+**Write in BATCHES — `upsert_many`, not `upsert` in a loop.** Three attempts at
+the FX series, two of which lost data: one statement per row exited 0 having
+stopped at 2022-10-31 (a bare `except: continue` swallowed a dropped
+connection); all 5,000 in one transaction lost 3,689 rows when Neon's pooler
+closed the connection mid-write; 250-row transactions still doing one statement
+per row were too slow to commit a single batch. One multi-row INSERT per batch
+makes the whole series ~10 round trips and it finishes in seconds. `upsert_many`
+deduplicates WITHIN a batch because Postgres refuses an `ON CONFLICT DO UPDATE`
+that would touch the same row twice — a repeated date fails the whole batch,
+which per-row upserts never had to care about.
+
+The read path is what proves the backfill: `get_fx_at` now returns 8.858 on
+2016-11-01 and **17.70** on 2016-11-30 (the float), 47.34 after the March 2024
+devaluation and 51.0 today. While USDEGP stopped at 2022, every date after it
+answered **24.15** — understating the devaluation by half.
 
 ### The USD lens — the largest distortion the app used to hide
 
