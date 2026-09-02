@@ -341,6 +341,51 @@ def test_a_failed_fetch_does_not_blank_an_existing_score():
     )
 
 
+def test_no_bare_set_call_where_the_cache_writer_shadows_it():
+    """
+    `analysis.py` does `from app.core.cache import get, set`, which SHADOWS the
+    builtin. A bare `set()` there therefore calls the cache writer with no
+    arguments and raises `missing 2 required positional arguments`, 500-ing the
+    whole batch endpoint — which is exactly what it did, on every dashboard
+    card, until the browser check caught it.
+
+    Use `frozenset()` or a `{...}` comprehension in any module that imports
+    `set` from the cache.
+    """
+    root = os.path.join(os.path.dirname(__file__), "..", "app")
+    offenders = []
+    for dirpath, _dirs, files in os.walk(root):
+        for fname in files:
+            if not fname.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, fname)
+            source = open(path, encoding="utf-8").read()
+            tree = ast.parse(source)
+
+            shadows = any(
+                isinstance(n, ast.ImportFrom)
+                and n.module == "app.core.cache"
+                and any(a.asname is None and a.name == "set" for a in n.names)
+                for n in ast.walk(tree)
+            )
+            if not shadows:
+                continue
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "set"
+                    and not node.args
+                    and not node.keywords
+                ):
+                    offenders.append(f"{path}:{node.lineno}")
+
+    assert not offenders, (
+        "bare set() in a module where app.core.cache.set shadows the builtin — "
+        f"this raises at runtime: {offenders}"
+    )
+
+
 def test_sparkline_length_matches_the_live_batch_path():
     """
     A card that upgrades from snapshot to live data must not change shape. The

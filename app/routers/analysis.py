@@ -283,7 +283,11 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
     # SKIPPED, NOT BLOCKLISTED. The counter is reset by the snapshot cron on a
     # symbol's first good fetch, so one that starts working returns here on its
     # own without anyone editing a list.
-    unfetchable = set()
+    # NOTE `frozenset()`, not `set()`. This module does
+    # `from app.core.cache import get, set`, so the builtin `set` is SHADOWED
+    # by the cache writer — a bare `set()` here calls that with no arguments and
+    # 500s the whole batch endpoint. It did exactly that, on every card.
+    unfetchable = frozenset()
     if db is not None:
         try:
             rows = db.execute(
@@ -293,7 +297,7 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
             ).fetchall()
             unfetchable = {r[0].upper() for r in rows}
         except Exception:
-            unfetchable = set()
+            unfetchable = frozenset()
 
     scores = {}
     errors = []

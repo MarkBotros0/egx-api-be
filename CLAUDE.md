@@ -628,8 +628,11 @@ User's watched symbols, stored in the `watchlist` table in Turso.
 
 ### GET /api/pe, POST /api/pe/refresh
 Fundamentals per stock (trailing P/E, dividend yield, loss-making), served from
-`pe_data`. Populated by a nightly Vercel cron (`04:00 UTC`, see
-`egx-api-be/vercel.json`) that calls `POST /api/pe/refresh`.
+`pe_data`. Populated by a nightly job on **cron-job.org** (`0 4 * * *`) that calls
+`POST /api/pe/refresh` with an `X-Refresh-Secret` header. **`vercel.json` no
+longer defines any cron** — both scheduled jobs are external now, which
+removes the Hobby 2-cron limit entirely. Note Vercel's own cron never sent
+that header, so in production the guard was either unset or silently 403ing.
 - `GET /api/pe` returns `{ data: [...], last_successful_fetch, last_attempt_status }`
 - `GET /api/pe?symbol=XXX` returns the single row or 404
 - `POST /api/pe/refresh` makes ONE POST to the TradingView scanner via
@@ -729,6 +732,88 @@ endpoint READS them. Two independent spellings would mean zero hits forever and
 a permanent, silent "not enough data".
 `tests/test_fixes.py::test_regime_reader_and_batch_writer_share_one_cache_key`
 pins it.
+
+### GET /api/dashboard — the whole grid, from one query
+
+**The dashboard no longer computes anything on demand.** It reads the
+pre-scored snapshot and blends it with the caller's weights: one Postgres
+round trip, no upstream fetch, no deadline, the whole universe or nothing.
+
+Measured live: **166 rows, 82 with a score, 9.8 KB gzipped** (63 KB raw),
+query 358 ms from a laptop and 0.0 ms to blend all 166.
+
+**What it replaced, and why tuning could never have fixed it.** Each card
+needed a live 400-bar pull through a client wrapping every call in
+`@retry(tries=20)`; the feed serves 82 of 166 symbols at ~1.4 s and refuses the
+other 84 at ~6 s each. Twenty-four cards do not fit a serverless request, so
+`page.tsx` fanned the work out at `DASHBOARD_FETCH_CHUNK_SIZE = 2` — **twelve
+simultaneous requests**, which Vercel answered from twelve separate containers.
+Twelve cold starts, twelve duplicate EGX30 benchmark fetches, twelve private
+module-level caches none of which the next request could reuse. Whether a card
+painted came down to which container answered and whether it was warm. That is
+the whole of "sometimes it loads, sometimes it doesn't."
+
+Three defects compounded it, all now fixed:
+
+- **`_cache_on_done` cached successes only**, so each of the 84 refused symbols
+  re-paid its ~6 s refusal on every load, forever. Failures now cache under
+  `ERROR_CACHE_TTL_SECONDS` (120 s) — short, because a refusal is far more
+  perishable than a close.
+- **A card that missed twice stayed blank permanently.** The fetch effect's
+  deps omitted the data maps, so a failed chunk never re-triggered it, and
+  `retriedRef` allowed exactly one retry then blocked for ever. Now bounded by
+  `COMPOSITE_MAX_ATTEMPTS`, and every request carries an `AbortController`
+  timeout — an unsettled request used to pin its symbols in the in-flight set
+  for good.
+- **`--` meant three things at once** — loading, refused, and never-existed.
+  `StockCard` now has five distinct states (`loading` / `live` / `stale` /
+  `unavailable` / `failed`).
+
+### THE EIGHT CATEGORY SCORES ARE STORED, NOT THE COMPOSITE
+
+This is what keeps *One Score Per Stock* true rather than trading it away for
+speed. Weighting, renormalisation and macro modulation are a pure function of
+the eight category scores, the caller's weights and today's regime. That
+function is **`composite.blend_categories`**, and both `compute_composite` and
+the snapshot reader call it — so a card shows this user's sliders applied to
+the same inputs the detail page uses, and the two cannot disagree.
+
+`composite.score_categories` is the other half of the split: it takes
+**neither weights nor macro**, which is what makes a nightly job able to serve
+every user their own number.
+`tests/test_dashboard_snapshot.py::test_snapshot_blend_matches_live_scoring_exactly`
+asserts exact equality across every preset, a hand-set slider arrangement and
+all four macro regimes — exact, not approximate, because a tolerance there
+would be an admission that two implementations exist. Verified live on ACGC:
+69.2 beginner_safe, 67.5 balanced, 74.5 trend_follower, 58.9 reversal_hunter,
+71.0 income_defensive, 66.3 under a bearish macro.
+
+Storing a blended number instead would freeze one weight set into the card and
+reintroduce the divergence measured once at **66 "Buy" on the card against 45
+"Hold" on the detail page**.
+
+**Presentation rules:**
+- `available: false` (from `consecutive_failures >= FAILURE_DEMOTION_THRESHOLD`)
+  moves a stock into a collapsed **"No feed data (N)"** section rather than
+  hiding it. They are real listings, and the count line stays truthful:
+  *"82 stocks · 84 without a price feed"*. Membership is a counter, not a
+  blocklist, so a symbol that starts working returns to the grid on its own.
+- `oldest_measurement` is the STALEST row, not the newest — same convention as
+  `/api/risk`. A grid that reported its freshest row would overstate its own
+  currency every time.
+- The snapshot is written after the close, so during trading hours its price is
+  a previous close and the card says **"as of 2 Sep"**. It then upgrades the
+  VISIBLE page to live figures in the background at
+  `COMPOSITE_BATCH_CONCURRENCY = 2` — bounded so the requests land on one warm
+  container instead of a dozen cold ones. **A card that fails to upgrade keeps
+  its snapshot value and can never fall back to `--`.**
+- **Sorting by score exists only because of this.** While cards were fetched a
+  page at a time, off-screen stocks had no score, so the control was
+  structurally impossible.
+
+**It also warms the market-regime card for free.** `read_cached_scores` falls
+back to the snapshot when the in-memory cache misses, which per this document
+is most of the time now the app is closed and has no anonymous traffic.
 
 ### GET /api/risk — the per-stock risk grade
 
