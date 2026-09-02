@@ -350,3 +350,77 @@ def test_the_endpoint_records_every_attempt():
             "unmeasurable symbol would stay maximally stale and starve the "
             "universe under stalest-first selection"
         )
+
+
+# ---------------------------------------------------------------------------
+# Feed refusals
+#
+# 84 of the 166 symbols in the ticker file have NEVER returned data from
+# tvDatafeed, and the failures are PERSISTENT — the identical set fails on every
+# pass. Each refusal costs ~6s against a 15s budget, so without demotion half
+# the budget goes to symbols that will never work and the healthy half never
+# finishes. This is what timed the production cron out.
+# ---------------------------------------------------------------------------
+
+from app.routers.cron import FAILURE_DEMOTION_THRESHOLD  # noqa: E402
+
+
+def test_persistently_refused_symbols_stop_eating_the_budget():
+    universe = [f"S{i}" for i in range(6)]
+    measured = {s: "2026-09-01T00:00:00" for s in universe}
+    failures = {"S0": FAILURE_DEMOTION_THRESHOLD, "S1": FAILURE_DEMOTION_THRESHOLD}
+
+    picked = select_stalest(universe, measured, 4, failures)
+    assert "S0" not in picked and "S1" not in picked, (
+        "symbols the feed keeps refusing are still being picked ahead of "
+        "healthy ones — this is what timed the cron out in production"
+    )
+
+
+def test_refused_symbols_are_demoted_not_excluded():
+    """
+    A blocklist rots. A symbol that starts working must be able to come back,
+    so the ordering still reaches it once everything healthy is fresh.
+    """
+    universe = [f"S{i}" for i in range(4)]
+    measured = {s: "2026-09-01T00:00:00" for s in universe}
+    failures = {"S0": 99}
+    assert "S0" in select_stalest(universe, measured, 4, failures)
+
+
+def test_a_symbol_below_the_threshold_is_not_demoted():
+    """One bad night is not a dead symbol."""
+    universe = ["A", "B"]
+    measured = {"A": "2020-01-01", "B": "2026-09-01"}
+    failures = {"A": FAILURE_DEMOTION_THRESHOLD - 1}
+    assert select_stalest(universe, measured, 1, failures) == ["A"]
+
+
+def test_selection_without_failure_data_is_unchanged():
+    """The argument is optional, so nothing that omits it changes behaviour."""
+    universe = ["A", "B", "C"]
+    measured = {"A": "2026-01-01", "B": "2020-01-01"}
+    assert select_stalest(universe, measured, 2) == \
+        select_stalest(universe, measured, 2, {})
+
+
+def test_the_handler_bounds_its_own_runtime():
+    """
+    The cron must return inside the scheduler's timeout no matter how slow the
+    feed is. Stopping early is safe because whatever went unmeasured is still
+    the stalest thing in the table and is picked up first next call.
+    """
+    import inspect
+
+    from app.routers import cron as cron_mod
+
+    src = inspect.getsource(cron_mod.risk_snapshot)
+    assert "DEADLINE_SECONDS" in src, "the wall-clock deadline was removed"
+    assert cron_mod.DEADLINE_SECONDS <= 25, (
+        "the deadline no longer leaves margin inside Vercel's 30s limit"
+    )
+    assert cron_mod.DEFAULT_CHUNK * 6 > cron_mod.DEADLINE_SECONDS, (
+        "chunk and deadline are inconsistent: at ~6s per refused symbol this "
+        "chunk cannot finish, so the deadline is doing the work and the chunk "
+        "size is misleading"
+    )

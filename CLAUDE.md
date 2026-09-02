@@ -791,6 +791,33 @@ Design rules, all load-bearing:
   an Egyptian ISIN is 12 chars, while **EGSA is a real 4-char EGX ticker** a
   prefix rule silently deletes.
 
+- **HALF THE UNIVERSE IS UNFETCHABLE, and that is what timed the cron out.**
+  Measured: **84 of the 166** symbols in `data/egx_tickers.json` have NEVER
+  returned data from tvDatafeed, confirmed independently by the disk cache (269
+  of 373 pickles have data; the rest are cached `None`). The failures are
+  **PERSISTENT, not transient** — the identical set fails on every pass, and
+  pacing does not help (5/10 with no pause versus 4/10 with a 2-second pause).
+
+  A successful fetch takes ~3.5s; a refusal takes ~6s, because the vendored
+  client wraps every call in `@retry(Exception, tries=20, delay=0.5)` around
+  `get_hist(timeout=-1)`. Twenty symbols took 67 seconds, so the first
+  production runs returned 200 while the scheduler had already given up.
+
+  Two fixes, both load-bearing:
+  - **A wall-clock `DEADLINE_SECONDS` (15s)**, mirroring `BATCH_DEADLINE_SECONDS`
+    in the batch scorer. The handler stops and returns what it has. Stopping
+    early is safe *because* selection is stalest-first: whatever went unmeasured
+    is still the stalest thing in the table and is picked up first next call.
+    This is the case that design was chosen for.
+  - **`consecutive_failures` on `risk_snapshot`**, incremented on refusal and
+    reset to 0 on success. At `FAILURE_DEMOTION_THRESHOLD` (3) a symbol is
+    demoted behind everything healthy. **Demoted, not blocklisted** — a static
+    list rots, and a symbol that starts working un-demotes itself on its first
+    good fetch. `demoted_symbols` is reported so a growing number is visible.
+
+  `DEFAULT_CHUNK` is **4**, not 20: four symbols is what reliably fits the
+  deadline even when all four are refused.
+
 `select_stalest()`, `plan_chunk()` and `is_isin()` are pure, so the selection
 logic a scheduler depends on is testable without Postgres — tests/ has no DB
 fixture by design.

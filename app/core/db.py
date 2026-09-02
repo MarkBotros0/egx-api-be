@@ -423,6 +423,13 @@ def init_db(db: _DB) -> None:
     for column, coltype in (
         ("above_sma200", "BOOLEAN"),
         ("rsi_14", "DOUBLE PRECISION"),
+        # How many times in a row the feed has refused this symbol. 84 of the
+        # 166 symbols in data/egx_tickers.json have NEVER returned data from
+        # tvDatafeed, and each refusal costs ~6 seconds, so without this the
+        # snapshot spends half its budget on symbols that will never work.
+        # Tracked rather than blocklisted: a static list rots, and a symbol that
+        # starts working resets itself to 0 on the first success.
+        ("consecutive_failures", "INTEGER NOT NULL DEFAULT 0"),
     ):
         db.execute(
             f"ALTER TABLE risk_snapshot ADD COLUMN IF NOT EXISTS {column} {coltype}"
