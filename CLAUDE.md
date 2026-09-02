@@ -1075,6 +1075,30 @@ even 2. It ships as context with the same framing as the regime card. The one
 notable detail is the SIGN: more stocks oversold predicts WORSE forward returns,
 not a contrarian bounce.
 
+**It renders as `BreadthStrip`, INSIDE `MarketRegimeCard`** — not as a card of
+its own. Breadth and the score average answer the same question from two
+sources, and two competing market cards on one screen invite picking whichever
+agrees with you. Nesting also makes the real relationship legible: breadth is
+what stays fresh when the score cache goes cold, which is most of the time now
+the app is closed. (It was computed, returned by the API, and rendered NOWHERE
+from the day it shipped until 2026-09-02.)
+
+**Two colour rules, and they are the whole design:**
+
+- `pct_above_sma200` is a genuine direction, so `gain`/`loss` applies — but only
+  outside a **neutral 45–55 band**. At 50% the market is evenly split, and
+  painting that green (or 49.9% red) claims a direction the reading does not
+  have. Same refusal the regime card makes for its top two bands.
+- **`pct_oversold` must NEVER be coloured as an opportunity.** The measured sign
+  is counterintuitive, and a green "22% oversold" would teach the exact opposite
+  of what was measured. It renders in neutral text with the sign stated in
+  words: *"periods with more oversold shares were followed by weaker returns,
+  not a bounce"*, followed by rho, t and "still too weak to act on".
+
+Below `MIN_SYMBOLS_FOR_BREADTH` (15) the strip says what is missing and that the
+nightly job fills it in, rather than showing a percentage computed off nine
+stocks. That is the state on screen today — 12 tradeable symbols measured.
+
 ### GET /api/historical, GET /api/compare
 Multi-symbol historical data for comparison page.
 
