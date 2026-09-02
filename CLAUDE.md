@@ -416,6 +416,31 @@ lengths cannot honestly be averaged. `total_realized_pnl_pct` is cost-weighted.
 Trades held under 30 days report no annualized figure at all
 (`MIN_DAYS_FOR_ANNUALIZATION` in `core/returns.py`).
 
+**Each trade is graded against the rate that prevailed while IT ran**, not
+today's. `compute_sale_metrics` takes `rate_steps` from
+`macro_series.get_risk_free_steps` and `returns.annualized_cash_rate_pct`
+compounds that step function across the holding window, annualizing back out —
+so a flat rate returns itself exactly, and every other case is a deviation from
+that anchor. The hurdle applied is returned as **`t_bill_hurdle_pct`**, because
+a card cannot explain a verdict it cannot see.
+
+**One scalar was wrong in BOTH directions, which is what made it more than
+cosmetic.** The CBE has ranged 8.25%–27.25% over the period the app covers.
+Measured against the real EGINTR series:
+
+| trade | true hurdle | verdict | flat 19% said |
+|---|---|---|---|
+| +25% held through 2024 | **26.07%** | lost to cash | won |
+| +18% held through 2019 | **14.69%** | beat cash | lost |
+
+So `beat_t_bill_count` was era-dependent noise, not a consistent bias a reader
+could mentally correct for. `rate_steps` is OPTIONAL and the scalar remains the
+fallback, so a window the history does not reach degrades to the old behaviour
+rather than failing — realized gains must paint even when everything else is
+down. Reads happen ONCE per request, not once per trade;
+`tests/test_dated_risk_free.py` has AST guards for both that and for the router
+continuing to pass `rate_steps` at all.
+
 `GET /api/sales` now also returns `dividends`, and `summary` is built by
 `summarize_realized` (which replaced `summarize_sales`) — it owns both
 ledgers so the combined headline is computed once, in tested Python, rather
@@ -920,6 +945,19 @@ Current values ride the nightly `/api/pe/refresh` slot as one POST. History is
 **offline** (`scripts/backfill_macro.py`) because 5,000 FX bars do not fit in 30
 seconds and only need fetching once. **Seeded and verified 2026-09-02: 6,604
 rows**, all seven series complete, EGUR reaching back to 1993-06.
+
+**Who reads it.** `get_risk_free_steps` serves the whole EGINTR step function to
+the sales ledger and to `scripts/backtest.py`; see *GET /api/sales* and *The
+backtest's Risk-Adjusted verdict*. It filters on `observed_period` rather than
+`released_at` deliberately — scoring an outcome that already happened has no
+look-ahead to defend against — while the backtest, which simulates a DECISION at
+a past date, bounds its own window instead. EGINTR carries a zero publication
+lag either way, so for this series the two columns agree.
+
+**A dated series is worth nothing until something reads it.** For a day after
+the backfill landed, `get_risk_free_at`, `get_macro_at` and `get_fx_at` had
+**zero callers** — 6,604 rows of correct history sitting beside code that still
+used one scalar. `get_fx_at` and `get_macro_at` still have none.
 
 **Write in BATCHES — `upsert_many`, not `upsert` in a loop.** Three attempts at
 the FX series, two of which lost data: one statement per row exited 0 having
