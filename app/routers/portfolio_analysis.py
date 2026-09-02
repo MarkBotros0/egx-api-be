@@ -604,7 +604,15 @@ def _analyze(holdings, user_id: str = None):
                 # High-confidence buy-zones are the rare confluence cue we
                 # want to surface aggressively; low-confidence zones are
                 # hints, not calls to action.
-                sev = "opportunity"
+                #
+                # This line used to read `sev = "opportunity"` unconditionally,
+                # which contradicted the comment directly above it. A `low`
+                # zone is the LEFTOVER bucket — nothing disqualified it and
+                # nothing confirmed it, typically an untested support with
+                # unremarkable RSI — and it was being rendered at the loudest
+                # non-alert tier the panel has. The exit side two branches down
+                # had always graded correctly; only entry didn't.
+                sev = "opportunity" if conf in ("high", "medium") else "info"
                 prefix = {"high": "HIGH-CONFIDENCE ", "medium": "", "low": "Possible "}[conf]
                 msg = (
                     f"{prefix}entry zone on {symbol}: buy band "

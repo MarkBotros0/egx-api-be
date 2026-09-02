@@ -1864,3 +1864,53 @@ def test_omitting_the_calendar_leaves_behaviour_exactly_as_it_was():
     assert without["thin"] is False
     assert set(without) == {"avg_volume", "classification", "thin",
                             "index_membership", "dead_sessions", "traded_share"}
+
+
+# ---------------------------------------------------------------------------
+# Entry-zone confidence must reach the UI as a severity, not a flat shout
+# ---------------------------------------------------------------------------
+
+def test_low_confidence_entry_zone_is_not_an_opportunity():
+    """
+    A `low` entry zone is a hint, and the code must say so in its severity.
+
+    `low` is the LEFTOVER bucket in levels._entry_confidence: price is within
+    5% of a support and momentum is not overbought, but the support is untested
+    and RSI is unremarkable — nothing disqualified the zone and nothing
+    confirmed it. Neither of those is a reason to buy; they are the absence of
+    two reasons not to.
+
+    This shipped as `sev = "opportunity"` unconditionally, directly beneath a
+    comment reading "low-confidence zones are hints, not calls to action" — so
+    the panel rendered a bare hint at the loudest non-alert tier it has. The
+    EXIT branch had always graded correctly, which is what made the entry
+    branch a slip rather than a policy.
+    """
+    import ast
+    import os as _os
+
+    source = open(
+        _os.path.join(_os.path.dirname(__file__), "..", "app", "routers",
+                     "portfolio_analysis.py"),
+        encoding="utf-8",
+    ).read()
+
+    assert 'sev = "opportunity" if conf in ("high", "medium") else "info"' in source, (
+        "the entry-zone severity is no longer graded by confidence — a "
+        "low-confidence zone is being surfaced as an opportunity again"
+    )
+
+    # And no bare unconditional assignment may come back anywhere in the file.
+    tree = ast.parse(source)
+    bare = [
+        n.lineno
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        and any(getattr(t, "id", None) == "sev" for t in n.targets)
+        and isinstance(n.value, ast.Constant)
+        and n.value.value == "opportunity"
+    ]
+    assert not bare, (
+        f"`sev = \"opportunity\"` assigned unconditionally at line(s) {bare} — "
+        "grade it on confidence like the exit branch does"
+    )
