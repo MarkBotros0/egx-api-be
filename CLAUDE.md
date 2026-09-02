@@ -1258,6 +1258,50 @@ morning's reading rather than "no data" when the score cache is cold.
 `init_db`. There is no migration framework — every statement there is
 idempotent, so new columns land on the next cold start of any process.
 
+### Fundamental factors: TESTED, and none of them ship
+
+`scripts/factor_backtest.py` is the first honest test of a fundamental factor
+this project could run, because `fundamentals_annual` finally supplies dated
+figures. **The answer was no, and that is the result — do not re-propose these
+without new data.**
+
+Two gates ran first, and both had to pass before any number below counted:
+a **placebo** (shuffled factor) at IC −0.0037, t=−0.39, and a **positive
+control** — low volatility, already known to score here — recovering
+IC +0.0646, t=3.54. A harness that cannot find a signal it has already found
+by another route makes a null result uninformative.
+
+Panel: 13,087 rows, 193 symbols, 148 dates, median 76 names/date, liquid cut.
+
+| factor | 21d IC | t | verdict |
+|---|---|---|---|
+| *control: low volatility* | *+0.0646* | *3.54* | *(control)* |
+| earnings yield (E/P) | +0.0419 | **3.45** | passes raw — then see below |
+| gross profitability (GP/A) | +0.0174 | 1.12 | no, and SIGN FLIPS across halves |
+| asset growth | +0.0080 | 0.66 | no, and SIGN FLIPS |
+| payout yield (DPS/P) | +0.0252 | 1.75 | no |
+
+**Earnings yield cleared the bar and still does not ship, because it is not
+NEW.** Cheap EGX stocks are also calmer ones — within-date rank correlation with
+the control is **+0.228** — and residualising earnings yield on low volatility
+drops it from t=3.45 to **t=2.00**, below the pre-registered |t| > 3.0.
+Raw significance was real; INDEPENDENT significance was not. Payout yield is
+worse: residualised it goes NEGATIVE (−0.0150), so it was a low-vol proxy
+outright.
+
+**The orthogonality test is why an app does not end up shipping the same number
+twice.** Any new factor must survive being residualised on what is already
+ranked on — today, the Risk Grade's volatility percentile.
+
+**Only the 21-day column is trustworthy for significance.** Rebalance dates sit
+~22 trading days apart, so 63d and 126d forward windows overlap 3x and 6x; their
+t-stats (4.94 and 5.55 for earnings yield) are inflated and are reported for
+shape only. This is the same overlap error that produced the +0.318 regime claim.
+
+This matches the strongest external prior: Zaremba's frontier study (>4,500
+stocks, 22 countries) found value and momentum but **no consistent profitability
+or investment premia** — which is exactly the pattern above.
+
 ### fundamentals_annual — twenty years, from a call we already make
 
 ```sql
