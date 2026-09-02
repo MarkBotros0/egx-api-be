@@ -9,24 +9,49 @@ per-stock signal: a reading of how broadly healthy the market looks right now.
 WHY IT EXISTS WHEN THE PER-STOCK SCORE DOES NOT PREDICT
 -------------------------------------------------------
 The walk-forward backtest (scripts/backtest.py) found the composite cannot rank
-one stock above another — cross-sectional IC ~0. But the same panel showed the
-market-wide AVERAGE of those scores does carry information about the market
-itself. Cross-sectional ranking and time-series level are different questions,
-and the score answers the second one better than the first.
+one stock above another — cross-sectional IC ~0, and slightly negative. But the
+same panel showed the market-wide AVERAGE of those scores carries SOME
+information about the market itself. Cross-sectional ranking and time-series
+level are different questions, and the score answers the second one less badly.
 
-Measured on 221 monthly readings, 2007-2026, against EGX30 forward returns:
+    Measured on 221 monthly readings, 2007-2026, EGX30+EGX70 universe,
+    against EGX30's next 63 trading days:
 
-    horizon   sampling            rho     t     verdict
-    21 days   every date        +0.084  +1.24  not significant
-    63 days   every 3rd date    +0.318  +2.84  significant
-    126 days  every 6th date    +0.115  +0.69  not significant
+        overlapping rho          +0.170
+        naive t                   +2.55   <- WRONG, see below
+        Newey-West t              +1.86   <- the honest one; NOT significant
 
-The 63-day row uses NON-OVERLAPPING windows. That matters: a time-series
-correlation on overlapping windows shares data between consecutive
-observations and inflates significance. De-overlapping here made the
-correlation stronger (+0.170 -> +0.318), so it is not an overlap artifact —
-but it also cut the sample to 74 independent observations, which is why this
-is presented as an association and not a prediction.
+CORRECTION, 2026-09-02 — READ THIS BEFORE QUOTING A NUMBER FROM HERE
+--------------------------------------------------------------------
+This docstring used to claim "+0.318, t=2.84 across 74 NON-OVERLAPPING
+periods", and defended it with: "de-overlapping made the correlation stronger
+(+0.170 -> +0.318), so it is not an overlap artifact."
+
+That reasoning was wrong. At a 63-day horizon on a 21-day rebalance grid there
+are exactly THREE valid de-overlapped samplings, and they do not agree:
+
+        offset 0:  rho=+0.318   t=+2.84   n=74     <- the number that shipped
+        offset 1:  rho=+0.180   t=+1.55   n=74
+        offset 2:  rho=+0.004   t=+0.03   n=73
+
+De-overlapping did not VALIDATE the result, it RESAMPLED it. The best of three
+draws was then read as a robustness check. Starting the same grid one month
+later would have produced a card claiming nothing at all.
+
+The correct treatment keeps all 221 observations and corrects the standard
+error for the autocorrelation the overlap induces — Newey-West with lag equal
+to the overlap depth. That gives **t = 1.86, which does not clear 1.96**, and
+that is before any correction for having tested three horizons (21/63/126) and
+reported the best one.
+
+So: the association is real in sign and consistent with several independent
+market-breadth measures that land in the same +0.15 to +0.29 range, but it is
+WEAK and NOT statistically significant on its own. This card is CONTEXT, not a
+forecast. Do not restore a single-phase statistic, and do not describe this as
+predictive.
+
+`scripts/calibrate.py` regenerates every number in this file and prints all
+three phases side by side, so the cherry-pick cannot silently return.
 
 WHAT THE BANDS ACTUALLY SAY
 ---------------------------
@@ -60,8 +85,20 @@ REGIME_MIXED_MAX = 51.5
 MIN_SYMBOLS_FOR_REGIME = 15
 
 # Horizon the association was measured at. Do not relabel this: 21 and 126 days
-# were both tested and neither was significant.
+# were both tested and neither was significant — and on the honest statistic
+# neither is 63, so this is the least-weak horizon rather than a good one.
 REGIME_HORIZON_DAYS = 63
+
+# The association behind the bands, stated the way it survives scrutiny.
+# Regenerate with `python -m scripts.calibrate`; it prints all three
+# de-overlapped phases so a single lucky one cannot be quoted again.
+REGIME_ASSOCIATION_RHO = 0.17          # overlapping, all 221 readings
+REGIME_ASSOCIATION_T = 1.86            # Newey-West, lag 3 (the overlap depth)
+REGIME_ASSOCIATION_N = 221
+REGIME_ASSOCIATION_SIGNIFICANT = False  # 1.86 does not clear 1.96
+# What the three de-overlapped samplings actually give. Kept in the payload so
+# the UI can never present one of them as "the" number.
+REGIME_PHASE_RHOS = (0.318, 0.180, 0.004)
 
 _BANDS = {
     "weak": {
@@ -140,8 +177,13 @@ def classify_regime(mean_score: Optional[float], n_symbols: int = 0) -> dict:
         "hist_positive_rate": band["hist_positive_rate"],
         "observations": band["observations"],
         "horizon_days": REGIME_HORIZON_DAYS,
-        # Surfaced so the UI can state the strength of the association rather
-        # than implying certainty.
-        "association_rho": 0.318,
-        "association_n": 74,
+        # Surfaced so the UI states the strength of the association rather than
+        # implying certainty. `association_significant` is False and the UI must
+        # honour it — this card is context, not a forecast. See the correction
+        # note in this module's docstring for why the old 0.318 was wrong.
+        "association_rho": REGIME_ASSOCIATION_RHO,
+        "association_t": REGIME_ASSOCIATION_T,
+        "association_n": REGIME_ASSOCIATION_N,
+        "association_significant": REGIME_ASSOCIATION_SIGNIFICANT,
+        "association_phase_rhos": list(REGIME_PHASE_RHOS),
     }

@@ -26,7 +26,10 @@ An educational stock market analysis and portfolio tracker for the **Egyptian Ex
 
   It is vendored because its upstream repo (`github.com/egxlytics/egxpy`) was deleted or made private — GitHub returns "Repository not found" even to an authenticated account that previously installed from it, and there is no PyPI release. Vercel builds failed at `uv lock` with `could not read Username`; deploys had been surviving on a warm build cache holding an already-cloned copy. There is no upstream to pull from, so **treat `app/vendor/egxpy` as our code** — edit it directly and note any deviation from v1.1.0 in its `__init__.py`. It is a thin wrapper over `tvDatafeed`, which is still public and installs from git normally. MIT licensed, © 2025 EGXLytics, LICENSE retained alongside the source.
 
-Environment variables: `DATABASE_URL` (Neon connection string, includes `sslmode=require`).
+Environment variables: `DATABASE_URL` (Neon connection string, includes
+`sslmode=require`), `AUTH_SECRET`, `AUTH_USERS`, `AUTH_ADMINS`,
+`PE_REFRESH_SECRET`, and **`CRON_SECRET`** (guards
+`POST /api/cron/risk_snapshot`; scheduling is external, see that endpoint).
 
 ## Directory Layout
 
@@ -47,6 +50,8 @@ egx-api-be/                     # Python FastAPI backend
       tradingview.py            # Shared TradingView scanner client (URL/headers), also used by tickers.py
       index_membership.py       # Static EGX30/70/100/NILEX lookup — no network, for the scoring hot path
       regime.py                 # Market-condition reading: bands + the evidence behind them
+      forecast.py               # Calibrated outcome ranges (EGX-fitted quantiles, no drift)
+      risk_grade.py             # EWMA vol, tradeability gate, cross-sectional risk grade
       constants.py              # Shared constants (thresholds, lookbacks)
       json_encoding.py          # Float/NaN JSON safety helpers
       holdings.py               # The one spelling of the open-holdings query
@@ -61,6 +66,8 @@ egx-api-be/                     # Python FastAPI backend
       portfolio_analysis.py     # GET/POST /api/portfolio_analysis
       pe.py                     # GET /api/pe ; POST /api/pe/refresh (cron-triggered)
       market_regime.py          # GET /api/market_regime (market-wide condition reading)
+      risk.py                   # GET /api/risk (per-stock risk grade)
+      cron.py                   # POST /api/cron/risk_snapshot (chunked; external scheduler)
       ohlcv.py                  # GET /api/ohlcv
       compare.py                # GET /api/compare
       historical.py             # GET /api/historical
@@ -257,7 +264,7 @@ Response shape (see `AnalysisResponse` in types.ts):
 { symbol, interval, bars, ohlcv, indicators, stats, beta,
   support_resistance, fibonacci, crossovers,
   composite_score, divergences, volume_price, multi_timeframe, bb_squeeze,
-  key_levels, entry_exit }
+  key_levels, entry_exit, forecast }
 ```
 
 - **`key_levels`** — `{current_price, nearest_support, nearest_resistance, room_to_support_pct, room_to_resistance_pct, clear_air_above, clear_air_below}`. Nearest levels are `{price, distance_pct (signed), strength, bars_ago}` or null. Computed by `levels.compute_key_levels` from `support_resistance`; pass `high`/`low` so `bars_ago` is populated. Consumed by `KeyLevelsCard`.
@@ -268,6 +275,57 @@ Response shape (see `AnalysisResponse` in types.ts):
 
   **Known limit:** pivot detection needs ~20 bars either side, so **levels formed in the last month cannot be detected**. The Key Levels tooltip says so.
 - **`entry_exit`** — `{entry_zone, exit_zone}`. Each zone: `{active, confidence, price_range, suggested_stop_loss (entry only), reasons}`. Confidence is `low`/`medium`/`high` or null. Entry zone active when price ≤5% above support AND RSI/Stoch not overbought. Exit zone active when price ≤3% below resistance AND RSI/Stoch overbought. Computed by `levels.compute_entry_exit`. Consumed by `EntryExitCard`.
+
+- **`forecast`** — `{expected_move, outcome_band}`. See *Forecast calibration*
+  below. Both are drift-free RANGES; neither carries a direction.
+
+### Forecast calibration — the app used to advertise coverage it did not deliver
+
+`core/forecast.py` states ranges, and until 2026-09-02 it stated them wrongly.
+Measured over **34,721 point-in-time observations** from `scripts/.cache`
+(regenerate with `python -m scripts.calibrate`):
+
+| surface | advertised | actually delivered |
+|---|---|---|
+| ±1σ daily band | 68% | **79.0%** |
+| ±1σ weekly band | 68% | 76.3% |
+| ±1σ monthly band | 68% | 73.0% |
+| Monte Carlo p5–p95 cone | 90% | **85.8%** |
+
+**The two failures run in OPPOSITE directions, and that is the part that is easy
+to get wrong.** At daily scale EGX's distribution is THIN in the body — price
+limits and flat illiquid sessions pile mass near zero — so a ±1σ band is too
+WIDE for its claim. At 60-day scale, compounding plus volatility clustering
+fattens the aggregate, so the Gaussian cone is too NARROW. A blanket "EGX has fat
+tails, widen everything" fix makes the daily band worse.
+
+**Two fixes were tested and FAILED. Do not retry them:** an iid bootstrap of
+daily returns gives 84.0% (no better than Gaussian — resampling destroys the
+volatility clustering that creates the fat aggregate tail), and the empirical
+distribution of trailing overlapping 60-day returns gives 78.9% (worse).
+
+What works is EGX's own fitted |z| quantiles — at 60 days, **1.999 for 90%
+coverage, not the Gaussian 1.645**. Measured coverage then lands on nominal.
+**Fit with QUANTILES, never a standard deviation:** the z-distribution's mean is
+in the hundreds against a median near zero, because a few collapsed names
+dominate its moments.
+
+**`monte_carlo_forecast` is gone**, replaced by `outcome_band`:
+- It drew from `np.random.default_rng(None)`, so the p5/p95 prices on screen
+  changed on every 15-minute cache miss. The band is now closed-form and cannot
+  jitter.
+- Its median was `P0·exp(60·(mu − σ²/2))` — the trailing 400-day mean return
+  compounded forward — and `ForecastCard` rendered it to two decimals coloured
+  green when above spot. **That is a price target with a direction attached**,
+  the exact thing *Removed: Max Buy Price* exists to prevent. There is no median
+  series any more, deliberately.
+- `tests/test_forecast_presentation.py` fails if a directional colour, a
+  percentile median, recommendation language, or a hardcoded coverage figure
+  returns to the card. It strips comments before scanning, so the header comment
+  that documents the removal does not trip the guard.
+
+The portfolio-level Monte Carlo in `portfolio_analysis.py` is a DIFFERENT thing
+and stays — it simulates a whole portfolio and is genuinely a simulation.
 
 ### GET /api/settings?section=weights, PUT /api/settings?section=weights
 Composite score weights (stored as `weight_*` keys in the `settings` table). Handled in `app/routers/settings.py` — there is no separate `weights.py` (older docs called this `/api/weights`; it is not a real endpoint).
@@ -360,7 +418,8 @@ Both routes require a token. `?section=weights` reads and writes the CALLER'S
 own weights (see *Auth, roles and per-user settings*); the generic
 `{key, value}` form writes the global `settings` table and requires an **admin**,
 because everything left in there is shared — `currency`, `risk_free_rate` and
-the `pe_last_*` feed status. Pre-seeded: `currency=EGP`, `risk_free_rate=25`.
+the `pe_last_*` feed status. Pre-seeded: `currency=EGP`, `risk_free_rate=19` (the CBE overnight deposit
+rate as of 2026-08-20; it was a stale 25 until 2026-09-02 — see *Egypt context*).
 
 ### The app is CLOSED — read this before adding any route
 
@@ -533,12 +592,25 @@ supported.** Returns the average composite across the EGX30+EGX70 constituents,
 its band, and the historical record behind that band.
 
 The per-stock score cannot rank stocks (IC ≈ 0). The market-wide AVERAGE of
-those same scores does carry a measured association with the market itself —
-rank correlation **+0.318 with the EGX30's next 63 trading days, t=2.84 across
-74 NON-OVERLAPPING periods**. Overlapping windows were checked explicitly:
-de-overlapping made the correlation stronger (+0.170 → +0.318), so it is not an
-overlap artifact. 21-day and 126-day horizons were both tested and neither was
-significant — do not relabel the horizon.
+those same scores carries a WEAK association with the market itself — rank
+correlation **+0.17 with the EGX30's next 63 trading days, Newey-West t = 1.86
+across 221 overlapping readings**. That does not clear 1.96, so the card is
+CONTEXT, not a forecast.
+
+**CORRECTED 2026-09-02 — this used to claim +0.318, t=2.84, 74 non-overlapping
+periods.** It defended that with "de-overlapping made the correlation stronger
+(+0.170 → +0.318), so it is not an overlap artifact." At a 63-day horizon on a
+21-day rebalance grid there are exactly THREE valid de-overlapped samplings, and
+they give **+0.318, +0.180 and +0.004**. De-overlapping did not VALIDATE the
+number, it RESAMPLED it, and the best of three draws was read as a robustness
+check. Starting the same grid one month later would have produced a card
+claiming nothing.
+
+The honest statistic keeps all 221 observations and corrects the standard error
+for the overlap (Newey-West, lag = overlap depth). Regenerate every number here
+with `python -m scripts.calibrate`, which prints all three phases side by side
+so the cherry-pick cannot silently return. 21-day and 126-day horizons were also
+tested and neither was significant — do not relabel the horizon.
 
 Bands (terciles of 221 readings, 2007–2026), against the next three months of
 EGX30:
@@ -567,6 +639,118 @@ endpoint READS them. Two independent spellings would mean zero hits forever and
 a permanent, silent "not enough data".
 `tests/test_fixes.py::test_regime_reader_and_batch_writer_share_one_cache_key`
 pins it.
+
+### GET /api/risk — the per-stock risk grade
+
+**The strongest measured surface in the app, and the only per-stock ranking the
+evidence supports.** Reads the `risk_snapshot` table and ranks it
+cross-sectionally on the way out.
+
+Measured on the cached panel (`python -m scripts.calibrate`), liquid universe,
+16,220 observations / 202 symbols / 221 monthly dates:
+
+| past 63d volatility predicts | IC | t | non-overlapping IC / t |
+|---|---|---|---|
+| next 126d realized volatility | **+0.5631** | +55.8 | +0.5791 / **+24.0** |
+| next 126d max drawdown | **+0.4338** | +40.5 | +0.4707 / **+16.7** |
+| *(composite score → return, for scale)* | *−0.029* | *−2.85* | — |
+
+That is ~20x any return signal found anywhere in this project and clears the
+pre-registered |t| > 3.0 bar on non-overlapping data eightfold. What each
+quintile went on to do (medians — EGX forward returns are heavily right-skewed
+and a mean describes a distribution nobody experiences):
+
+| quintile | future ann. vol | median max DD | p90 max DD |
+|---|---|---|---|
+| 1 Calm | 32.0% | 20.0% | 40.7% |
+| 2 Steady | 37.8% | 24.8% | 46.3% |
+| 3 Average | 42.4% | 27.6% | 49.3% |
+| 4 Jumpy | 45.2% | 29.9% | 53.0% |
+| 5 Wild | 51.2% | 34.2% | 59.4% |
+
+**This surface must never carry a return claim.** Low volatility does rank
+positively against forward returns (IC +0.084, t=4.97 at 21d), but the
+realisable long/short spread is only t=1.70, the mean by quintile is
+flat-to-inverted, and no historical market cap exists to neutralise a possible
+size effect. High-vol EGX names are lottery tickets: a few huge winners lift the
+MEAN while the MEDIAN is clearly worse. It answers "how much will this move and
+how deep a hole should I expect", never "will it go up".
+`tests/test_risk_grade.py::test_risk_grade_makes_no_return_claim` greps for it.
+
+**Ranking happens at READ time**, over the TRADEABLE subset only (>1M EGP/day
+turnover, traded on ≥80% of the last 60 sessions, price >0.5 EGP). An
+untradeable symbol is returned with its raw sigma and a **null band** rather
+than a rank it has not earned. `oldest_measurement` is reported, not the
+newest — a snapshot is only as current as its stalest row.
+
+**Note `measure()` reports two sigmas.** EWMA(0.94) forecasts better (QLIKE ~14%
+better than a 20-day trailing SD) and is surfaced, but the PERCENTILE is built
+on the trailing 63-day sigma the quintile table was fitted on. Swapping the
+ranking input without refitting would leave the historical mapping describing a
+different variable.
+
+### POST /api/cron/risk_snapshot — chunked, externally scheduled
+
+**Scheduling is external (cron-job.org), not `vercel.json`.** That removes the
+Hobby 2-cron/daily limit entirely. It does NOT remove the 30-second Vercel
+execution limit — measuring the whole universe was clocked at >400 s cold,
+because each symbol pulls 400 bars through a client that retries hard on socket
+timeouts.
+
+So each call measures a SLICE. **Omit `cursor` and the endpoint picks the
+STALEST symbols itself** — that is the production mode, because cron-job.org
+cannot read a response body and feed a cursor back:
+
+```
+POST /api/cron/risk_snapshot?limit=20
+Header: X-Cron-Secret: <CRON_SECRET>
+-> {processed, written, failed[], mode, stale_remaining, universe, measured_at}
+```
+
+One fixed URL on an interval and the universe converges. Nothing is stored,
+nothing can desynchronise, and a symbol that fails is retried on the very next
+call because it stays stale. Watch `stale_remaining`: it should fall to 0 within
+a pass and stay there. Passing `cursor` explicitly walks fixed slices instead —
+useful for a controlled manual sweep, and it stores no state either.
+
+Design rules, all load-bearing:
+- **Stalest-first replaced an auto-advancing cursor, deliberately.** A cursor
+  must advance past a chunk that FAILED, or one permanently broken symbol pins
+  it and starves everything behind it — which on a daily job means the failure
+  waits a full day. Staleness retries immediately and needs no state.
+- **EVERY attempt is recorded, including failures and unmeasurable symbols**
+  (null sigma, `tradeable=False`). This is the sharp edge of stalest-first: a
+  symbol with no row is maximally stale, so a failure that wrote nothing would
+  be re-picked on every call. The EGX has ~34 effectively dead names against a
+  20-symbol batch — measured in simulation, they filled every batch forever and
+  **not one live symbol was ever measured**. `tests/test_risk_grade.py` pins
+  both the convergence and the "no `continue` skips the upsert" rule.
+- **There is deliberately no "finalize" step.** Percentiles are computed at read
+  time, so a partly-refreshed table is coherent rather than half-ranked against
+  yesterday. This is what makes chunking safe.
+- **Never wipes**, matching `refresh_pe_data`. Each row carries its own
+  `measured_at` so the read path can report real freshness.
+- ISIN-coded rows are dropped, matched on **LENGTH not the "EGS" prefix**:
+  an Egyptian ISIN is 12 chars, while **EGSA is a real 4-char EGX ticker** a
+  prefix rule silently deletes.
+
+`select_stalest()`, `plan_chunk()` and `is_isin()` are pure, so the selection
+logic a scheduler depends on is testable without Postgres — tests/ has no DB
+fixture by design.
+
+**Cadence.** The data is DAILY bars, so a symbol's sigma only changes once per
+trading day; refreshing more often re-measures identical bars and hammers the
+feed for nothing. Run it after the EGX close (Sun–Thu, 14:30 Cairo). At
+`limit=20` the 166-symbol universe needs 9 calls, so *every 5 minutes within one
+hour, Sun–Thu, scheduled in Africa/Cairo* covers it with headroom — and because
+selection is staleness-driven, extra calls are harmless and missed ones simply
+catch up next run.
+
+**Auth:** in `PUBLIC_ENDPOINTS` (an external scheduler carries no user token),
+guarded by the `CRON_SECRET` env var exactly as `/api/pe/refresh` is guarded by
+`PE_REFRESH_SECRET`. `tests/test_auth_gate.py::test_every_public_cron_checks_a_shared_secret`
+walks each public cron's source and fails if one stops reading its env var —
+without that check the allowlist entry alone would open the route to anyone.
 
 ### GET /api/historical, GET /api/compare
 Multi-symbol historical data for comparison page.
@@ -623,7 +807,7 @@ PRESETS = {
 - `score_volatility(...)` — Bollinger Band position + squeeze detection
 - `score_divergence(...)` — regular ±15, hidden ±5, double-divergence bonus ±10, baseline 50
 - **`score_quality(multi_timeframe, trend_consistency, current_drawdown_pct, *, pe_ratio=None, dividend_yield=None, loss_making=None)`** — rewards smooth trends + aligned timeframes + being near the 52-week high (penalises whipsaws), plus the valuation bands below. **The fundamentals args are keyword-only** so a new one can't shift an existing positional argument.
-- **`score_risk_adjusted(annualized_return_pct, risk_free_rate_pct, vol_ann_pct, atr_pct_of_price, history_days)`** — compares per-stock return to the ~25% T-bill. **Min 120-day history gate**: returns `None` if insufficient data, and renormalization excludes the category
+- **`score_risk_adjusted(annualized_return_pct, risk_free_rate_pct, vol_ann_pct, atr_pct_of_price, history_days)`** — compares per-stock return to the ~19% policy rate. **Min 120-day history gate**: returns `None` if insufficient data, and renormalization excludes the category
 - **`score_relative_strength(rs_dict)`** — alpha vs EGX30 (leader/laggard classification over 30 days)
 
 **Orchestrator:**
@@ -707,7 +891,7 @@ Dividend yield is deliberately **NON-monotonic**: `0–2 → 0`, `2–4 → +4`,
 `4–8 → +8`, `8–15 → +4`, `≥15 → −8`. A yield above 15% is a special dividend or
 a collapsed price, not income quality.
 
-**Framing rule for every DY string:** with T-bills near 25%, *no* EGX yield is
+**Framing rule for every DY string:** with the policy rate near 19%, *no* EGX yield is
 competitive as income — even 8% loses. Reason strings must present a dividend as
 **evidence the company generates real cash**, never as income. `dividend_yield`
 of `0.0` means "pays nothing", which is normal for a growth company; it scores
@@ -761,7 +945,7 @@ Hardcoding the daily constants made the non-daily views quietly wrong:
 
 | Input | Bug when weekly bars hit daily constants |
 |-------|------------------------------------------|
-| `annualized_return` | treated 252 *weeks* as one year — a multi-year run reported as a single year's gain, then compared to the 25% T-bill |
+| `annualized_return` | treated 252 *weeks* as one year — a multi-year run reported as a single year's gain, then compared to the 19% policy rate |
 | annualized volatility | weekly σ × √252 instead of √52 — overstated 2.2× |
 | `current_drawdown_pct` | `tail(252)` = a ~5-year drawdown labelled 1-year |
 | `history_days` gate | 120 weekly bars (2.3 y) passed the same gate as 120 daily bars (6 mo) |
@@ -788,14 +972,14 @@ The Learn page's "How to Take a Decision" section and the in-app signals both fo
 
 1. **Check the macro.** What is the EGX30 trend? In bearish regimes, demand higher scores (≥ 70 instead of 60).
 2. **Read the composite BREAKDOWN, not the number.** The category reasons are checkable facts; the blended score is not predictive (see the signal-band note). A low score is **not** a sell signal — historically the lowest-scoring EGX stocks bounced about as often as the highest.
-3. **Check Risk-Adjusted.** Is annualized return comfortably above the ~25% T-bill? If not, be sceptical.
+3. **Check Risk-Adjusted.** Is annualized return comfortably above the ~19% policy rate? If not, be sceptical.
 4. **Check Relative Strength.** Is the stock a leader (outperforming EGX30) or a laggard (underperforming by >10%)?
 5. **Set the stop-loss BEFORE buying.** The house convention is **1.5× ATR below the nearest support** (`STOP_LOSS_ATR_MULTIPLIER` in `core/constants.py`) — anchored to support, not to your entry price, so the number is objective and computable before you buy. `levels.compute_entry_exit`, `entry_price.compute_max_buy_price` and the `atr_stop` signal all use that one constant. (The Portfolio add form no longer has a stop-loss field — see the Portfolio section.)
 6. **Size the position at 5–10% max** per stock (2–3% for thin-liquidity / NILEX names).
 
 ## Portfolio Risk Metrics (`egx-api-be/app/routers/portfolio_analysis.py`)
 
-- **Sharpe Ratio** — annualized, uses `risk_free_rate` from settings (default 25%)
+- **Sharpe Ratio** — annualized, uses `risk_free_rate` from settings (default 19%)
 - **Sortino Ratio** — downside-only variant
 - **Max Drawdown** — with peak/trough dates and current drawdown
 - **VaR 95% / CVaR 95%** — historical method
@@ -803,7 +987,20 @@ The Learn page's "How to Take a Decision" section and the in-app signals both fo
 - **Monte Carlo** — **vectorized numpy**: `np.random.normal(mu, sigma, (1000, 60))`. Never use Python loops for paths. Returns percentile bands (p5/p25/p50/p75/p95) per day.
 - **Avg Composite Score** — mean of per-holding composite scores
 
-**Egypt context:** T-bill rate is ~25% annualized. This is VERY high globally and makes Sharpe ratios lower than in other markets. Always mention this when explaining Sharpe values to the user.
+**Egypt context:** the CBE overnight deposit rate is **19.00%** (held 2026-08-20,
+after 825bp of cuts from April 2025). Still very high globally, so Sharpe ratios
+here look poor next to developed markets — always say so when explaining one.
+
+**It was hardcoded at 25% until 2026-09-02**, i.e. ~600bp stale. That one number
+is the Sharpe hurdle, the Sortino hurdle, the whole input to `score_risk_adjusted`
+(13% of the composite) and the bar realized trades are graded against via
+`beat_t_bill_count` — too high, and the app understates every Sharpe ratio and
+fails trades that genuinely beat cash. `init_db` upgrades rows still holding the
+stale 25 and ONLY those, so a deliberate admin value survives.
+
+Caveat to repeat wherever it matters: this is the POLICY rate, not a 91-day
+T-bill auction yield. There is no free machine-readable Egyptian T-bill series
+(cbe.org.eg rejects automated requests), so the bill rate is approximated.
 
 ## Signals / Advice System
 
@@ -963,6 +1160,15 @@ pe_data    (symbol PK, company_name, pe_ratio, dividend_yield, loss_making,
 
 ```sql
 market_regime (id, observed_at, mean_score, n_symbols, band)
+risk_snapshot (symbol PK, measured_at, sigma_63_ann_pct, sigma_ewma_ann_pct,
+               beta, turnover_egp, traded_share, last_price, tradeable)
+               -- Current-value read model, refreshed in CHUNKS by
+               -- POST /api/cron/risk_snapshot and ranked cross-sectionally
+               -- at READ time. No run to finalize and no cursor state that
+               -- can corrupt, so a half-finished refresh still yields sane
+               -- percentiles. measured_at is PER ROW, which is what lets the
+               -- read path report its stalest corner instead of passing a
+               -- partly-yesterday snapshot off as today's.
 ```
 Append-only log of market-condition readings, so the card can show this
 morning's reading rather than "no data" when the score cache is cold.
