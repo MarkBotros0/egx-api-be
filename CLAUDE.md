@@ -31,6 +31,24 @@ Environment variables: `DATABASE_URL` (Neon connection string, includes
 `PE_REFRESH_SECRET`, and **`CRON_SECRET`** (guards
 `POST /api/cron/risk_snapshot`; scheduling is external, see that endpoint).
 
+**Frontend environment variables** live in `egx-api-fe/.env`:
+`NEXT_PUBLIC_API_BASE_URL` (the backend's `/api` base) and **`FE_BASE_URL`** —
+the app's own public address, which `PasswordRevealDialog` pastes into the
+credentials block so a new user is handed somewhere to go along with who they
+are.
+
+`FE_BASE_URL` is read by a CLIENT component, and Next ships only `NEXT_PUBLIC_*`
+names to the browser by default. It is therefore listed in **`next.config.js`'s
+`env` map**, which inlines it at build time under its own name — that map is
+the only reason the variable can stay spelled `FE_BASE_URL` in `.env` and in the
+Vercel dashboard rather than being renamed `NEXT_PUBLIC_*`. It holds a public
+URL, not a secret. Verified inlined into the built admin chunk.
+
+Unset, the dialog falls back to `window.location.origin`, resolved in an effect
+so server and client markup match on first paint. **The link is never blank**,
+so set the variable only where the origin the admin happens to be browsing
+would be the wrong address to send.
+
 ## Directory Layout
 
 The repo is split into two top-level directories — **`egx-api-be/`** (Python backend) and **`egx-api-fe/`** (Next.js frontend). CLAUDE.md previously described a flat `api/` layout; that is obsolete.
@@ -1558,7 +1576,7 @@ Components in `src/app/components/`:
 **Admin (admin role only):**
 - `AdminUsersTable` — desktop table / mobile cards. Actions per user: reset password, disable/enable, delete. Hides the destructive actions on your own row (the backend guards them anyway).
 - `CreateUserModal` — full-screen on mobile, card on desktop. Leaving the password blank is the intended path; the backend generates one.
-- `PasswordRevealDialog` — shows a generated password ONCE and says plainly that it cannot be shown again. Used by both create and reset. **Copy puts the username AND password in one block** (`Username: x\nPassword: y`) because it gets pasted into a single message; copying the password alone left the admin retyping the username into the same chat. The on-screen block mirrors the copied text exactly, so what is sent is what was checked.
+- `PasswordRevealDialog` — shows a generated password ONCE and says plainly that it cannot be shown again. Used by both create and reset. **Copy puts the LINK, the username AND the password in one block** (`Link: …\nUsername: x\nPassword: y`) because it gets pasted into a single message; copying the password alone left the admin retyping the username into the same chat, and credentials with no address are a login the recipient cannot act on. The on-screen block mirrors the copied text exactly, so what is sent is what was checked. The link comes from **`FE_BASE_URL`** — see *Frontend environment variables*.
 - Page at `src/app/admin/page.tsx`, gated on `isAdmin` from `useAuth()`.
 
 **Learn page (`src/app/components/learn/`):**
