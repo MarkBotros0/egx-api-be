@@ -92,10 +92,17 @@ EGX_Z_CONE_60D = {
 
 # What the +/-1-sigma band this module draws ACTUALLY covers, per horizon.
 # These replace the flat "68%" the UI used to print.
+#
+# TWO TABLES, BECAUSE THERE ARE TWO ESTIMATORS AND A COVERAGE FIGURE BELONGS TO
+# THE ONE IT WAS FITTED ON. `expected_move` uses EWMA where it can and falls
+# back to a trailing window on short histories; quoting one table for both would
+# be the same class of error as the 68% it replaced.
 ONE_SIGMA_COVERAGE_PCT = {
-    "daily": 79.0,
-    "weekly": 76.3,
-    "monthly": 73.0,
+    # EWMA(0.97), fitted over 34,282 observations. The default path.
+    "ewma": {"daily": 78.6, "weekly": 75.5, "monthly": 71.8},
+    # 400-bar trailing sigma, fitted over 34,721 observations. Used when a
+    # symbol has too little history to seed the recursion.
+    "trailing": {"daily": 79.0, "weekly": 76.3, "monthly": 73.0},
 }
 
 # Bands the outcome cone returns, inner first. Two is enough to read a shape on
@@ -113,24 +120,59 @@ def expected_move(returns: pd.Series) -> Optional[dict]:
     """
     The 1-sigma band at daily / weekly / monthly scale, with its REAL coverage.
 
-    The percentages are unchanged from before; what changed is that each one now
-    carries the coverage it was measured to deliver on EGX rather than the 68%
-    Gaussian theory predicts. Callers must render `coverage_pct`, never a
-    hardcoded figure -- tests/test_forecast_presentation.py enforces that.
+    SIGMA COMES FROM EWMA(0.97), NOT A FLAT WINDOW — and that split is measured,
+    not assumed. `scripts/vol_backtest.py` over the full cached universe scores
+    one-step-ahead variance forecasts by QLIKE with a Diebold-Mariano test:
+
+        horizon   400-bar trailing   EWMA(0.97)
+          1 day        (incumbent)   wins, |t| > 3.0
+          5 days          -4.0911      -4.2186   (+3.1%)
+         22 days          -2.5848      -2.6510   (+2.6%)
+         60 days          -1.5543      -1.5574   (+0.2%, a tie)
+
+    So the SHORT horizons this function draws move to EWMA, and `outcome_band`'s
+    60-day cone deliberately does NOT — at that horizon the two are
+    indistinguishable, and EWMA is an IGARCH whose multi-step forecast is flat
+    with no mean reversion, which is the wrong shape for a long band. Refitting
+    the cone on EWMA measured WORSE (83.3% coverage against the trailing
+    window's 85.8%), which is the same finding from the other direction.
+
+    Note also that RiskMetrics' own lambda of 0.94 was rejected here: it is the
+    better one-day forecaster but LOSES to the trailing window at 60 days. On a
+    market where 19% of daily returns are exactly zero, the shorter memory
+    over-reacts to a run of flat sessions followed by one real move.
+
+    Callers must render `coverage_pct`, never a hardcoded figure --
+    tests/test_forecast_presentation.py enforces that.
 
     Returns None when there are too few observations or sigma is degenerate.
     """
     rets = returns.dropna()
     if len(rets) < MIN_OBSERVATIONS:
         return None
-    sigma_daily = float(rets.std())
+
+    # EWMA needs enough history to seed the recursion. A young listing that
+    # cannot supply it still gets a band, from the trailing window it CAN
+    # supply — reported with that estimator's own coverage figures, because a
+    # coverage number belongs to the sigma it was fitted on.
+    from app.core.risk_grade import ewma_volatility
+
+    sigma_daily = ewma_volatility(rets)
+    method = "ewma_0.97"
+    if sigma_daily is None:
+        sigma_daily = float(rets.std())
+        method = "trailing_sd"
+
     if not math.isfinite(sigma_daily) or sigma_daily <= 0:
         return None
 
-    out = {"method": "one_sigma_historical", "calibration": CALIBRATION}
+    coverage = ONE_SIGMA_COVERAGE_PCT[
+        "ewma" if method == "ewma_0.97" else "trailing"
+    ]
+    out = {"method": method, "calibration": CALIBRATION}
     for name, bars in _HORIZON_BARS.items():
         out[f"{name}_pct"] = round(sigma_daily * math.sqrt(bars) * 100.0, 2)
-        out[f"{name}_coverage_pct"] = ONE_SIGMA_COVERAGE_PCT[name]
+        out[f"{name}_coverage_pct"] = coverage[name]
     return out
 
 
@@ -160,6 +202,14 @@ def outcome_band(returns: pd.Series, current_price: float,
     rets = returns.dropna()
     if len(rets) < MIN_OBSERVATIONS or current_price <= 0 or days < 1:
         return None
+    # DELIBERATELY the trailing window, not the EWMA that `expected_move` uses.
+    # At 60 days the two score within 0.2% of each other on QLIKE (a tie), and
+    # refitting this cone on EWMA measured 83.3% coverage against the trailing
+    # window's 85.8% — worse. EWMA is an IGARCH: its multi-step forecast is flat
+    # at today's level with no mean reversion, which is the wrong shape for a
+    # long band. EGX_Z_CONE_60D below was fitted on THIS sigma; changing the
+    # estimator without refitting the table would leave it describing a
+    # different variable.
     sigma = float(rets.std())
     if not math.isfinite(sigma) or sigma <= 0:
         return None

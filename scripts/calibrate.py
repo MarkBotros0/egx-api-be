@@ -207,7 +207,7 @@ def regime_calibration() -> dict:
 # Forecast bands
 # ---------------------------------------------------------------------------
 
-def forecast_calibration() -> dict:
+def forecast_calibration(sigma_method: str = "trailing") -> dict:
     """
     Fit EGX's own |z| quantiles for the daily band and the 60-day cone.
 
@@ -230,13 +230,34 @@ def forecast_calibration() -> dict:
     buckets = {k: [] for k in HORIZONS}
     cone = []
 
+    # Which sigma the band is built on. `scripts/vol_backtest.py` measured
+    # EWMA(0.97) beating a 400-bar trailing window by 3.1% / 2.6% QLIKE at 5 and
+    # 22 days (and clearing |t| > 3.0 at one day), but only 0.2% at 60 days —
+    # a tie. So the short-horizon tiles move to EWMA and the 60-day cone does
+    # not, and each is calibrated on the sigma it actually uses. Fitting one
+    # table for both would describe neither.
+    use_ewma = sigma_method == "ewma"
+    if use_ewma:
+        from app.core.risk_grade import ewma_variance_series
+
     for _, df in iter_symbol_frames():
         close = df["close"].astype(float)
         if len(close) < SIGMA_WINDOW + CONE_DAYS + REBALANCE:
             continue
         rets = close.pct_change()
+        ewma_path = None
+        if use_ewma:
+            series = ewma_variance_series(rets.dropna())
+            if series is None:
+                continue
+            # ewma_variance_series drops the leading NaN from pct_change, so
+            # realign to `rets` positions before indexing by i.
+            ewma_path = np.concatenate([[np.nan], np.sqrt(series)])
         for i in range(SIGMA_WINDOW, len(close) - CONE_DAYS - 1, REBALANCE):
-            sigma = float(rets.iloc[i - SIGMA_WINDOW:i].std())
+            if use_ewma:
+                sigma = float(ewma_path[i]) if i < len(ewma_path) else float("nan")
+            else:
+                sigma = float(rets.iloc[i - SIGMA_WINDOW:i].std())
             if not np.isfinite(sigma) or sigma <= 0:
                 continue
             p0 = float(close.iloc[i - 1])
@@ -258,6 +279,7 @@ def forecast_calibration() -> dict:
 
     c = _abs(cone)
     out = {"n_cone": int(c.size), "cone_days": CONE_DAYS,
+           "sigma_method": sigma_method,
            "sigma_window": SIGMA_WINDOW,
            "cone_gaussian_90_coverage": round(float((c <= 1.6449).mean() * 100), 1),
            "one_sigma_coverage": {}, "z_daily": {}, "z_cone": {}}

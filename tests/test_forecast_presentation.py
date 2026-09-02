@@ -150,16 +150,66 @@ def _flat_returns(n: int = 400, sigma: float = 0.02) -> pd.Series:
 
 def test_expected_move_reports_measured_coverage_not_68():
     """
-    Gaussian theory says 68%. EGX delivers 79.0 / 76.2 / 72.9 because price
-    limits and flat illiquid sessions squash the centre of the distribution.
+    Gaussian theory says 68%. EGX delivers high-70s because price limits and
+    flat illiquid sessions squash the centre of the distribution.
     """
     em = expected_move(_flat_returns())
     assert em is not None
     for horizon in ("daily", "weekly", "monthly"):
         key = f"{horizon}_coverage_pct"
         assert key in em, f"expected_move must report {key}"
-        assert em[key] == ONE_SIGMA_COVERAGE_PCT[horizon]
         assert em[key] != 68, "the 68% Gaussian figure is measurably wrong here"
+
+
+def test_coverage_belongs_to_the_estimator_it_was_fitted_on():
+    """
+    Two sigmas, two tables. `expected_move` uses EWMA(0.97) where there is
+    enough history to seed it and a trailing window otherwise, and the two
+    deliver measurably different coverage (78.6 vs 79.0 daily). Quoting one
+    table for both would be the same error as the 68% it replaced — a number
+    describing a variable other than the one on screen.
+    """
+    long_history = expected_move(_flat_returns(400))
+    short_history = expected_move(_flat_returns(30))
+    assert long_history["method"] == "ewma_0.97"
+    assert short_history["method"] == "trailing_sd"
+
+    for horizon in ("daily", "weekly", "monthly"):
+        key = f"{horizon}_coverage_pct"
+        assert long_history[key] == ONE_SIGMA_COVERAGE_PCT["ewma"][horizon]
+        assert short_history[key] == ONE_SIGMA_COVERAGE_PCT["trailing"][horizon]
+    assert long_history["daily_coverage_pct"] != short_history["daily_coverage_pct"]
+
+
+def test_the_cone_is_not_built_on_the_ewma():
+    """
+    The 60-day band deliberately keeps the trailing window. At that horizon the
+    two estimators tie on QLIKE (0.2%), and refitting the cone on EWMA measured
+    83.3% coverage against the trailing window's 85.8% — worse. EGX_Z_CONE_60D
+    was fitted on the trailing sigma; swapping the estimator without refitting
+    would leave the table describing a different variable.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from app.core import forecast as fc_mod
+
+    # Walk the AST rather than the text. `outcome_band` explains this decision
+    # in a comment that names EWMA, so a substring scan would flag the very
+    # documentation that prevents the regression — the same trap the comment
+    # stripper elsewhere in this file exists to avoid.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fc_mod.outcome_band)))
+    called = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    offenders = {name for name in called if "ewma" in name.lower()}
+    assert not offenders, (
+        f"outcome_band now calls {offenders} but EGX_Z_CONE_60D is still the "
+        f"table fitted on the trailing window — refit it or revert"
+    )
 
 
 def test_outcome_band_is_deterministic():

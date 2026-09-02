@@ -327,6 +327,63 @@ dominate its moments.
 The portfolio-level Monte Carlo in `portfolio_analysis.py` is a DIFFERENT thing
 and stays — it simulates a whole portfolio and is genuinely a simulation.
 
+### Which sigma each band uses — and why they differ
+
+`scripts/vol_backtest.py` is the gate every volatility change must pass. It
+scores one-step-ahead conditional VARIANCE forecasts walk-forward by QLIKE, with
+a Diebold-Mariano test (Newey-West) and a Kupiec coverage test, over the full
+cached universe. **No change to how this app estimates volatility ships without
+a run of it showing a win.**
+
+Measured, full universe, QLIKE (lower is better):
+
+| horizon | 400-bar trailing | EWMA(0.94) | EWMA(0.97) |
+|---|---|---|---|
+| 5 days | −4.0911 | −4.1789 | **−4.2186** (+3.1%) |
+| 22 days | −2.5848 | −2.5599 | **−2.6510** (+2.6%) |
+| 60 days | **−1.5543** | −1.4503 *(loses)* | −1.5574 (+0.2%, a tie) |
+
+So the two surfaces use DIFFERENT estimators, deliberately:
+
+- **`expected_move`** (daily / weekly / monthly tiles) → **EWMA(0.97)**, which
+  clears the project's |t| > 3.0 bar at one day and wins at 5 and 22.
+- **`outcome_band`** (60-day cone) → **the 400-bar trailing window**. At 60 days
+  the two tie, and refitting the cone on EWMA measured **83.3% coverage against
+  the trailing window's 85.8% — worse**. EWMA is an IGARCH: its multi-step
+  forecast is flat at today's level with no mean reversion, which is the wrong
+  shape for a long band.
+
+**Coverage figures belong to the estimator they were fitted on**, so
+`ONE_SIGMA_COVERAGE_PCT` is TWO tables — EWMA 78.6 / 75.5 / 71.8, trailing
+79.0 / 76.3 / 73.0. `expected_move` falls back to the trailing window on a
+history too short to seed the recursion, and reports that table instead.
+Quoting one table for both would be the same class of error as the 68% it
+replaced. `tests/test_forecast_presentation.py` pins both paths, and an AST walk
+fails the build if `outcome_band` ever starts calling an EWMA without the cone
+table being refitted.
+
+**RiskMetrics' own lambda of 0.94 was REJECTED here.** It is the better one-day
+forecaster but LOSES to the trailing window at 60 days. On a market where 19% of
+daily returns are exactly zero, the shorter memory over-reacts to a run of flat
+sessions followed by one real move.
+
+**Two harness bugs worth remembering, both caught by the harness itself:**
+- Without a variance floor, trailing-window QLIKE came back as **1.1e13** — flat
+  EGX sessions drive `h` toward zero and `r²/h` explodes. Every method is now
+  floored identically, because that is the only form any of them could be
+  deployed in, and how often the floor binds is reported (trailing sd400: 10.5%
+  of bars; EWMA: 0%).
+- Pooling each method's losses independently and truncating to a common length
+  pairs element *i* of one method with a DIFFERENT (symbol, bar) of another,
+  which silently invalidates Diebold-Mariano — a test on a paired difference.
+  The first draft reported the challenger winning while QLIKE ranked the
+  incumbent ahead. All methods are now scored on the same bars, with an assert.
+
+**Sample size mattered and nearly produced the wrong answer.** On 60 symbols the
+challenger scored t = −2.28 and the harness said do not switch; on the full
+universe the same comparison clears |t| > 3.0. Run the full universe before
+concluding.
+
 ### GET /api/settings?section=weights, PUT /api/settings?section=weights
 Composite score weights (stored as `weight_*` keys in the `settings` table). Handled in `app/routers/settings.py` — there is no separate `weights.py` (older docs called this `/api/weights`; it is not a real endpoint).
 - GET returns `{ weights: { trend, momentum, volume, volatility, divergence, quality, risk_adjusted, relative_strength }, presets, default }`
