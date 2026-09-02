@@ -759,7 +759,7 @@ STALEST symbols itself** — that is the production mode, because cron-job.org
 cannot read a response body and feed a cursor back:
 
 ```
-POST /api/cron/risk_snapshot?limit=20
+POST /api/cron/risk_snapshot?limit=6
 Header: X-Cron-Secret: <CRON_SECRET>
 -> {processed, written, failed[], mode, stale_remaining, universe, measured_at}
 ```
@@ -837,13 +837,58 @@ Design rules, all load-bearing:
 logic a scheduler depends on is testable without Postgres — tests/ has no DB
 fixture by design.
 
-**Cadence.** The data is DAILY bars, so a symbol's sigma only changes once per
-trading day; refreshing more often re-measures identical bars and hammers the
-feed for nothing. Run it after the EGX close (Sun–Thu, 14:30 Cairo). At
-`limit=20` the 166-symbol universe needs 9 calls, so *every 5 minutes within one
-hour, Sun–Thu, scheduled in Africa/Cairo* covers it with headroom — and because
-selection is staleness-driven, extra calls are harmless and missed ones simply
-catch up next run.
+**Cadence — and the ONE-HOUR WINDOW THAT DOES NOT FIT.** The data is DAILY bars,
+so a symbol's sigma only changes once per trading day; refreshing more often
+re-measures identical bars and hammers the feed for nothing. Run it after the EGX
+close (Sun–Thu, 14:30 Cairo).
+
+**A call measures at most SIX symbols, whatever `limit` says.** The deadline stops
+the loop once `elapsed > DEADLINE_SECONDS - PER_SYMBOL_BUDGET_SECONDS` (8.0s), and
+a healthy fetch takes ~1.4s. So the DEADLINE, not `limit`, is the binding
+constraint at any `limit` above 6:
+
+| `limit` | all-healthy chunk | all-refusal chunk |
+|---|---|---|
+| 4 | 4 | 2 |
+| **6** | **6** | 2 |
+| 20 | 6 | 2 |
+
+This is why the example above passes `?limit=6`. It used to read `limit=20`
+alongside a claim that *"the 166-symbol universe needs 9 calls, so every 5 minutes
+within one hour covers it with headroom"* — arithmetic from before the deadline
+existed, and wrong by a factor of three. **One hour does not cover the universe.**
+
+Simulated against the real `select_stalest` and the real universe (166 symbols,
+84 known-dead, 82 healthy), counting DISTINCT healthy symbols measured per day:
+
+| schedule | calls/day | `limit=4` | `limit=6` |
+|---|---|---|---|
+| `*/5 15 * * 0-4` | 12 | 48 / 82 | 72 / 82 |
+| **`*/5 15-16 * * 0-4`** | 24 | 82 / 82 | **82 / 82** |
+| `*/5 15-17 * * 0-4` | 36 | 82 / 82 | 82 / 82 |
+
+**Two hours at `?limit=6`** is the supported setting: 24 x 6 = 144 slots against 82
+healthy symbols, 1.8x headroom, so a cold start or a missed fire still completes
+the pass. Under-provision it and `stale_remaining` never reaches 0, and `/api/risk`
+permanently ranks a partly-yesterday universe.
+
+`0-4` is Sun–Thu (0 = Sunday), matching the EGX week. Pin the job to
+**Africa/Cairo, not UTC** — Egypt observes DST, and a local-time schedule shifts
+with the market close instead of drifting an hour away from it twice a year.
+
+Because selection is staleness-driven, extra calls are harmless and missed ones
+simply catch up next run.
+
+**A demoted symbol is never re-fetched, so it cannot un-demote itself.**
+`select_stalest` ranks on `(demoted, measured_at, symbol)`, and `demoted` is a HARD
+priority rather than a tiebreak — with 82 healthy symbols against a chunk of 6, the
+first 6 are always healthy. Simulated over four days at every schedule above, the
+84 demoted symbols were selected **0 times**. That is correct for the ~84 names the
+feed genuinely never serves, and it is what keeps the budget on live stocks. But
+the "un-demotes itself on its first good fetch" recovery described above CANNOT
+FIRE while the healthy half outnumbers the chunk, so a symbol that starts working
+is not picked up on its own. Recovering one today means clearing its
+`consecutive_failures` by hand.
 
 **Auth:** in `PUBLIC_ENDPOINTS` (an external scheduler carries no user token),
 guarded by the `CRON_SECRET` env var exactly as `/api/pe/refresh` is guarded by
