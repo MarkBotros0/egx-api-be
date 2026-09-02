@@ -388,3 +388,66 @@ def test_rate_for_date_accepts_the_timestamp_the_backtest_actually_passes():
     got = rate_for_date([("2015-01-01", 12.0)], pd.Timestamp("2020-06-01"),
                         fallback=19.0)
     assert got == pytest.approx(12.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# A panel must record HOW it was scored. analyze_backtest reads this to decide
+# whether Risk-Adjusted's row is evidence or a caveat, and guessing from the
+# local machine would let an old flat-rate panel be read as a dated one.
+# ---------------------------------------------------------------------------
+
+def test_a_panel_with_no_stamp_is_treated_as_flat_rate():
+    """
+    Conservative by default. Every panel built before this existed is a
+    flat-rate panel, and reading one as dated would present a confounded number
+    as evidence — the exact failure the withholding exists to prevent.
+    """
+    from scripts.backtest import read_run_meta
+
+    meta = read_run_meta("/no/such/panel.pkl")
+    assert meta["dated_risk_free"] is False
+    assert meta["confounded"] == ["risk_adjusted"]
+
+
+def test_a_dated_run_stamps_the_panel_and_clears_the_caveat(tmp_path):
+    from scripts.backtest import read_run_meta, write_run_meta
+
+    panel = str(tmp_path / "panel.pkl")
+    write_run_meta(panel, [("2001-05-01", 11.0), ("2026-08-01", 19.0)])
+
+    meta = read_run_meta(panel)
+    assert meta["dated_risk_free"] is True
+    assert meta["rate_steps"] == 2
+    assert meta["confounded"] == []
+
+
+def test_a_flat_run_stamps_the_panel_and_keeps_the_caveat(tmp_path):
+    from scripts.backtest import read_run_meta, write_run_meta
+
+    panel = str(tmp_path / "panel.pkl")
+    write_run_meta(panel, [])
+
+    meta = read_run_meta(panel)
+    assert meta["dated_risk_free"] is False
+    assert meta["confounded"] == ["risk_adjusted"]
+    assert meta["flat_rate_pct"] is not None
+
+
+def test_the_analyzer_reads_the_stamp_rather_than_a_module_constant():
+    """
+    CONFOUNDED_CATEGORIES was a module constant, so the caveat described the
+    machine running the analysis instead of the run that produced the panel.
+    Analysing a flat-rate panel on a machine that has rate history would have
+    silently dropped the caveat.
+    """
+    import ast
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "scripts" / "analyze_backtest.py"
+    text = src.read_text(encoding="utf-8")
+    assert "CONFOUNDED_CATEGORIES" not in text, (
+        "the analyzer still imports a module-level constant; it must read the "
+        "panel's own stamp via read_run_meta"
+    )
+    assert "read_run_meta" in text
+    ast.parse(text)

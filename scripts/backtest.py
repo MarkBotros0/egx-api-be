@@ -110,6 +110,53 @@ def confounded_categories(rate_steps) -> set:
     return set() if rate_steps else {"risk_adjusted"}
 
 
+def run_meta_path(panel_path: str) -> str:
+    return f"{panel_path}.meta.json"
+
+
+def write_run_meta(panel_path: str, rate_steps) -> dict:
+    """
+    Stamp a panel with HOW it was scored, beside the panel itself.
+
+    `analyze_backtest` needs to know whether Risk-Adjusted's row is evidence or
+    a caveat, and that is a property of the RUN, not of the machine reading it.
+    Deriving it locally would let an old flat-rate panel be analysed on a
+    machine that happens to have rate history and silently lose the caveat.
+    """
+    meta = {
+        "dated_risk_free": bool(rate_steps),
+        "rate_steps": len(rate_steps or []),
+        "flat_rate_pct": None if rate_steps else RISK_FREE_RATE,
+        "confounded": sorted(confounded_categories(rate_steps)),
+    }
+    with open(run_meta_path(panel_path), "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    return meta
+
+
+def read_run_meta(panel_path: str) -> dict:
+    """
+    How a panel was scored. CONSERVATIVE when unstamped.
+
+    Every panel built before this existed is a flat-rate panel, so an absent
+    stamp must read as flat — presenting a confounded number as evidence is the
+    precise failure the withholding exists to prevent.
+    """
+    try:
+        with open(run_meta_path(panel_path), encoding="utf-8") as f:
+            meta = json.load(f)
+        meta.setdefault("confounded", sorted(confounded_categories(
+            [1] if meta.get("dated_risk_free") else [])))
+        return meta
+    except Exception:
+        return {
+            "dated_risk_free": False,
+            "rate_steps": 0,
+            "flat_rate_pct": RISK_FREE_RATE,
+            "confounded": sorted(confounded_categories(None)),
+        }
+
+
 def rate_for_date(rate_steps, as_of, fallback: float = RISK_FREE_RATE) -> float:
     """
     The cash return over the trailing year ending `as_of`, as an annual rate.
@@ -774,7 +821,9 @@ def main():
     print(f"\npanel: {len(panel):,} symbol-dates, "
           f"{panel['symbol'].nunique()} symbols, {panel['date'].nunique()} dates")
     print(f"span: {panel['date'].min().date()} .. {panel['date'].max().date()}")
+    write_run_meta(args.out, rate_steps)
     print(f"saved -> {args.out}")
+    print(f"stamped -> {run_meta_path(args.out)}")
 
     if report:
         # Last thing printed, and a non-zero exit, so an incomplete panel is not

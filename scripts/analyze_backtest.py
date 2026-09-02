@@ -34,10 +34,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.core.composite import CATEGORY_ORDER  # noqa: E402
 from scripts.backtest import (  # noqa: E402
-    CONFOUNDED_CATEGORIES,
     HORIZONS,
     bucket_returns,
     information_coefficient,
+    read_run_meta,
     sanity_checks,
 )
 
@@ -58,9 +58,12 @@ def describe(panel: pd.DataFrame) -> dict:
     }
 
 
-def report(panel: pd.DataFrame, label: str) -> dict:
+def report(panel: pd.DataFrame, label: str, run_meta: dict | None = None) -> dict:
     print(f"\n{'=' * 72}\n{label}\n{'=' * 72}")
     meta = describe(panel)
+    # How the RUN was scored, not how this machine would score it.
+    run_meta = run_meta or read_run_meta("")
+    confounded = list(run_meta.get("confounded") or [])
     print(f"{meta['rows']:,} symbol-dates | {meta['symbols']} symbols | "
           f"{meta['dates']} dates | {meta['first_date']} .. {meta['last_date']}")
 
@@ -100,13 +103,17 @@ def report(panel: pd.DataFrame, label: str) -> dict:
             row[h] = r
             cells += f"{r['ic']:>+12.4f}" if r["ic"] is not None else f"{'n/a':>12}"
         cats[name] = row
-        mark = " *" if name in CONFOUNDED_CATEGORIES else ""
+        mark = " *" if name in confounded else ""
         print(f"  {name:>20}{cells}{mark}")
-    if CONFOUNDED_CATEGORIES:
-        print(f"  * {', '.join(sorted(CONFOUNDED_CATEGORIES))}: scored against a FLAT 25% "
-              "risk-free rate.")
-        print("    Egypt's policy rate ran ~8% (2020) to ~27% (2024), so this row is")
-        print("    not evidence about whether the category earns its weight.")
+    if confounded:
+        print(f"  * {', '.join(confounded)}: scored against a FLAT "
+              f"{run_meta.get('flat_rate_pct')}% risk-free rate.")
+        print("    Egypt's policy rate ran 8.25% to 27.25% over this window, so this")
+        print("    row is not evidence about whether the category earns its weight.")
+        print("    Re-run scripts/backtest.py with macro_series populated to lift it.")
+    else:
+        print(f"  (risk-free rate is DATED — {run_meta.get('rate_steps')} steps from "
+              f"macro_series; every row above is evidence)")
 
     print("\n[buckets] mean forward return by signal band")
     buckets = {}
@@ -137,7 +144,13 @@ def main():
         return 1
 
     panel = pd.read_pickle(args.panel)
-    results = {"full_universe": report(panel, "FULL UNIVERSE")}
+    # Read the RUN's own stamp. An unstamped panel reads as flat-rate, so every
+    # panel built before stamping existed keeps its caveat.
+    run_meta = read_run_meta(args.panel)
+    results = {
+        "run": run_meta,
+        "full_universe": report(panel, "FULL UNIVERSE", run_meta),
+    }
 
     # The liquid cut matters because returns on names trading a few thousand
     # shares a day were never capturable — a strategy that "works" only there
@@ -146,7 +159,8 @@ def main():
         liquid = panel[panel["avg_volume"] >= LIQUID_MIN_AVG_VOLUME]
         if len(liquid) > 500:
             results["liquid_only"] = report(
-                liquid, f"LIQUID ONLY (>= {LIQUID_MIN_AVG_VOLUME:,} shares/day)")
+                liquid, f"LIQUID ONLY (>= {LIQUID_MIN_AVG_VOLUME:,} shares/day)",
+                run_meta)
 
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, default=str)

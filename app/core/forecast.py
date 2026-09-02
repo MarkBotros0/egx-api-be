@@ -3,7 +3,7 @@ Per-stock outcome ranges, calibrated against EGX's own return distribution.
 
 WHAT CHANGED, AND WHY (2026-09-02)
 ----------------------------------
-This module used to advertise coverage it did not deliver. Measured over 34,721
+This module used to advertise coverage it did not deliver. Measured over 34,749
 point-in-time observations from the cached panel (see scripts/calibrate.py):
 
     surface                       advertised     actually delivered
@@ -68,7 +68,7 @@ import pandas as pd
 
 CALIBRATION = {
     "fitted_at": "2026-09-02",
-    "n_observations": 34721,
+    "n_observations": 34749,
     # ISIN-coded rows (EGS30AJ1C016, EGS48271C018-EGP, ...) are excluded because
     # they are not common stocks. The exclusion matches on LENGTH, not on the
     # "EGS" prefix — EGSA is a real four-character EGX ticker and a prefix rule
@@ -107,7 +107,7 @@ EGX_Z_CONE_60D = {
 ONE_SIGMA_COVERAGE_PCT = {
     # EWMA(0.97), fitted over 34,282 observations. The default path.
     "ewma": {"daily": 78.6, "weekly": 75.5, "monthly": 71.8},
-    # 400-bar trailing sigma, fitted over 34,721 observations. Used when a
+    # 400-bar trailing sigma, fitted over 34,749 observations. Used when a
     # symbol has too little history to seed the recursion.
     "trailing": {"daily": 79.0, "weekly": 76.3, "monthly": 73.0},
 }

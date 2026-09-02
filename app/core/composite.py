@@ -837,6 +837,178 @@ def apply_macro_modulation(raw_score: float, macro: Optional[dict]) -> tuple:
 # Top-level orchestrator
 # ---------------------------------------------------------------------------
 
+def score_categories(indicators: dict, extras: Optional[dict] = None) -> dict:
+    """
+    Run all eight category scorers. Returns {name: (score | None, reasons)}.
+
+    WEIGHT-FREE AND MACRO-FREE BY CONSTRUCTION, and that is the whole point of
+    it being its own function. These eight numbers depend only on the price
+    history and the fundamentals — not on whose sliders are set how, and not on
+    today's EGX30 regime. Both of those enter later, in `blend_categories`.
+
+    That separation is what lets the nightly snapshot store a score once and
+    have every user read their OWN composite out of it: the expensive part
+    (400 bars, indicators, divergences) is computed once, and the cheap part
+    (a weighted mean and a modulation) is redone per request. See
+    `routers/cron.py` for the writer and `routers/dashboard.py` for the reader.
+
+    See `compute_composite` for what `extras` must contain.
+    """
+    extras = extras or {}
+
+    current_price = extras.get("current_price")
+    sma_20 = _last_valid(indicators.get("sma_20"))
+    sma_50 = _last_valid(indicators.get("sma_50"))
+    sma_200 = _last_valid(indicators.get("sma_200"))
+    adx_val = _last_valid(indicators.get("adx"))
+    plus_di_val = _last_valid(indicators.get("plus_di"))
+    minus_di_val = _last_valid(indicators.get("minus_di"))
+    rsi_val = _last_valid(indicators.get("rsi"))
+    macd_hist = _last_valid(indicators.get("macd_histogram"))
+    macd_hist_prev = _prev_valid(indicators.get("macd_histogram"))
+    stoch_k = _last_valid(indicators.get("stochastic_k"))
+    stoch_d = _last_valid(indicators.get("stochastic_d"))
+    mfi_val = _last_valid(indicators.get("mfi"))
+    bb_upper = _last_valid(indicators.get("bollinger_upper"))
+    bb_lower = _last_valid(indicators.get("bollinger_lower"))
+    bb_middle = _last_valid(indicators.get("bollinger_middle"))
+
+    trend_score, trend_reasons = score_trend(
+        current_price, sma_20, sma_50, sma_200,
+        adx_val, plus_di_val, minus_di_val,
+        golden_cross_active=bool(extras.get("golden_cross_active", False)),
+    )
+    momentum_score, momentum_reasons = score_momentum(
+        rsi_val, macd_hist, macd_hist_prev, stoch_k, stoch_d,
+    )
+    volume_score, volume_reasons = score_volume(
+        extras.get("obv_rising"),
+        extras.get("price_rising_20d"),
+        mfi_val,
+        extras.get("volume_price"),
+        liquidity=extras.get("liquidity"),
+    )
+    volatility_score, volatility_reasons = score_volatility(
+        current_price, bb_upper, bb_lower, bb_middle,
+        bb_squeeze=bool(extras.get("bb_squeeze", False)),
+    )
+    divergence_score, divergence_reasons = score_divergence(
+        extras.get("divergences"),
+    )
+    quality_score, quality_reasons = score_quality(
+        extras.get("multi_timeframe"),
+        extras.get("trend_consistency"),
+        extras.get("current_drawdown_pct"),
+        pe_ratio=extras.get("pe_ratio"),
+        dividend_yield=extras.get("dividend_yield"),
+        loss_making=extras.get("loss_making"),
+    )
+    # `or` would treat a legitimate 0% rate as missing — check for None.
+    _rfr = extras.get("risk_free_rate_pct")
+    risk_adjusted_score, risk_adjusted_reasons = score_risk_adjusted(
+        extras.get("annualized_return_pct"),
+        float(_rfr) if _rfr is not None else float(DEFAULT_RISK_FREE_RATE_PCT),
+        extras.get("volatility_annualized_pct"),
+        extras.get("atr_pct_of_price"),
+        extras.get("history_days"),
+    )
+    relative_strength_score, relative_strength_reasons = score_relative_strength(
+        extras.get("relative_strength"),
+    )
+
+    return {
+        "trend": (trend_score, trend_reasons),
+        "momentum": (momentum_score, momentum_reasons),
+        "volume": (volume_score, volume_reasons),
+        "volatility": (volatility_score, volatility_reasons),
+        "divergence": (divergence_score, divergence_reasons),
+        "quality": (quality_score, quality_reasons),
+        "risk_adjusted": (risk_adjusted_score, risk_adjusted_reasons),
+        "relative_strength": (relative_strength_score, relative_strength_reasons),
+    }
+
+
+def blend_categories(category_scores: dict,
+                     weights: Optional[dict] = None,
+                     macro: Optional[dict] = None) -> dict:
+    """
+    Turn eight category scores into ONE composite. Pure; the only place this
+    arithmetic is spelled.
+
+    THIS FUNCTION IS THE "ONE SCORE PER STOCK" GUARANTEE. `compute_composite`
+    calls it, and so does the dashboard's snapshot reader — which holds the
+    same eight numbers in Postgres rather than having just computed them. Two
+    independent spellings of this weighting would let a card and its own detail
+    page disagree, which is the exact failure `build_composite_extras` and
+    `composite_cache_key` already exist to prevent.
+
+    Arguments:
+      category_scores: {name: float 0-100 | None}. None means the category was
+                       not scorable on this stock's data, and its weight is
+                       redistributed across the rest — dropped on EVERY page
+                       for the same reason, never silently absorbed.
+      weights:         {category: weight_percent}; normalized here.
+      macro:           macro dict; the EGX30 regime modulation is applied AFTER
+                       the weighted sum, so it is not a ninth category.
+
+    Returns {score, raw_score, signal, weights, effective_weights,
+             contributions, macro_adjustment, macro_context}.
+    `score` is post-modulation and rounded; `raw_score` is the weighted mean
+    before it.
+    """
+    weights = normalize_weights(weights or DEFAULT_WEIGHTS)
+    scores = {name: category_scores.get(name) for name in CATEGORY_ORDER}
+
+    available_weight_sum = sum(
+        weights[name] for name in CATEGORY_ORDER if scores[name] is not None
+    )
+
+    if available_weight_sum == 0:
+        # Nothing scorable at all. 50 is the neutral midpoint, and the label
+        # comes from classify_signal rather than a literal: hardcoding one here
+        # is how "Hold" — an instruction the backtest contradicts — survived
+        # the 2026-08-26 relabelling in this one branch.
+        return {
+            "score": 50.0,
+            "raw_score": 50.0,
+            "signal": classify_signal(50.0),
+            "weights": weights,
+            "effective_weights": {name: 0.0 for name in CATEGORY_ORDER},
+            "contributions": {name: 0.0 for name in CATEGORY_ORDER},
+            "macro_adjustment": None,
+            "macro_context": None,
+        }
+
+    composite = 0.0
+    effective_weights = {}
+    contributions = {}
+    for name in CATEGORY_ORDER:
+        s = scores[name]
+        if s is None:
+            effective_weights[name] = 0.0
+            contributions[name] = 0.0
+            continue
+        effective_weight = weights[name] / available_weight_sum * 100
+        contribution = s * effective_weight / 100.0
+        effective_weights[name] = effective_weight
+        contributions[name] = contribution
+        composite += contribution
+
+    composite = _clamp(composite)
+    final_score, macro_delta, macro_ctx = apply_macro_modulation(composite, macro)
+
+    return {
+        "score": round(final_score, 1),
+        "raw_score": composite,
+        "signal": classify_signal(final_score),
+        "weights": weights,
+        "effective_weights": effective_weights,
+        "contributions": contributions,
+        "macro_adjustment": macro_delta if macro_ctx else None,
+        "macro_context": macro_ctx,
+    }
+
+
 def compute_composite(indicators: dict, extras: Optional[dict] = None,
                       weights: Optional[dict] = None,
                       macro: Optional[dict] = None) -> dict:
@@ -884,138 +1056,30 @@ def compute_composite(indicators: dict, extras: Optional[dict] = None,
         "macro_context": str | None,        (human-readable note, e.g. "EGX30 bearish")
       }
     """
-    extras = extras or {}
-    weights = normalize_weights(weights or DEFAULT_WEIGHTS)
-
-    current_price = extras.get("current_price")
-    sma_20 = _last_valid(indicators.get("sma_20"))
-    sma_50 = _last_valid(indicators.get("sma_50"))
-    sma_200 = _last_valid(indicators.get("sma_200"))
-    adx_val = _last_valid(indicators.get("adx"))
-    plus_di_val = _last_valid(indicators.get("plus_di"))
-    minus_di_val = _last_valid(indicators.get("minus_di"))
-    rsi_val = _last_valid(indicators.get("rsi"))
-    macd_hist = _last_valid(indicators.get("macd_histogram"))
-    macd_hist_prev = _prev_valid(indicators.get("macd_histogram"))
-    stoch_k = _last_valid(indicators.get("stochastic_k"))
-    stoch_d = _last_valid(indicators.get("stochastic_d"))
-    mfi_val = _last_valid(indicators.get("mfi"))
-    bb_upper = _last_valid(indicators.get("bollinger_upper"))
-    bb_lower = _last_valid(indicators.get("bollinger_lower"))
-    bb_middle = _last_valid(indicators.get("bollinger_middle"))
-
-    # Fall back to the last close if current_price not supplied explicitly
-    if current_price is None:
-        # Not in `indicators`, but extras typically carries it.
-        current_price = None
-
-    trend_score, trend_reasons = score_trend(
-        current_price, sma_20, sma_50, sma_200,
-        adx_val, plus_di_val, minus_di_val,
-        golden_cross_active=bool(extras.get("golden_cross_active", False)),
-    )
-    momentum_score, momentum_reasons = score_momentum(
-        rsi_val, macd_hist, macd_hist_prev, stoch_k, stoch_d,
-    )
-    volume_score, volume_reasons = score_volume(
-        extras.get("obv_rising"),
-        extras.get("price_rising_20d"),
-        mfi_val,
-        extras.get("volume_price"),
-        liquidity=extras.get("liquidity"),
-    )
-    volatility_score, volatility_reasons = score_volatility(
-        current_price, bb_upper, bb_lower, bb_middle,
-        bb_squeeze=bool(extras.get("bb_squeeze", False)),
-    )
-    divergence_score, divergence_reasons = score_divergence(
-        extras.get("divergences"),
-    )
-    quality_score, quality_reasons = score_quality(
-        extras.get("multi_timeframe"),
-        extras.get("trend_consistency"),
-        extras.get("current_drawdown_pct"),
-        pe_ratio=extras.get("pe_ratio"),
-        dividend_yield=extras.get("dividend_yield"),
-        loss_making=extras.get("loss_making"),
-    )
-    # `or` would treat a legitimate 0% rate as missing — check for None.
-    _rfr = extras.get("risk_free_rate_pct")
-    risk_adjusted_score, risk_adjusted_reasons = score_risk_adjusted(
-        extras.get("annualized_return_pct"),
-        float(_rfr) if _rfr is not None else float(DEFAULT_RISK_FREE_RATE_PCT),
-        extras.get("volatility_annualized_pct"),
-        extras.get("atr_pct_of_price"),
-        extras.get("history_days"),
-    )
-    relative_strength_score, relative_strength_reasons = score_relative_strength(
-        extras.get("relative_strength"),
+    category_raw = score_categories(indicators, extras)
+    blended = blend_categories(
+        {name: s for name, (s, _) in category_raw.items()}, weights, macro,
     )
 
-    category_raw = {
-        "trend": (trend_score, trend_reasons),
-        "momentum": (momentum_score, momentum_reasons),
-        "volume": (volume_score, volume_reasons),
-        "volatility": (volatility_score, volatility_reasons),
-        "divergence": (divergence_score, divergence_reasons),
-        "quality": (quality_score, quality_reasons),
-        "risk_adjusted": (risk_adjusted_score, risk_adjusted_reasons),
-        "relative_strength": (relative_strength_score, relative_strength_reasons),
-    }
-
-    # Renormalize weights across categories that could be scored
-    available_weight_sum = sum(weights[k] for k, (s, _) in category_raw.items() if s is not None)
-    if available_weight_sum == 0:
-        # Nothing scorable at all — return a neutral hold
-        return {
-            "score": 50.0,
-            "signal": "Hold",
-            "categories": {
-                name: {
-                    "score": None,
-                    "weight": weights[name],
-                    "effective_weight": 0.0,
-                    "weighted_contribution": 0.0,
-                    "reasons": reasons,
-                } for name, (s, reasons) in category_raw.items()
-            },
-            "weights": weights,
-            "macro_adjustment": None,
-            "macro_context": None,
-        }
-
-    composite = 0.0
+    weights_out = blended["weights"]
     categories_out = {}
     for name in CATEGORY_ORDER:
         s, reasons = category_raw[name]
-        w_raw = weights[name]
-        if s is None:
-            effective_weight = 0.0
-            contribution = 0.0
-        else:
-            effective_weight = w_raw / available_weight_sum * 100
-            contribution = s * effective_weight / 100.0
-            composite += contribution
         categories_out[name] = {
             "score": round(s, 1) if s is not None else None,
-            "weight": round(w_raw, 2),
-            "effective_weight": round(effective_weight, 2),
-            "weighted_contribution": round(contribution, 2),
+            "weight": round(weights_out[name], 2),
+            "effective_weight": round(blended["effective_weights"][name], 2),
+            "weighted_contribution": round(blended["contributions"][name], 2),
             "reasons": reasons,
         }
 
-    composite = _clamp(composite)
-
-    # Apply macro modulation (post-hoc multiplier, not a category)
-    final_score, macro_delta, macro_ctx = apply_macro_modulation(composite, macro)
-
     return {
-        "score": round(final_score, 1),
-        "signal": classify_signal(final_score),
+        "score": blended["score"],
+        "signal": blended["signal"],
         "categories": categories_out,
-        "weights": weights,
-        "macro_adjustment": macro_delta if macro_ctx else None,
-        "macro_context": macro_ctx,
+        "weights": weights_out,
+        "macro_adjustment": blended["macro_adjustment"],
+        "macro_context": blended["macro_context"],
     }
 
 

@@ -139,5 +139,23 @@ def get_calibration(user=Depends(get_current_user)):
                             "both flip sign between halves of the sample",
                 "outcome": "Not shipped.",
             },
+            {
+                # This verdict was WITHHELD until 2026-09-02, because the
+                # backtest ran one flat risk-free rate across twenty years in
+                # which the CBE ranged 8.25%-27.25%. Dated rates from
+                # macro_series made it readable, and the answer is no.
+                "claim": "Beating the T-bill rate (Risk-Adjusted) ranks stocks "
+                         "by future return",
+                "measured": "IC −0.006 at 21 days — the only horizon whose "
+                            "significance is trustworthy, since 63d and 126d "
+                            "windows overlap. Longer horizons drift positive "
+                            "(+0.012, +0.024) but cannot be read as evidence.",
+                "outcome": ("The verdict was withheld for months because the "
+                            "backtest ran a flat 19% rate against a policy rate "
+                            "whose true median over the window was 9.40%. Dated "
+                            "rates lifted the withholding; the category still "
+                            "carries 13% of the default weight on no measured "
+                            "edge."),
+            },
         ],
     }

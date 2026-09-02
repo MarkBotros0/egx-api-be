@@ -282,7 +282,7 @@ Response shape (see `AnalysisResponse` in types.ts):
 ### Forecast calibration — the app used to advertise coverage it did not deliver
 
 `core/forecast.py` states ranges, and until 2026-09-02 it stated them wrongly.
-Measured over **34,721 point-in-time observations** from `scripts/.cache`
+Measured over **34,749 point-in-time observations** from `scripts/.cache`
 (regenerate with `python -m scripts.calibrate`):
 
 | surface | advertised | actually delivered |
@@ -675,18 +675,22 @@ its band, and the historical record behind that band.
 
 The per-stock score cannot rank stocks (IC ≈ 0). The market-wide AVERAGE of
 those same scores carries a WEAK association with the market itself — rank
-correlation **+0.17 with the EGX30's next 63 trading days, Newey-West t = 1.86
+correlation **+0.162 with the EGX30's next 63 trading days, Newey-West t = 1.74
 across 221 overlapping readings**. That does not clear 1.96, so the card is
 CONTEXT, not a forecast.
 
+**Re-derived 2026-09-02 on the dated-risk-free panel** (see *The backtest's
+Risk-Adjusted verdict*), which moved it from +0.17 / t=1.86. The signal got
+marginally WEAKER, and the conclusion is unchanged.
+
 **CORRECTED 2026-09-02 — this used to claim +0.318, t=2.84, 74 non-overlapping
-periods.** It defended that with "de-overlapping made the correlation stronger
-(+0.170 → +0.318), so it is not an overlap artifact." At a 63-day horizon on a
-21-day rebalance grid there are exactly THREE valid de-overlapped samplings, and
-they give **+0.318, +0.180 and +0.004**. De-overlapping did not VALIDATE the
-number, it RESAMPLED it, and the best of three draws was read as a robustness
-check. Starting the same grid one month later would have produced a card
-claiming nothing.
+periods.** It defended that with "de-overlapping made the correlation stronger,
+so it is not an overlap artifact." At a 63-day horizon on a 21-day rebalance
+grid there are exactly THREE valid de-overlapped samplings, and they give
+**+0.309, +0.167 and −0.006**. De-overlapping did not VALIDATE the number, it
+RESAMPLED it, and the best of three draws was read as a robustness check.
+Starting the same grid one month later would have produced a card claiming
+nothing — the third phase is now slightly NEGATIVE.
 
 The honest statistic keeps all 221 observations and corrects the standard error
 for the overlap (Newey-West, lag = overlap depth). Regenerate every number here
@@ -699,12 +703,12 @@ EGX30:
 
 | band | reading | median | 3m positive |
 |---|---|---|---|
-| weak | < 45.1 | −0.1% | 49% |
-| mixed | 45.1–51.5 | +5.5% | 68% |
-| broad | ≥ 51.5 | +6.7% | 70% |
+| weak | < 45.4 | −0.03% | 50.0% |
+| mixed | 45.4–51.9 | +5.42% | 68.5% |
+| broad | ≥ 51.9 | +6.72% | 68.9% |
 
 Read as **weak-versus-not**, not a dial: the top two bands are not meaningfully
-different. And the EGX rose substantially in EGP terms over the window, so
+different — 68.5% against 68.9%, and the weak band is now a literal coin flip. And the EGX rose substantially in EGP terms over the window, so
 "weak" means flat, not falling.
 
 **It never fetches.** Scoring the 79-symbol universe on demand does not finish
@@ -920,6 +924,42 @@ guarded by the `CRON_SECRET` env var exactly as `/api/pe/refresh` is guarded by
 `PE_REFRESH_SECRET`. `tests/test_auth_gate.py::test_every_public_cron_checks_a_shared_secret`
 walks each public cron's source and fails if one stops reading its env var —
 without that check the allowlist entry alone would open the route to anyone.
+
+### The backtest's Risk-Adjusted verdict — withheld for months, now readable
+
+`scripts/backtest.py` ran ONE flat risk-free rate across twenty years in which
+the CBE ranged **8.25%–27.25%**, and withheld Risk-Adjusted's verdict because of
+it. `macro_series` now supplies dated rates, so each scoring date is graded
+against the cash return over **its own trailing year**, and the withholding is
+lifted.
+
+**The correction was large.** Across the 221 rebalance dates the true hurdle
+ranges 8.25%–27.25% with a **median of 9.40%**, against the flat **19%**
+previously applied to all of them — roughly double the real bar for most of the
+window.
+
+**The verdict is no.** Risk-Adjusted measures **IC −0.006 at 21 days**, the only
+horizon whose significance is trustworthy (63d and 126d forward windows overlap
+3× and 6×). It drifts positive at those longer horizons (+0.012, +0.024) but
+those figures are shape, not evidence. The category still carries **13% of the
+default weight on no measured edge** — the same standing as `trend` (−0.029) and
+`relative_strength` (−0.036), which are actively wrong-signed.
+
+**Adopting the dated panel barely moved the headline**, which is the reassuring
+part: composite IC at 21d went −0.0293 → **−0.0288** (t −2.85 → −2.83), and the
+forecast bands and the entire risk-grade calibration are **untouched** because
+they are built on returns and volatility, not on scores. Only the market-regime
+figures moved, and they got slightly weaker.
+
+**A panel records how it was scored.** `write_run_meta` stamps a
+`<panel>.meta.json` beside it and `analyze_backtest` reads that rather than a
+module constant — otherwise a flat-rate panel analysed on a machine that happens
+to have rate history would silently lose its caveat. **An unstamped panel reads
+as flat-rate**, so every panel built before this existed keeps its withholding.
+
+Note the previous `CONFOUNDED_CATEGORIES` was a module-level constant in
+`backtest.py` imported by `analyze_backtest.py`, so the caveat described the
+machine running the ANALYSIS rather than the run that produced the panel.
 
 ### macro_series — dated macro, and the release lag that makes it usable
 
