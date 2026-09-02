@@ -23,6 +23,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.core.cache import get as cache_get, make_key, set as cache_set
 from app.core.db import get_db
+from app.core.breadth import compute_breadth, describe as describe_breadth
 from app.core.regime import classify_regime
 from app.routers.analysis import read_cached_scores
 
@@ -82,6 +83,24 @@ def _last_stored_reading() -> Optional[dict]:
     return reading
 
 
+def _breadth() -> dict:
+    """Aggregate the snapshot's stored flags. Never fetches; never raises."""
+    try:
+        db = get_db()
+        rows = db.execute(
+            "SELECT tradeable, above_sma200, rsi_14 FROM risk_snapshot"
+        ).fetchall()
+    except Exception:
+        return {"enough_data": False, "n_symbols": 0}
+    result = compute_breadth([
+        {"tradeable": r[0], "above_sma200": r[1], "rsi_14": r[2]} for r in rows
+    ])
+    summary = describe_breadth(result)
+    if summary:
+        result["summary"] = summary
+    return result
+
+
 @router.get("/api/market_regime")
 def get_market_regime(interval: str = "Daily"):
     try:
@@ -103,6 +122,17 @@ def get_market_regime(interval: str = "Daily"):
         reading["universe_size"] = len(universe)
         reading["interval"] = interval
         reading["stale"] = False
+
+        # Breadth, from flags the nightly risk snapshot already stores. It needs
+        # no score cache, which is the point: the composite average above is
+        # warm only while a signed-in user on default weights is browsing, and
+        # the app has no anonymous traffic any more. Breadth is as fresh as last
+        # night either way.
+        #
+        # It is NOT a second forecast. Its strongest leg reaches t=-2.44, below
+        # this project's |t| > 3.0 bar, so it ships with the same weak-evidence
+        # framing and carries its own numbers so the UI cannot invent a claim.
+        reading["breadth"] = _breadth()
 
         if reading.get("band") is not None:
             cache_set(ck, reading)

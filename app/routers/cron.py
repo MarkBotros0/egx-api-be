@@ -232,8 +232,9 @@ def risk_snapshot(
             """
             INSERT INTO risk_snapshot
                 (symbol, measured_at, sigma_63_ann_pct, sigma_ewma_ann_pct,
-                 beta, turnover_egp, traded_share, last_price, tradeable)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 beta, turnover_egp, traded_share, last_price, tradeable,
+                 above_sma200, rsi_14)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (symbol) DO UPDATE SET
                 measured_at        = EXCLUDED.measured_at,
                 sigma_63_ann_pct   = EXCLUDED.sigma_63_ann_pct,
@@ -242,7 +243,9 @@ def risk_snapshot(
                 turnover_egp       = EXCLUDED.turnover_egp,
                 traded_share       = EXCLUDED.traded_share,
                 last_price         = EXCLUDED.last_price,
-                tradeable          = EXCLUDED.tradeable
+                tradeable          = EXCLUDED.tradeable,
+                above_sma200       = EXCLUDED.above_sma200,
+                rsi_14             = EXCLUDED.rsi_14
             """,
             (symbol, now,
              (stats or {}).get("sigma_63_ann_pct"),
@@ -251,7 +254,9 @@ def risk_snapshot(
              (stats or {}).get("turnover_egp"),
              (stats or {}).get("traded_share"),
              (stats or {}).get("last_price"),
-             tradeable),
+             tradeable,
+             (stats or {}).get("above_sma200"),
+             (stats or {}).get("rsi_14")),
         )
 
     written, skipped, failed = 0, 0, []

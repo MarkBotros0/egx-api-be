@@ -78,6 +78,13 @@ CALIBRATION = {
     "sigma_window": 400,      # matches INTERNAL_BARS_MIN, the window every
                               # scoring path actually fetches
     "fit_horizon_days": 60,
+    # SHARPNESS. Coverage alone is gameable — a band from zero to infinity
+    # covers 100% of outcomes and tells you nothing — so the width is reported
+    # beside it. Measured: the 90% band spans a median 88% of spot over 60 days
+    # (p25 72%, p75 110%). That is a wide range, and saying so is the point.
+    "band_width_pct_of_spot_median": 88,
+    "band_width_pct_of_spot_p25": 72,
+    "band_width_pct_of_spot_p75": 110,
 }
 
 # EGX's own |z| at each coverage level for a 60-day move, where

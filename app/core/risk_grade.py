@@ -234,8 +234,30 @@ def measure(close: pd.Series, volume: pd.Series,
         except Exception:
             beta = None
 
+    # Breadth inputs, computed here because this function already holds the
+    # 400-bar window and the snapshot cron already pays for the fetch. Market
+    # breadth otherwise needs its own pass over the whole universe, which was
+    # measured at >400s and does not fit a serverless request. Aggregating
+    # stored per-symbol flags at read time costs one query instead.
+    above_sma200 = None
+    if len(close) >= 200:
+        sma200 = float(close.iloc[-200:].mean())
+        if math.isfinite(sma200) and sma200 > 0:
+            above_sma200 = bool(float(close.iloc[-1]) > sma200)
+
+    rsi_14 = None
+    try:
+        from app.core.indicators import rsi as _rsi
+        value = _rsi(close, 14).iloc[-1]
+        if value == value:
+            rsi_14 = round(float(value), 2)
+    except Exception:
+        rsi_14 = None
+
     window = slice(-LIQUIDITY_WINDOW_BARS, None)
     return {
+        "above_sma200": above_sma200,
+        "rsi_14": rsi_14,
         # The calibrated input. EWMA is reported alongside because it forecasts
         # better, but the PERCENTILE is built on the trailing sigma the
         # calibration was actually fitted on — swapping the ranking input

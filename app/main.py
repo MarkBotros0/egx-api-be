@@ -33,6 +33,7 @@ from app.routers import (
     market_regime,
     cron,
     risk,
+    calibration,
 )
 
 app = FastAPI(
@@ -111,5 +112,6 @@ for router_module in (
     market_regime,
     cron,
     risk,
+    calibration,
 ):
     app.include_router(router_module.router)

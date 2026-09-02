@@ -118,6 +118,27 @@ DEFAULT_RISK_FREE_RATE_PCT = 19            # CBE overnight deposit, as of 2026-0
 # set a rate keeps theirs. Delete this once no deployment can still be on 25.
 STALE_RISK_FREE_RATE_PCT = 25
 
+# Percentage points a year that ignoring dividends costs a return figure.
+#
+# MEASURED, not assumed: eight liquid EGX names priced from Yahoo's split- and
+# dividend-event history, comparing price CAGR against total-return CAGR over
+# their full listings. Median 3.70 pp/yr; COMI 3.55, SWDY 3.85, ETEL 6.44,
+# ABUK 10.22, TMGH 0.88.
+#
+# It matters because `score_risk_adjusted` compares a PRICE return against the
+# policy rate, which is a TOTAL return — cash pays you its yield, and the
+# stock's dividends were being discarded before the comparison. The bias runs
+# one way: every stock looks worse against cash than it was.
+#
+# It is DISCLOSED rather than added back, deliberately. `score_quality` already
+# rewards dividend yield as evidence a company generates real cash; adding the
+# same yield into the return comparison would pay a stock twice for one fact and
+# leave a number that means neither thing — the failure the liquidity band was
+# explicitly designed to avoid. core/corporate_actions.py builds a proper
+# total-return series for offline validation; correcting the live score needs a
+# per-symbol series, not a current-yield shortcut.
+DIVIDEND_DRAG_PP_PER_YEAR = 3.70
+
 
 # === Monte Carlo / risk metrics ===
 

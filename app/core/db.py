@@ -415,6 +415,19 @@ def init_db(db: _DB) -> None:
             f"ALTER TABLE pe_data ADD COLUMN IF NOT EXISTS {column} {coltype}"
         )
 
+    # Breadth inputs on risk_snapshot. They ride the snapshot cron, which
+    # already fetches every symbol's 400 bars — computing market breadth in its
+    # own pass was measured at >400s and does not fit a serverless request.
+    # The aggregate is taken at READ time, so a half-refreshed table still
+    # yields a coherent reading over whatever it covers.
+    for column, coltype in (
+        ("above_sma200", "BOOLEAN"),
+        ("rsi_14", "DOUBLE PRECISION"),
+    ):
+        db.execute(
+            f"ALTER TABLE risk_snapshot ADD COLUMN IF NOT EXISTS {column} {coltype}"
+        )
+
     for key in ("pe_last_successful_fetch", "pe_last_attempt_status"):
         db.execute(
             "INSERT INTO settings (key, value) VALUES (%s, '') ON CONFLICT (key) DO NOTHING",

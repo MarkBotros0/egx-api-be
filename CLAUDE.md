@@ -809,6 +809,90 @@ guarded by the `CRON_SECRET` env var exactly as `/api/pe/refresh` is guarded by
 walks each public cron's source and fails if one stops reading its env var —
 without that check the allowlist entry alone would open the route to anyone.
 
+### macro_series — dated macro, and the release lag that makes it usable
+
+```sql
+macro_series (series_code, observed_period, value, released_at, source,
+              updated_at, PRIMARY KEY (series_code, observed_period))
+```
+
+Seven series, all verified reachable before the table was written: EGINTR
+(policy rate), EGIRYY (inflation), EGCPI, EGFER (reserves), EGM2, EGUR via the
+keyless **ECONOMICS scanner** (`scanner.tradingview.com/economics2/scan`), plus
+**FX_IDC:USDEGP**. History comes through the already-vendored client — EGINTR
+300 monthly bars to 2001-05, USDEGP 5,000 daily bars to 51.000. ~6,600 rows.
+
+**`released_at` is the load-bearing column, not `observed_period`.** A macro
+bar's timestamp is its REFERENCE period: August's inflation is not knowable in
+August. Each series carries a publication lag (CPI 10 days, reserves 7, M2 60);
+an FX rate is lag 0 because a price is knowable the day it prints. Read through
+`get_macro_at`, which filters on release — same discipline as
+`fundamentals_annual.first_usable_date`.
+
+Current values ride the nightly `/api/pe/refresh` slot as one POST. History is
+**offline** (`scripts/backfill_macro.py`) because 5,000 FX bars do not fit in 30
+seconds and only need fetching once.
+
+### The USD lens — the largest distortion the app used to hide
+
+**EGX30 rose 8.25x in EGP over twenty years and went to 0.94x in USD.** Twenty
+years of "the market went up 8x" is, in hard currency, twenty years of going
+nowhere, and nothing on screen said so. `core/currency.py` supplies the maths and
+`MacroCard` states it.
+
+**Convert, never subtract.** A stock that doubled in EGP while USD/EGP went
+30 → 50 returned +100% in pounds and **+20%** in dollars; subtracting a "40%
+devaluation" gives +60% — wrong by 40 points, and wrong in the flattering
+direction. `tests/test_currency.py` pins that the two disagree.
+
+### The dividend gap — measured, and disclosed rather than patched
+
+The cached panel is split-adjusted but **dividend-unadjusted**, so every return
+the app computes is a PRICE return while the policy rate it is compared against
+is a TOTAL return. Measured on eight liquid names via Yahoo's dividend history
+(COMI.CA gives 6,493 bars, 24 dividends, 10 splits): **median drag 3.70 pp/yr**
+— COMI 3.55, SWDY 3.85, ETEL 6.44, **ABUK 10.22**, TMGH 0.88.
+
+`score_risk_adjusted` now says so in its reason string. It is **not** added back:
+`score_quality` already credits dividend yield, and paying a stock twice for one
+fact yields a number meaning neither — the failure the liquidity band exists to
+avoid. `core/corporate_actions.py` builds a proper total-return series for
+offline validation; charts stay on RAW close, because a dividend-adjusted chart
+moves every historical level and would silently rescore trend and support.
+
+### GET /api/calibration — the app's own accuracy record
+
+Serves every measured claim with what it actually delivered, read from the
+fitted constants the app uses, so the page cannot drift from the code. Rendered
+at `/calibration`, linked from `ForecastCard`.
+
+**Coverage alone is gameable** — a band from zero to infinity contains every
+outcome — so width ships beside it: the 90% band spans a **median 88% of spot**
+over 60 days (p25 72%, p75 110%). Saying the range is wide is the point.
+
+**The failures are on the same page as the successes**, deliberately: the
+composite's IC ≈ 0, the retracted +0.318, earnings yield falling to t=2.00 once
+low volatility is controlled for, and the profitability/growth factors that flip
+sign between halves. A record that only lists what worked is marketing.
+
+### Market breadth — an operational fix first
+
+`core/breadth.py` aggregates flags the **risk snapshot already stores**
+(`above_sma200`, `rsi_14`, computed inside `measure()` since it holds the window
+anyway). Breadth otherwise needs its own pass over the universe, measured at
+>400s.
+
+The real reason it exists: `/api/market_regime` averages composite scores the
+DASHBOARD happens to have cached, and since the app went closed that cache is
+mostly cold. Breadth is always as fresh as last night's cron.
+
+**It is not a second forecast.** Its strongest leg — % of stocks oversold —
+reaches rho −0.188, Newey-West t −2.44, below the |t| > 3.0 bar; the others
+(mean RSI +1.95, % above 50-day MA +1.90, % above 200-day MA +1.66) do not clear
+even 2. It ships as context with the same framing as the regime card. The one
+notable detail is the SIGN: more stocks oversold predicts WORSE forward returns,
+not a contrarian bounce.
+
 ### GET /api/historical, GET /api/compare
 Multi-symbol historical data for comparison page.
 

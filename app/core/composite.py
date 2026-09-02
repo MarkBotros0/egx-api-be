@@ -46,6 +46,7 @@ import math
 from typing import Optional
 
 from app.core.constants import (
+    DIVIDEND_DRAG_PP_PER_YEAR,
     DEFAULT_RISK_FREE_RATE_PCT,
     SCORE_BUY_MAX,
     SCORE_HOLD_MAX,
@@ -686,6 +687,14 @@ def score_risk_adjusted(annualized_return_pct: Optional[float],
     score = 50.0
     reasons = []
 
+    # The comparison below is biased AGAINST the stock and the size is known.
+    # `annualized_return_pct` is a PRICE return, while the policy rate is a
+    # TOTAL return — cash pays its yield, and the stock's dividends were dropped
+    # before this subtraction. Measured across eight liquid EGX names, that is
+    # worth a median 3.70 percentage points a year (see DIVIDEND_DRAG_PP_PER_YEAR).
+    # It is disclosed in the reason string rather than added back, because
+    # score_quality already credits dividend yield and paying a stock twice for
+    # one fact produces a number that means neither.
     excess = annualized_return_pct - risk_free_rate_pct
     if excess >= 20:
         score += 25
@@ -698,7 +707,13 @@ def score_risk_adjusted(annualized_return_pct: Optional[float],
         reasons.append(f"Ann. return {annualized_return_pct:.0f}% — marginally beats T-bill")
     elif excess >= -10:
         score -= 10
-        reasons.append(f"Ann. return {annualized_return_pct:.0f}% — UNDERPERFORMS T-bill {risk_free_rate_pct:.0f}%")
+        reasons.append(
+            f"Ann. return {annualized_return_pct:.0f}% — UNDERPERFORMS the "
+            f"{risk_free_rate_pct:.0f}% policy rate. Note this compares price "
+            f"only: dividends are not counted, and on the EGX that is worth "
+            f"about {DIVIDEND_DRAG_PP_PER_YEAR:.1f} points a year, so the real "
+            f"gap is narrower."
+        )
     else:
         score -= 20
         reasons.append(f"Ann. return {annualized_return_pct:.0f}% — severely underperforms cash")
