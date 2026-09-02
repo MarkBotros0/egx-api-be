@@ -72,7 +72,7 @@ egx-api-be/                     # Python FastAPI backend
       risk_grade.py             # EWMA vol, tradeability gate, cross-sectional risk grade
       constants.py              # Shared constants (thresholds, lookbacks)
       json_encoding.py          # Float/NaN JSON safety helpers
-      holdings.py               # The one spelling of the open-holdings query
+      holdings.py               # The one spelling of the open-holdings query (all, and per-symbol lots)
       returns.py                # Position-level return maths, shared open/closed
       sales.py                  # Realized-gains maths (pure)
       dividends.py              # Dividend ledger maths + the one spelling of its queries
@@ -110,6 +110,7 @@ egx-api-fe/                     # Next.js frontend
       api.ts                    # Typed fetch wrappers
       types.ts                  # TypeScript interfaces
       constants.ts              # Frontend constants + fallback weight presets
+      positions.ts              # Lots -> one position per symbol; FIFO sale preview
 
 public/                         # Static assets, PWA manifest
 ```
@@ -147,6 +148,30 @@ public/                         # Static assets, PWA manifest
 - Re-fetches analysis when composite weights change (listens to `weightsVersion` from `ScoreWeightsProvider`)
 
 ### Portfolio (`src/app/portfolio/page.tsx`)
+
+**One card per STOCK, not per purchase.** Buying the same symbol twice leaves
+two `portfolio` rows, but the user owns one position, so `lib/positions.ts`
+groups the analysed rows by symbol: total quantity, **cost-weighted** average
+buy price (200 at 41.00 and 100 at 45.20 is 42.40, never the 43.10 a mean of
+the prices gives), summed cost/value/P&L, and `pnl_pct` off total cost. The
+technical half — score, RSI, zones, key levels, P/E — is carried straight from
+the first priced lot: one symbol means one price fetch and one scoring pass, so
+every lot already agrees. A single-lot position renders exactly as it always
+has; the `N lots` pill is what says the price above it is an average.
+
+**Annualized return is NOT aggregated.** The lots have different holding
+periods, and averaging returns over different windows describes neither — the
+same refusal `summarize_realized` makes. The tile reads "per lot" and the
+figure is stated against each lot in the expanded card.
+
+**Sell acts on the position, Edit and Delete on a purchase.** One Sell button
+per card, max = total shares, spanning lots (see `POST /api/sales`); the form
+previews the FIFO split and prices it **over the parts**, because
+`(price − average) × qty` is only right when the sale consumes every lot —
+selling 250 of that 200+100 position realizes 2,540 EGP at 52.00, not the
+2,400 the average gives. Edit/Delete stay per lot inside the expanded row once
+there is more than one.
+
 - Add/Edit/Delete holdings with live re-analysis after each change
 - **Target Price**, **Stop Loss** and **Notes** are still stored per holding and
   still drive distance calculations and stop-loss/target-hit signals, but
@@ -452,6 +477,28 @@ the transaction a failure between the two statements would invent or lose
 shares. The `quantity >= %s` guard lives in the UPDATE's WHERE clause, so two
 rapid submits cannot both succeed.
 
+**A sell is against the POSITION, and may span several purchase lots.**
+`holding_id` names the position — the router reads its symbol and pulls every
+open lot through `holdings.fetch_open_lots` — so `quantity` may exceed what
+that one row holds: someone who bought 200 then 100 owns 300 shares and can
+sell any number up to it. `sales.plan_sale_allocation` splits the count across
+the lots **oldest first (FIFO)**, and each lot consumed writes **its own
+`portfolio_sales` row**. The response is `{sales: [...], holdings: [...]}`,
+plural because one submit can close parts of two purchases.
+
+**One blended row was the alternative and it is wrong.** `compute_sale_metrics`
+annualizes each trade over its own holding window and grades it against the
+policy rate that prevailed across it, so a January basis blended with a June
+one invents a purchase that never happened — the same refusal `summarize_realized`
+makes when it declines to average annualized figures. Per-lot rows also keep
+`DELETE /api/sales` restoring shares to the lot they came from, unchanged.
+
+The date check follows the allocation, not the position: selling 150 of a
+200+100 position touches only the older lot, so a sell date before the newer
+lot's purchase is legitimate. Reaching into that lot rejects it, naming the
+date. `validate_position_sale` and `plan_sale_allocation` are pure, so the
+whole surface is tested without Postgres (`tests/test_sell_tracking.py`).
+
 A full sell sets `quantity = 0` rather than deleting the row: the holding stays
 as the anchor that makes `DELETE /api/sales` restore the position exactly, with
 its target price, stop loss and notes intact.
@@ -526,11 +573,14 @@ a duplicate dividend leaves no trace at all.
 **Reads are on `GET /api/sales`**, which serves both ledgers so the combined
 headline is computed in tested Python rather than in the browser.
 
-**Accepted display consequence:** nothing stops two `portfolio` rows sharing a
-symbol. When that happens the per-holding figure is that SYMBOL's total, labelled
-"(all lots)". Splitting it by today's share count would be fiction — the counts
-differed when the dividend was paid. No aggregate is affected: every total sums
-the ledger directly and never reaches it through holdings.
+**The symbol anchor is now what the UI shows anyway.** Two `portfolio` rows
+sharing a symbol render as ONE card, so the per-card dividend figure IS that
+symbol's total and needs no caveat. (It used to read "(all lots)" because the
+row was one lot of several. `dividends_symbol_shared` still travels on each
+holding for any consumer that shows lots individually.) Splitting the amount by
+today's share count would be fiction either way — the counts differed when the
+dividend was paid. No aggregate is affected: every total sums the ledger
+directly and never reaches it through holdings.
 
 ### GET /api/portfolio_analysis
 **The heaviest endpoint.** Per-holding analysis + portfolio-level risk metrics + Monte Carlo + macro + signals.
@@ -1519,6 +1569,28 @@ Returned in `signals` array from portfolio_analysis. Sorted by priority:
 | `opportunity` | `$` | Golden Cross, RSI/Stochastic oversold+bullish crossover, near support, target approaching, divergence_bullish, **`relative_strength_leader`** (alpha > +5% vs EGX30), **`mfi_extreme`** at <20, **`entry_zone_active`** at medium/high confidence, **`pe_undervalued`** (P/E < 8) |
 | `info` | `i` | Beta context, ATR-based stop-loss suggestion, macro context, profit-taking reminder, **`very_strong_composite` / `strong_composite` / `weak_composite` / `very_weak_composite`** (condition readings — all `info` severity, never action_required, because the score is not predictive), **`adx_strong_trend`** (ADX > 30, direction from DI±), **`entry_zone_active` / `exit_zone_active` at LOW confidence** |
 
+**One symbol, one voice.** The portfolio shows one card per stock, so the panel
+beside it speaks once too. Two halves, and they are different problems:
+
+- **Technical signals are deduped** by `(type, symbol)` in
+  `dedupe_symbol_signals`. Two lots of one symbol are scored from ONE price
+  series, so those signals come out character-for-character identical and
+  keeping the first is lossless. It runs while `signals` holds only
+  per-holding entries; signals with **no** symbol (sector concentration,
+  drawdown, Sharpe) pass through untouched, or three sector warnings would
+  fold into one.
+- **Cost-basis signals are REBUILT from the position** by
+  `build_position_signals` — `stop_breached`/`stop_loss`, `target_reached`/
+  `target_hit`, `big_loss`, `profit_taking`, `cash_underperformer`. These are
+  the ones whose duplicates disagree: a January lot up 30% and a June lot down
+  20% are both true, and reporting either as "your position in X" is not. The
+  percentage is cost-weighted, days run from the earliest lot, and stop/target
+  come from the **binding** lot — the highest stop is the first price falls
+  through, the lowest target the first it reaches. Deduping these instead
+  would report one lot's loss as the position's.
+
+`portfolio_metrics.num_holdings` counts distinct SYMBOLS for the same reason.
+
 **Entry and exit zones are graded by confidence, both of them.** `low` is the
 leftover bucket in `levels._entry_confidence` — price within 5% of a support
 and momentum not overbought, but the support untested and RSI unremarkable.
@@ -1563,11 +1635,11 @@ Components in `src/app/components/`:
 **Portfolio views:**
 - `PortfolioSummary` — Totals + avg composite score tile + sector allocation pie/stacked bar
 - `RiskDashboard` — Sharpe/Sortino/MaxDD/VaR/Current DD grid
-- `HoldingsTable` — Full table desktop (Score column with gauge + signal), cards mobile (gauge in card header + expanded detail). Error rows use `colSpan={10}` plus a dedicated Actions cell, coordinated against the expanded detail row's `colSpan={12}` — both must total the table's 12 columns, and a mismatch between the two is a bug this project has already shipped once. Dividends render as a per-symbol `DividendPill` next to the symbol, not as a new column, precisely to avoid touching either colSpan. `onSell` opens `SellHoldingForm`, `onAddDividend` opens `AddDividendForm`, per holding.
+- `HoldingsTable` — Full table desktop (Score column with gauge + signal), cards mobile (gauge in card header + expanded detail). **Rows are POSITIONS, from `lib/positions.ts::groupHoldings`** — one per symbol, keyed by symbol; the purchases behind an average appear as `LotList` inside the expanded row, which is also where per-lot Edit/Delete live once there is more than one. Error rows use `colSpan={10}` plus a dedicated Actions cell, coordinated against the expanded detail row's `colSpan={12}` — both must total the table's 12 columns, and a mismatch between the two is a bug this project has already shipped once. The lot list goes INSIDE the existing expanded cell, so it adds no column. Dividends render as a per-symbol `DividendPill` next to the symbol, not as a new column, for the same reason. `onSell` takes a **symbol** (the page resolves the lots), `onAddDividend` opens `AddDividendForm`.
 - `MacroCard` — EGX30/USD-EGP/CBE rate indicator row
 - `AdvicePanel` — Signals rendered with severity styles + learn links
 - `AddHoldingForm` — Full-screen modal on mobile, inline on desktop
-- `SellHoldingForm` — Records a full or partial sell against a holding
+- `SellHoldingForm` — Records a sell against a POSITION (`position={symbol, name, lots}`), up to its total shares across every open lot. Shows the FIFO split and sums the realized figure over those parts; `min` on the date picker is the newest lot the sale reaches, so it relaxes as the quantity falls back inside the older lot.
 - `AddDividendForm` — Records a dividend payment (symbol, amount received, pay date, optional shares/notes) against a holding
 - `RealizedGainsCard` — Summary of banked gains/losses (the "Winnings" card). Headline is now **gains + dividends**: `total_dividends` and `dividend_count` from `summarize_realized` render alongside the capital-gains figure, clearly separated, never blended into one number.
 - `ClosedPositionsTable` — Collapsed table of past sales, expandable per row

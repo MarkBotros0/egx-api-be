@@ -148,7 +148,8 @@ from app.core.dividends import summarize_realized
 from app.core.sales import (
     SaleValidationError,
     compute_sale_metrics,
-    validate_sale,
+    plan_sale_allocation,
+    validate_position_sale,
 )
 
 TODAY = date(2026, 9, 1)
@@ -176,20 +177,22 @@ def _sale(quantity=100, buy_price=50.0, sell_price=60.0,
 # ---- validation ----
 
 def test_partial_sell_is_accepted():
-    out = validate_sale(holding=_holding(quantity=100), quantity=40,
+    out = validate_position_sale(lots=[_holding(quantity=100)], quantity=40,
                         sell_price=60.0, sell_date="2026-09-01", today=TODAY)
-    assert out == {"quantity": 40, "sell_price": 60.0, "sell_date": "2026-09-01"}
+    assert {k: out[k] for k in ("quantity", "sell_price", "sell_date")} == {
+        "quantity": 40, "sell_price": 60.0, "sell_date": "2026-09-01",
+    }
 
 
 def test_selling_the_whole_position_is_accepted():
-    out = validate_sale(holding=_holding(quantity=100), quantity=100,
+    out = validate_position_sale(lots=[_holding(quantity=100)], quantity=100,
                         sell_price=60.0, sell_date="2026-09-01", today=TODAY)
     assert out["quantity"] == 100
 
 
 def test_over_selling_is_rejected_and_names_the_remaining_quantity():
     with pytest.raises(SaleValidationError) as exc:
-        validate_sale(holding=_holding(quantity=100), quantity=101,
+        validate_position_sale(lots=[_holding(quantity=100)], quantity=101,
                       sell_price=60.0, sell_date="2026-09-01", today=TODAY)
     assert "100" in str(exc.value)
 
@@ -197,39 +200,156 @@ def test_over_selling_is_rejected_and_names_the_remaining_quantity():
 @pytest.mark.parametrize("bad_quantity", [0, -5, "abc", None, 1.5])
 def test_non_positive_or_non_integer_quantity_is_rejected(bad_quantity):
     with pytest.raises(SaleValidationError):
-        validate_sale(holding=_holding(), quantity=bad_quantity,
+        validate_position_sale(lots=[_holding()], quantity=bad_quantity,
                       sell_price=60.0, sell_date="2026-09-01", today=TODAY)
 
 
 @pytest.mark.parametrize("bad_price", [0, -1.0, "abc", None])
 def test_non_positive_sell_price_is_rejected(bad_price):
     with pytest.raises(SaleValidationError):
-        validate_sale(holding=_holding(), quantity=10,
+        validate_position_sale(lots=[_holding()], quantity=10,
                       sell_price=bad_price, sell_date="2026-09-01", today=TODAY)
 
 
 def test_sell_date_before_buy_date_is_rejected():
     with pytest.raises(SaleValidationError):
-        validate_sale(holding=_holding(buy_date="2026-06-01"), quantity=10,
+        validate_position_sale(lots=[_holding(buy_date="2026-06-01")], quantity=10,
                       sell_price=60.0, sell_date="2026-05-31", today=TODAY)
 
 
 def test_future_sell_date_is_rejected():
     with pytest.raises(SaleValidationError):
-        validate_sale(holding=_holding(), quantity=10, sell_price=60.0,
+        validate_position_sale(lots=[_holding()], quantity=10, sell_price=60.0,
                       sell_date="2026-09-02", today=TODAY)
 
 
 def test_sell_date_defaults_to_today():
-    out = validate_sale(holding=_holding(), quantity=10, sell_price=60.0,
+    out = validate_position_sale(lots=[_holding()], quantity=10, sell_price=60.0,
                         sell_date=None, today=TODAY)
     assert out["sell_date"] == "2026-09-01"
 
 
 def test_unparseable_sell_date_is_rejected():
     with pytest.raises(SaleValidationError):
-        validate_sale(holding=_holding(), quantity=10, sell_price=60.0,
+        validate_position_sale(lots=[_holding()], quantity=10, sell_price=60.0,
                       sell_date="tomorrow", today=TODAY)
+
+
+# ---- selling one POSITION across several lots ----
+#
+# Buying the same symbol twice leaves two `portfolio` rows, and the user sells
+# a share count, not a lot: 200 then 100 means any number from 1 to 300 is a
+# legal sell. The split is FIFO — oldest lot first — and each lot consumed
+# becomes its OWN portfolio_sales row, because annualized return and the T-bill
+# hurdle are per-trade figures. Blending a January cost basis with a June one
+# would invent a holding period neither purchase had.
+
+def _lot(lot_id, quantity, buy_price, buy_date, created_at=""):
+    return {
+        "id": lot_id, "symbol": "COMI", "name": "Commercial International Bank",
+        "sector": "Banks", "quantity": quantity, "buy_price": buy_price,
+        "buy_date": buy_date, "created_at": created_at,
+    }
+
+
+def _two_lots():
+    # Deliberately passed newest-first: the plan must sort, not trust the order.
+    return [
+        _lot("new", 100, 45.20, "2026-03-03"),
+        _lot("old", 200, 41.00, "2026-01-12"),
+    ]
+
+
+def test_a_sale_inside_the_first_lot_touches_only_that_lot():
+    plan = plan_sale_allocation(_two_lots(), 150)
+    assert [(p["id"], p["quantity"]) for p in plan] == [("old", 150)]
+
+
+def test_a_sale_spanning_two_lots_splits_oldest_first():
+    plan = plan_sale_allocation(_two_lots(), 250)
+    assert [(p["id"], p["quantity"]) for p in plan] == [("old", 200), ("new", 50)]
+    # Each part keeps its OWN cost basis and buy date — that is the whole point.
+    assert [(p["buy_price"], p["buy_date"]) for p in plan] == [
+        (41.00, "2026-01-12"), (45.20, "2026-03-03"),
+    ]
+
+
+def test_a_sale_of_the_whole_position_consumes_every_lot():
+    plan = plan_sale_allocation(_two_lots(), 300)
+    assert sum(p["quantity"] for p in plan) == 300
+    assert len(plan) == 2
+
+
+def test_a_plan_landing_exactly_on_a_lot_boundary_does_not_touch_the_next():
+    plan = plan_sale_allocation(_two_lots(), 200)
+    assert [(p["id"], p["quantity"]) for p in plan] == [("old", 200)]
+
+
+def test_lots_with_no_shares_left_are_skipped():
+    # A fully-sold lot is kept as the undo anchor, so it is still in the table.
+    lots = [_lot("sold", 0, 30.0, "2025-01-01"), _lot("open", 50, 41.0, "2026-01-12")]
+    plan = plan_sale_allocation(lots, 50)
+    assert [(p["id"], p["quantity"]) for p in plan] == [("open", 50)]
+
+
+def test_planning_more_than_the_position_holds_is_refused():
+    with pytest.raises(SaleValidationError) as exc:
+        plan_sale_allocation(_two_lots(), 301)
+    assert "300" in str(exc.value)
+
+
+def test_position_validation_accepts_a_quantity_no_single_lot_could_cover():
+    out = validate_position_sale(lots=_two_lots(), quantity=250, sell_price=52.0,
+                                 sell_date="2026-09-01", today=TODAY)
+    assert out["quantity"] == 250
+    assert [(p["id"], p["quantity"]) for p in out["allocation"]] == [
+        ("old", 200), ("new", 50),
+    ]
+
+
+def test_over_selling_a_position_names_the_position_total_not_one_lot():
+    with pytest.raises(SaleValidationError) as exc:
+        validate_position_sale(lots=_two_lots(), quantity=400, sell_price=52.0,
+                               sell_date="2026-09-01", today=TODAY)
+    assert "300" in str(exc.value)
+
+
+def test_the_sell_date_must_clear_the_newest_lot_being_sold():
+    # Selling 250 reaches into the March lot, so a February sell date is a sale
+    # of shares that were not owned yet.
+    with pytest.raises(SaleValidationError) as exc:
+        validate_position_sale(lots=_two_lots(), quantity=250, sell_price=52.0,
+                               sell_date="2026-02-01", today=TODAY)
+    assert "2026-03-03" in str(exc.value)
+
+
+def test_a_sell_date_the_older_lot_alone_supports_is_accepted():
+    out = validate_position_sale(lots=_two_lots(), quantity=150, sell_price=52.0,
+                                 sell_date="2026-02-01", today=TODAY)
+    assert out["sell_date"] == "2026-02-01"
+
+
+def test_a_single_lot_position_allocates_the_whole_sale_to_that_lot():
+    # The common case must be untouched by the multi-lot machinery: one part,
+    # carrying that lot's own basis, and the same normalized fields a single
+    # sell has always produced.
+    out = validate_position_sale(lots=[_lot("h1", 100, 50.0, "2026-01-01")],
+                                 quantity=40, sell_price=60.0,
+                                 sell_date="2026-09-01", today=TODAY)
+    assert {k: out[k] for k in ("quantity", "sell_price", "sell_date")} == {
+        "quantity": 40, "sell_price": 60.0, "sell_date": "2026-09-01",
+    }
+    assert [(p["id"], p["quantity"], p["buy_price"]) for p in out["allocation"]] == [
+        ("h1", 40, 50.0),
+    ]
+
+
+def test_selling_a_position_that_is_fully_closed_says_you_hold_zero():
+    with pytest.raises(SaleValidationError) as exc:
+        validate_position_sale(lots=[_lot("sold", 0, 30.0, "2025-01-01")],
+                               quantity=10, sell_price=52.0,
+                               sell_date="2026-09-01", today=TODAY)
+    assert "0 shares" in str(exc.value)
 
 
 # ---- per-sale metrics ----

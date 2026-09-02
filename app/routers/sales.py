@@ -26,13 +26,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.core.auth import CurrentUser, get_current_user
 from app.core.constants import DEFAULT_RISK_FREE_RATE_PCT
 from app.core.db import get_db
-from app.core.holdings import HOLDING_COLUMNS, row_to_holding
+from app.core.holdings import HOLDING_COLUMNS, fetch_open_lots, row_to_holding
 from app.core.dividends import fetch_dividends, summarize_realized
 from app.core.macro_series import get_risk_free_steps
 from app.core.sales import (
     SaleValidationError,
     compute_sale_metrics,
-    validate_sale,
+    validate_position_sale,
 )
 
 router = APIRouter()
@@ -64,6 +64,18 @@ def _risk_free_rate_pct(db) -> float:
 
 @router.post("/api/sales", status_code=201)
 def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
+    """
+    Record a sell against a POSITION, which may span several purchase lots.
+
+    `holding_id` identifies the position — its symbol — and `quantity` may
+    exceed what that one row holds: someone who bought 200 then 100 owns 300
+    shares and can sell any number up to it. The lots are consumed oldest
+    first and each one consumed writes its OWN portfolio_sales row (see
+    `sales.plan_sale_allocation` for why a blended row would be a lie).
+
+    Every decrement and insert runs inside ONE transaction, so a sale spanning
+    two lots cannot half-land.
+    """
     try:
         holding_id = body.get("holding_id")
         if not holding_id:
@@ -73,17 +85,21 @@ def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
 
         # Deliberately NOT fetch_open_holdings: this is a by-id lookup and it
         # must see the row regardless of remaining quantity so the error
-        # message can say "you hold 0 shares" rather than "not found".
+        # message can say "you hold 0 shares" rather than "not found". It
+        # resolves the SYMBOL; the shares come from the lot set below, so a
+        # sale can still be recorded from a row that is itself fully closed.
         row = db.execute(
             f"SELECT {HOLDING_COLUMNS} FROM portfolio WHERE id = %s AND user_id = %s",
             (holding_id, user.id),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Holding not found: {holding_id}")
-        holding = row_to_holding(row)
+        anchor = row_to_holding(row)
 
-        clean = validate_sale(
-            holding=holding,
+        lots = fetch_open_lots(db, user.id, anchor["symbol"])
+
+        clean = validate_position_sale(
+            lots=lots,
             quantity=body.get("quantity"),
             sell_price=body.get("sell_price"),
             sell_date=body.get("sell_date"),
@@ -91,51 +107,61 @@ def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
         )
 
         now = datetime.utcnow().isoformat() + "Z"
-        sale_id = str(uuid.uuid4())
+        notes = body.get("notes", "")
+        sales: list[dict] = []
+        remaining_by_lot: dict[str, int] = {}
 
         with db.transaction() as tx:
-            # `quantity >= %s` in the WHERE clause makes the decrement itself
-            # the over-sell guard, so two rapid submits cannot both succeed.
-            updated = tx.execute(
-                "UPDATE portfolio SET quantity = quantity - %s, updated_at = %s "
-                "WHERE id = %s AND user_id = %s AND quantity >= %s "
-                "RETURNING quantity",
-                (clean["quantity"], now, holding_id, user.id, clean["quantity"]),
-            ).fetchone()
-            if updated is None:
-                # `validate_sale` already checked the quantity against the row
-                # read above, so reaching here means a concurrent sell moved
-                # the count underneath us. Quoting `holding['quantity']` would
-                # print "You hold 100 shares — you cannot sell 100."
-                raise SaleValidationError(
-                    "Not enough shares remaining — refresh and try again."
+            for part in clean["allocation"]:
+                # `quantity >= %s` in the WHERE clause makes the decrement
+                # itself the over-sell guard, so two rapid submits cannot both
+                # succeed — and it guards every lot, not just the first.
+                updated = tx.execute(
+                    "UPDATE portfolio SET quantity = quantity - %s, updated_at = %s "
+                    "WHERE id = %s AND user_id = %s AND quantity >= %s "
+                    "RETURNING quantity",
+                    (part["quantity"], now, part["id"], user.id, part["quantity"]),
+                ).fetchone()
+                if updated is None:
+                    # The plan was built from rows read above, so reaching here
+                    # means a concurrent sell moved the count underneath us.
+                    # Quoting the lot's own count would print "You hold 100
+                    # shares — you cannot sell 100."
+                    raise SaleValidationError(
+                        "Not enough shares remaining — refresh and try again."
+                    )
+
+                sale_id = str(uuid.uuid4())
+                tx.execute(
+                    f"INSERT INTO portfolio_sales ({_SALE_COLUMNS}, user_id) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        sale_id, part["id"], part["symbol"], part["name"],
+                        part.get("sector") or "", part["quantity"],
+                        float(part["buy_price"]), part["buy_date"],
+                        clean["sell_price"], clean["sell_date"],
+                        notes, now, user.id,
+                    ),
                 )
+                remaining_by_lot[part["id"]] = updated[0]
+                sales.append({
+                    "id": sale_id, "holding_id": part["id"], "symbol": part["symbol"],
+                    "name": part["name"], "sector": part.get("sector") or "",
+                    "quantity": part["quantity"], "buy_price": float(part["buy_price"]),
+                    "buy_date": part["buy_date"], "sell_price": clean["sell_price"],
+                    "sell_date": clean["sell_date"], "notes": notes,
+                    "created_at": now,
+                })
 
-            tx.execute(
-                f"INSERT INTO portfolio_sales ({_SALE_COLUMNS}, user_id) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (
-                    sale_id, holding_id, holding["symbol"], holding["name"],
-                    holding.get("sector") or "", clean["quantity"],
-                    float(holding["buy_price"]), holding["buy_date"],
-                    clean["sell_price"], clean["sell_date"],
-                    body.get("notes", ""), now, user.id,
-                ),
-            )
-            remaining = updated[0]
-
-        sale = {
-            "id": sale_id, "holding_id": holding_id, "symbol": holding["symbol"],
-            "name": holding["name"], "sector": holding.get("sector") or "",
-            "quantity": clean["quantity"], "buy_price": float(holding["buy_price"]),
-            "buy_date": holding["buy_date"], "sell_price": clean["sell_price"],
-            "sell_date": clean["sell_date"], "notes": body.get("notes", ""),
-            "created_at": now,
-        }
+        # Read ONCE for the whole request, not once per lot consumed.
+        rfr = _risk_free_rate_pct(db)
+        rate_steps = get_risk_free_steps(db)
         return {
-            "sale": compute_sale_metrics(sale, _risk_free_rate_pct(db),
-                                         rate_steps=get_risk_free_steps(db)),
-            "holding": {**holding, "quantity": remaining, "updated_at": now},
+            "sales": [compute_sale_metrics(s, rfr, rate_steps=rate_steps) for s in sales],
+            "holdings": [
+                {**lot, "quantity": remaining_by_lot[lot["id"]], "updated_at": now}
+                for lot in lots if lot["id"] in remaining_by_lot
+            ],
         }
 
     except SaleValidationError as e:

@@ -48,3 +48,21 @@ def fetch_open_holdings(db, user_id: str) -> list[dict]:
         (user_id,),
     ).fetchall()
     return [row_to_holding(r) for r in rows]
+
+
+def fetch_open_lots(db, user_id: str, symbol: str) -> list[dict]:
+    """
+    Every open lot of ONE symbol, oldest purchase first.
+
+    Buying the same symbol twice leaves two rows, and the user sells out of the
+    position rather than out of a lot — so recording a sale needs all of them,
+    not just the row the Sell button came from. Ordered here AND re-sorted by
+    `sales.sort_lots`, which owns the tie-break the allocation depends on.
+    """
+    rows = db.execute(
+        f"SELECT {HOLDING_COLUMNS} FROM portfolio "
+        "WHERE user_id = %s AND symbol = %s AND quantity > 0 "
+        "ORDER BY buy_date, created_at",
+        (user_id, symbol),
+    ).fetchall()
+    return [row_to_holding(r) for r in rows]

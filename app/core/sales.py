@@ -29,15 +29,7 @@ def _parse_date(value: str) -> Optional[date]:
         return None
 
 
-def validate_sale(*, holding: dict, quantity, sell_price, sell_date, today: date) -> dict:
-    """
-    Check a sell request against the holding it is against.
-
-    Returns normalized {quantity, sell_price, sell_date}. Raises
-    SaleValidationError with a message written for the user, not the log.
-    """
-    held = int(holding.get("quantity") or 0)
-
+def _coerce_quantity(quantity) -> int:
     if isinstance(quantity, bool) or not isinstance(quantity, int):
         try:
             if float(quantity) != int(float(quantity)):
@@ -47,18 +39,20 @@ def validate_sale(*, holding: dict, quantity, sell_price, sell_date, today: date
             raise SaleValidationError("Quantity must be a whole number of shares.")
     if quantity <= 0:
         raise SaleValidationError("Quantity must be at least 1 share.")
-    if quantity > held:
-        raise SaleValidationError(
-            f"You hold {held} shares — you cannot sell {quantity}."
-        )
+    return quantity
 
+
+def _coerce_price(sell_price) -> float:
     try:
         sell_price = float(sell_price)
     except (TypeError, ValueError):
         raise SaleValidationError("Sell price must be a number.")
     if sell_price <= 0:
         raise SaleValidationError("Sell price must be greater than 0.")
+    return sell_price
 
+
+def _coerce_sell_date(sell_date, today: date) -> date:
     if sell_date in (None, ""):
         parsed = today
     else:
@@ -67,17 +61,106 @@ def validate_sale(*, holding: dict, quantity, sell_price, sell_date, today: date
             raise SaleValidationError("Sell date must be a date like 2026-09-01.")
     if parsed > today:
         raise SaleValidationError("Sell date cannot be in the future.")
+    return parsed
 
-    buy = _parse_date(holding.get("buy_date") or "")
-    if buy is not None and parsed < buy:
+
+def sort_lots(lots: list[dict]) -> list[dict]:
+    """
+    Oldest purchase first.
+
+    All three keys are in the sort so the order is TOTAL: two lots bought the
+    same day would otherwise be split in whatever order the database happened
+    to return, and the same sell request could allocate differently on a retry.
+    """
+    return sorted(
+        lots,
+        key=lambda lot: (
+            str(lot.get("buy_date") or ""),
+            str(lot.get("created_at") or ""),
+            str(lot.get("id") or ""),
+        ),
+    )
+
+
+def plan_sale_allocation(lots: list[dict], quantity: int) -> list[dict]:
+    """
+    Split one sell across the open lots of a symbol, oldest first (FIFO).
+
+    Buying the same symbol twice leaves two `portfolio` rows, but the user owns
+    one position and sells a share count out of it. This turns that count into
+    per-lot parts, each carrying THAT lot's cost basis and buy date — the
+    caller writes one `portfolio_sales` row per part.
+
+    One blended row was the alternative and it is wrong: `compute_sale_metrics`
+    annualizes each trade over its own holding window and grades it against the
+    policy rate that prevailed across it, so a blended basis would invent a
+    purchase that never happened. Per-lot rows also keep DELETE /api/sales
+    restoring shares to the lot they came from.
+
+    Returns a copy of each lot with `quantity` set to the part being sold and
+    `lot_quantity` to what that lot held before it.
+    """
+    quantity = int(quantity)
+    open_lots = [lot for lot in lots if int(lot.get("quantity") or 0) > 0]
+    held = sum(int(lot["quantity"]) for lot in open_lots)
+    if quantity > held:
         raise SaleValidationError(
-            f"Sell date cannot be before the buy date ({buy.isoformat()})."
+            f"You hold {held} shares — you cannot sell {quantity}."
         )
+
+    remaining = quantity
+    plan: list[dict] = []
+    for lot in sort_lots(open_lots):
+        if remaining <= 0:
+            break
+        available = int(lot["quantity"])
+        take = min(available, remaining)
+        plan.append({**lot, "quantity": take, "lot_quantity": available})
+        remaining -= take
+    return plan
+
+
+def validate_position_sale(*, lots: list[dict], quantity, sell_price, sell_date,
+                           today: date) -> dict:
+    """
+    Check a sell request against the whole POSITION — every open lot of one
+    symbol — and return the FIFO plan alongside the normalized fields.
+
+    Returns {quantity, sell_price, sell_date, allocation}. Raises
+    SaleValidationError with a message written for the user, not the log.
+    """
+    open_lots = [lot for lot in lots if int(lot.get("quantity") or 0) > 0]
+    held = sum(int(lot["quantity"]) for lot in open_lots)
+
+    quantity = _coerce_quantity(quantity)
+    if quantity > held:
+        raise SaleValidationError(
+            f"You hold {held} shares — you cannot sell {quantity}."
+        )
+    sell_price = _coerce_price(sell_price)
+    parsed = _coerce_sell_date(sell_date, today)
+
+    allocation = plan_sale_allocation(open_lots, quantity)
+
+    # Only the lots actually being sold constrain the date. Selling 150 of a
+    # 200+100 position touches the January lot alone, so a February sell date
+    # is legitimate even though a March lot exists.
+    consumed_buys = [d for d in (_parse_date(p.get("buy_date") or "") for p in allocation)
+                     if d is not None]
+    if consumed_buys:
+        newest = max(consumed_buys)
+        if parsed < newest:
+            where = ("the buy date" if len(allocation) == 1
+                     else "the buy date of the newest lot you are selling")
+            raise SaleValidationError(
+                f"Sell date cannot be before {where} ({newest.isoformat()})."
+            )
 
     return {
         "quantity": quantity,
         "sell_price": sell_price,
         "sell_date": parsed.isoformat(),
+        "allocation": allocation,
     }
 
 

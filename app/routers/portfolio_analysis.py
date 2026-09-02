@@ -58,6 +58,128 @@ from app.core.indicators import (
 router = APIRouter()
 
 
+def dedupe_symbol_signals(signals: list[dict]) -> list[dict]:
+    """
+    Collapse per-lot duplicates of the same (type, symbol).
+
+    Two `portfolio` rows holding one symbol are scored from ONE price series,
+    so every technical signal they raise — score, crossovers, RSI, zones, key
+    levels, P/E, liquidity — comes out character-for-character identical.
+    Emitting each twice says nothing twice, and the portfolio now renders one
+    card per symbol, so the panel beside it must speak once too.
+
+    Keeping the first is lossless BECAUSE they are identical. The signals that
+    genuinely differ between lots are the ones reading the user's cost basis,
+    and those are never deduped — they are built from the aggregated position
+    by `build_position_signals`, so a card's advice describes the whole
+    position rather than whichever lot happened to be scored first.
+
+    Signals carrying NO symbol pass through untouched. Portfolio-wide warnings
+    (sector concentration, drawdown, Sharpe) all share `symbol: None`, so keying
+    on the pair alone would fold three sector warnings into one. The call site
+    runs this before those are appended, and this guard means a later caller
+    getting that order wrong loses nothing.
+    """
+    seen = set()
+    deduped = []
+    for sig in signals:
+        symbol = sig.get("symbol")
+        if not symbol:
+            deduped.append(sig)
+            continue
+        key = (sig.get("type"), symbol)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(sig)
+    return deduped
+
+
+def build_position_signals(positions: list[dict], *, risk_free_rate_pct: float,
+                           today) -> list[dict]:
+    """
+    The signals that read the user's own cost basis, one per SYMBOL.
+
+    Stop-loss, target, big loss, profit taking and the cash comparison all
+    describe a purchase rather than a stock, so with two lots of one symbol
+    they are the only signals whose duplicates disagree — a January lot up 30%
+    and a June lot down 20% are both true, and reporting either as "your
+    position in X" is not. Each is computed once, from the whole position.
+
+    Stop and target come from the BINDING lot: the highest stop is the first
+    one price falls through, the lowest target the first one it reaches.
+    """
+    out: list[dict] = []
+    for pos in positions:
+        symbol = pos["symbol"]
+        invested = pos["invested"]
+        current_price = pos["current_price"]
+        if not current_price or invested <= 0:
+            continue
+
+        pnl_pct = (pos["current_value"] / invested - 1) * 100
+        days_held = _days_between(pos["earliest_buy_date"], today)
+        ann_return = _annualized_return(pnl_pct, days_held)
+
+        stop_loss = pos.get("stop_loss")
+        target_price = pos.get("target_price")
+        dist_to_stop = (stop_loss / current_price - 1) * 100 if stop_loss else None
+        dist_to_target = (target_price / current_price - 1) * 100 if target_price else None
+
+        # dist_to_stop = (stop / price - 1) * 100, so it turns POSITIVE once
+        # price falls below the stop. Without a separate branch an
+        # already-breached stop reported as "X% away from your stop" —
+        # indistinguishable from a stop still X% below the price.
+        if dist_to_stop is not None and dist_to_stop >= 0:
+            out.append({"type": "stop_breached", "severity": "action_required", "symbol": symbol,
+                "message": f"{symbol} is trading {dist_to_stop:.1f}% BELOW your stop-loss at {stop_loss:.2f} EGP — your exit rule has triggered.",
+                "explanation": "You set this stop-loss to cap your loss on this position. Price has passed it, so the rule you wrote before buying says to sell. Acting on your own pre-set rule is what stops a small loss becoming a large one.",
+                "learn_concept": "stop_loss"})
+        elif dist_to_stop is not None and dist_to_stop > -10:
+            prio = "action_required" if dist_to_stop > -5 else "warning"
+            out.append({"type": "stop_loss", "severity": prio, "symbol": symbol,
+                "message": f"{symbol} is {abs(dist_to_stop):.1f}% away from your stop-loss at {stop_loss:.2f} EGP.",
+                "explanation": "A stop-loss is a pre-set price where you sell to limit losses.",
+                "learn_concept": "stop_loss"})
+
+        if dist_to_target is not None and 0 < dist_to_target < 10:
+            out.append({"type": "target_reached", "severity": "opportunity", "symbol": symbol,
+                "message": f"{symbol} is {dist_to_target:.1f}% away from your target price of {target_price:.2f} EGP.",
+                "explanation": "Consider taking partial profits or setting a trailing stop.",
+                "learn_concept": "stop_loss"})
+
+        if dist_to_target is not None and dist_to_target <= 0:
+            out.append({"type": "target_hit", "severity": "opportunity", "symbol": symbol,
+                "message": f"{symbol} has reached your target price! Current: {current_price:.2f} EGP, Target: {target_price:.2f} EGP.",
+                "explanation": "Your stock hit the target you set. Review: set a new target or take profits.",
+                "learn_concept": "stop_loss"})
+
+        if pnl_pct < BIG_LOSS_PCT:
+            out.append({"type": "big_loss", "severity": "warning", "symbol": symbol,
+                "message": f"Your position in {symbol} has lost {abs(pnl_pct):.1f}%. Review if your original thesis still holds.",
+                "explanation": f"A {abs(BIG_LOSS_PCT)}%+ loss is significant. Ask yourself: has the reason you bought changed?",
+                "learn_concept": "stop_loss"})
+
+        if pnl_pct > PROFIT_TARGET_PCT:
+            out.append({"type": "profit_taking", "severity": "info", "symbol": symbol,
+                "message": f"{symbol} has gained {pnl_pct:.1f}%. Consider taking partial profits.",
+                "explanation": "Taking partial profits lets you secure gains while keeping upside exposure.",
+                "learn_concept": "stop_loss"})
+
+        # Cash underperformer: annualized return < risk-free AND held >90 days.
+        # Says "your position in X" because ann_return annualizes the user's
+        # own buy price, not the stock's market return — the Risk-Adjusted
+        # category uses the latter and the two can differ. Days are counted
+        # from the EARLIEST lot, which is the position the user opened.
+        if days_held > 90 and ann_return is not None and ann_return < risk_free_rate_pct:
+            out.append({"type": "cash_underperformer", "severity": "warning", "symbol": symbol,
+                "message": f"Your position in {symbol} has returned {ann_return:.0f}% annualized since you bought it — less than the {risk_free_rate_pct:.0f}% T-bill rate.",
+                "explanation": "Holding this stock has earned you less than risk-free cash would have. Either your thesis needs to play out soon, or capital is better placed in T-bills. (This measures your purchase, not the stock's own 12-month performance — the Risk-Adjusted score covers that.)",
+                "learn_concept": "risk_adjusted_return"})
+
+    return out
+
+
 def _analyze(holdings, user_id: str = None):
     if not holdings:
         raise HTTPException(status_code=400, detail="No holdings provided")
@@ -91,6 +213,10 @@ def _analyze(holdings, user_id: str = None):
 
     sector_values = {}
     stock_values = {}
+    # One entry per SYMBOL, accumulated across its lots — the position the user
+    # actually holds, and the unit the holdings card and the cost-basis signals
+    # both speak in.
+    positions = {}
     all_returns = {}
     # Holdings we could not price. Their cost basis must NOT land in
     # total_invested — counting cost with no matching value fabricates a loss.
@@ -430,6 +556,31 @@ def _analyze(holdings, user_id: str = None):
             }
             stock_analyses.append(analysis)
 
+            # Accumulated from the RAW figures, not the rounded ones stored in
+            # `analysis`, so a single-lot position reproduces exactly the
+            # numbers the per-lot code used to put in these messages.
+            pos = positions.setdefault(symbol, {
+                "symbol": symbol, "quantity": 0, "invested": 0.0,
+                "current_value": 0.0, "current_price": current_price,
+                "earliest_buy_date": buy_date,
+                "stop_loss": None, "target_price": None,
+            })
+            pos["quantity"] += quantity
+            pos["invested"] += invested
+            pos["current_value"] += current_value
+            # Identical across lots by construction — one symbol, one fetch.
+            pos["current_price"] = current_price
+            if buy_date and (not pos["earliest_buy_date"] or buy_date < pos["earliest_buy_date"]):
+                pos["earliest_buy_date"] = buy_date
+            # The BINDING lot: the highest stop is the first price falls
+            # through, the lowest target the first it reaches.
+            if stop_loss:
+                pos["stop_loss"] = (stop_loss if pos["stop_loss"] is None
+                                    else max(pos["stop_loss"], stop_loss))
+            if target_price:
+                pos["target_price"] = (target_price if pos["target_price"] is None
+                                       else min(pos["target_price"], target_price))
+
             if composite_h and composite_h.get("score") is not None:
                 # (score, value) so the portfolio average is value-weighted and
                 # duplicate lots of one symbol don't count twice.
@@ -488,17 +639,11 @@ def _analyze(holdings, user_id: str = None):
             # once price falls below the stop. Without a separate branch an
             # already-breached stop reported as "X% away from your stop" —
             # indistinguishable from a stop still X% below the price.
-            if dist_to_stop is not None and dist_to_stop >= 0:
-                signals.append({"type": "stop_breached", "severity": "action_required", "symbol": symbol,
-                    "message": f"{symbol} is trading {dist_to_stop:.1f}% BELOW your stop-loss at {stop_loss:.2f} EGP — your exit rule has triggered.",
-                    "explanation": "You set this stop-loss to cap your loss on this position. Price has passed it, so the rule you wrote before buying says to sell. Acting on your own pre-set rule is what stops a small loss becoming a large one.",
-                    "learn_concept": "stop_loss"})
-            elif dist_to_stop is not None and dist_to_stop > -10:
-                prio = "action_required" if dist_to_stop > -5 else "warning"
-                signals.append({"type": "stop_loss", "severity": prio, "symbol": symbol,
-                    "message": f"{symbol} is {abs(dist_to_stop):.1f}% away from your stop-loss at {stop_loss:.2f} EGP.",
-                    "explanation": "A stop-loss is a pre-set price where you sell to limit losses.",
-                    "learn_concept": "stop_loss"})
+            # Stop-loss, target, big_loss, profit_taking and cash_underperformer
+            # are emitted AFTER this loop, from the aggregated position — see
+            # `build_position_signals`. They read the user's own cost basis, so
+            # they are the signals that genuinely differ between two lots of one
+            # symbol, and one lot's -20% is not the position's.
 
             if crossovers["current_signal"] == "death_cross" and crossovers["days_since_cross"] is not None and crossovers["days_since_cross"] <= 5:
                 signals.append({"type": "death_cross", "severity": "action_required", "symbol": symbol,
@@ -676,18 +821,6 @@ def _analyze(holdings, user_id: str = None):
                     "explanation": f"ATR measures typical daily price movement. Placing your stop {STOP_LOSS_ATR_MULTIPLIER:g}x ATR below the nearest support keeps normal daily noise from stopping you out while still capping the loss.",
                     "learn_concept": "atr"})
 
-            if dist_to_target is not None and 0 < dist_to_target < 10:
-                signals.append({"type": "target_reached", "severity": "opportunity", "symbol": symbol,
-                    "message": f"{symbol} is {dist_to_target:.1f}% away from your target price of {target_price:.2f} EGP.",
-                    "explanation": "Consider taking partial profits or setting a trailing stop.",
-                    "learn_concept": "stop_loss"})
-
-            if dist_to_target is not None and dist_to_target <= 0:
-                signals.append({"type": "target_hit", "severity": "opportunity", "symbol": symbol,
-                    "message": f"{symbol} has reached your target price! Current: {current_price:.2f} EGP, Target: {target_price:.2f} EGP.",
-                    "explanation": "Your stock hit the target you set. Review: set a new target or take profits.",
-                    "learn_concept": "stop_loss"})
-
             if current_rsi is not None:
                 if current_rsi > 70:
                     signals.append({"type": "rsi_overbought", "severity": "info", "symbol": symbol,
@@ -706,29 +839,7 @@ def _analyze(holdings, user_id: str = None):
                     "explanation": "Trading below the 50-day SMA suggests the stock's momentum has weakened.",
                     "learn_concept": "sma"})
 
-            if pnl_pct < BIG_LOSS_PCT:
-                signals.append({"type": "big_loss", "severity": "warning", "symbol": symbol,
-                    "message": f"Your position in {symbol} has lost {abs(pnl_pct):.1f}%. Review if your original thesis still holds.",
-                    "explanation": f"A {abs(BIG_LOSS_PCT)}%+ loss is significant. Ask yourself: has the reason you bought changed?",
-                    "learn_concept": "stop_loss"})
-
-            if pnl_pct > PROFIT_TARGET_PCT:
-                signals.append({"type": "profit_taking", "severity": "info", "symbol": symbol,
-                    "message": f"{symbol} has gained {pnl_pct:.1f}%. Consider taking partial profits.",
-                    "explanation": "Taking partial profits lets you secure gains while keeping upside exposure.",
-                    "learn_concept": "stop_loss"})
-
             # --- New signals from the 8-category engine ---
-
-            # Cash underperformer: annualized return < risk-free AND held >90 days.
-            # Says "your position in X" because ann_return annualizes the
-            # user's own buy price, not the stock's market return — the
-            # Risk-Adjusted category uses the latter and the two can differ.
-            if days_held > 90 and ann_return is not None and ann_return < risk_free_rate_pct:
-                signals.append({"type": "cash_underperformer", "severity": "warning", "symbol": symbol,
-                    "message": f"Your position in {symbol} has returned {ann_return:.0f}% annualized since you bought it — less than the {risk_free_rate_pct:.0f}% T-bill rate.",
-                    "explanation": "Holding this stock has earned you less than risk-free cash would have. Either your thesis needs to play out soon, or capital is better placed in T-bills. (This measures your purchase, not the stock's own 12-month performance — the Risk-Adjusted score covers that.)",
-                    "learn_concept": "risk_adjusted_return"})
 
             # Relative strength — leader or laggard vs EGX30 over 30 days
             if rs_h is not None and rs_h.get("alpha_pct") is not None:
@@ -836,6 +947,16 @@ def _analyze(holdings, user_id: str = None):
                     "invested": round(invested, 2),
                     "error": f"Analysis failed: {str(e)}",
                 })
+
+    # One symbol, one voice. Deduped HERE, while `signals` still holds only
+    # per-holding entries — the portfolio-level signals appended below are
+    # already one per sector/symbol and must not be run through it.
+    signals = dedupe_symbol_signals(signals)
+    signals.extend(build_position_signals(
+        list(positions.values()),
+        risk_free_rate_pct=risk_free_rate_pct,
+        today=today,
+    ))
 
     # Portfolio-level metrics
     total_portfolio_value = total_current_value
@@ -1084,7 +1205,9 @@ def _analyze(holdings, user_id: str = None):
             "stock_concentration": stock_concentration,
             "diversification_score": round(div_score, 0),
             "weighted_rsi": round(weighted_rsi, 1) if weighted_rsi is not None else None,
-            "num_holdings": len(holdings),
+            # Distinct SYMBOLS, not portfolio rows: buying one stock twice is
+            # one holding held in two lots, which is also what the page shows.
+            "num_holdings": len(_symbol_counts),
             # Value-weighted so a large position counts more than a token one,
             # and a symbol split across two lots isn't counted twice.
             "avg_composite_score": (
