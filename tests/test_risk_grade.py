@@ -424,3 +424,20 @@ def test_the_handler_bounds_its_own_runtime():
         "chunk cannot finish, so the deadline is doing the work and the chunk "
         "size is misleading"
     )
+
+
+def test_the_deadline_reserves_budget_for_the_symbol_it_starts():
+    """
+    Checking only ELAPSED time lets a fetch begin at 14.9s and run to 21s,
+    overshooting the budget the deadline exists to protect. Production returned
+    elapsed_seconds 15.4 against a 15.0 deadline for exactly this reason.
+    """
+    from app.routers import cron as cron_mod
+
+    assert cron_mod.PER_SYMBOL_BUDGET_SECONDS >= 6.0, (
+        "the reserve is below the measured worst-case fetch (~6s for a "
+        "refused symbol), so a call can still overshoot"
+    )
+    assert cron_mod.PER_SYMBOL_BUDGET_SECONDS < cron_mod.DEADLINE_SECONDS, (
+        "the reserve consumes the whole budget; no symbol would ever start"
+    )

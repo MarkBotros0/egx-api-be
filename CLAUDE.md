@@ -816,7 +816,22 @@ Design rules, all load-bearing:
     good fetch. `demoted_symbols` is reported so a growing number is visible.
 
   `DEFAULT_CHUNK` is **4**, not 20: four symbols is what reliably fits the
-  deadline even when all four are refused.
+  deadline even when all four are refused. The deadline reserves
+  `PER_SYMBOL_BUDGET_SECONDS` (7s) before STARTING another symbol — checking
+  elapsed time alone let a fetch begin at 14.9s and run past the budget, which
+  is why the first fixed run still reported `elapsed_seconds` 15.4.
+
+  **Seed the counters instead of paying to learn them.** Left alone the job
+  discovers the bad half the expensive way: 84 symbols x 3 strikes x ~6s, which
+  is most of a day before the working symbols get priority.
+  `scripts/seed_symbol_health.py` reads the answer off the disk cache — a cached
+  `None` means the feed genuinely had nothing — and writes those counts once.
+  Run it after any DB reset. It is still a HINT: every seeded symbol is fetched
+  after the healthy ones are fresh, and one success resets it to zero.
+
+  Note the good half is FAST. Measured: ABUK, ACGC, ADIB, AFDI and AJWA each
+  return 400 bars in ~1.4s; only the refusals cost ~6s. So the budget problem
+  was never throughput, it was the dead half consuming all of it.
 
 `select_stalest()`, `plan_chunk()` and `is_isin()` are pure, so the selection
 logic a scheduler depends on is testable without Postgres — tests/ has no DB

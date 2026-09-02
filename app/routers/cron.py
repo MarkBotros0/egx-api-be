@@ -73,6 +73,12 @@ MAX_CHUNK = 60
 # design was chosen for, and this is the case that needed it.
 DEADLINE_SECONDS = 15.0
 
+# Reserved before STARTING another symbol. Checking only elapsed time lets a
+# fetch begin at 14.9s and run to 21s, blowing the budget the deadline exists to
+# protect. Measured worst case is ~6s for a refusal, so a symbol is only started
+# when at least this much budget remains.
+PER_SYMBOL_BUDGET_SECONDS = 7.0
+
 
 def _require_secret(supplied: Optional[str]) -> None:
     expected = os.environ.get("CRON_SECRET")
@@ -314,9 +320,11 @@ def risk_snapshot(
     started = time.monotonic()
     written, skipped, failed, timed_out = 0, 0, [], False
     for symbol in slice_:
-        if time.monotonic() - started > DEADLINE_SECONDS:
-            # Out of budget. Everything unprocessed stays stale and is picked
-            # up first next call, so nothing is lost by stopping here.
+        if (time.monotonic() - started
+                > DEADLINE_SECONDS - PER_SYMBOL_BUDGET_SECONDS):
+            # Not enough budget left to finish another symbol in the worst
+            # case. Everything unprocessed stays stale and is picked up first
+            # next call, so nothing is lost by stopping here.
             timed_out = True
             break
         try:
