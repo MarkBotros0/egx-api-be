@@ -139,10 +139,94 @@ public/                         # Static assets, PWA manifest
 - Stats per stock: Total Return, Volatility, Max Drawdown
 - Mobile: stat cards. Desktop: stat table.
 
-### Learn (`src/app/learn/page.tsx`)
-- Expandable `<details>` sections using the `Concept` component pattern (title, definition, whyItMatters, howToUse)
-- Sections: Market Basics, Technical Analysis, Advanced Technical Indicators, **Composite Score**, Risk Management, Portfolio Risk Metrics, Macro Context, EGX — Egyptian Exchange
-- Signals link here via `learn_concept` → `/learn#{concept}` anchors
+### Learn (`src/app/learn/`)
+
+A guided **learning path**, redesigned 2026-09-02 from the flat list of
+`<details>` sections it used to be. Three files:
+
+- `page.tsx` — a thin server component; owns the page `<title>` only
+- `LearnClient.tsx` — the shell: hero, search, module nav, progress, hash router
+- `curriculum.tsx` — **all content as data**, so the shell stays about layout
+
+Plus `src/app/components/learn/`: `visuals.tsx` (the SVG diagram library),
+`widgets.tsx` (the five calculators), `LiveChart.tsx`, `ConceptCard.tsx`.
+
+**68 concepts in 9 ordered modules.** Order teaches, rather than grouping by
+indicator family: Foundations → How the EGX Works → Reading a Chart → Signals
+& Levels → The Composite Score → Taking a Decision → Managing Risk → Portfolio
+Metrics → The Egyptian Context.
+
+#### Anchors are a public contract — do not rename or drop one
+
+`AdvicePanel` deep-links `/learn#<signal.learn_concept>` with ids chosen by the
+BACKEND (23 of them, greppable from `app/routers/portfolio_analysis.py`), and
+`ForecastCard`, `EntryExitCard`, `HoldingsTable` and `MarketRegimeCard` link to
+fixed ones. The **nine module ids are the nine OLD section anchors**
+(`market-basics`, `egx`, `technical-analysis`, `advanced-technical-indicators`,
+`composite-score`, `decision-framework`, `risk-management`,
+`portfolio-risk-metrics`, `macro-context`), kept unprefixed so bookmarks to
+them still resolve. Module ids are hyphenated and concept ids use underscores,
+so the two namespaces cannot collide.
+
+Moving a concept between modules is free — the hash router finds it wherever it
+lives, opens its module, scrolls to it and flashes it. **Renaming an id
+silently breaks an in-app link**, which is the failure this layout is arranged
+to avoid. 48 anchors were verified present after the redesign.
+
+#### The four visual layers
+
+1. **Static SVG diagrams** (`visuals.tsx`) — no charting dependency, so `/learn`
+   pulls in **no Recharts** (41.7 kB route, 132 kB first load). `MiniChart` is
+   the workhorse: a price path plus overlay lines, a volatility band, horizontal
+   rails, point markers and vertical highlight regions. Also `ZoneScale`,
+   `BarCompare`, `StepFlow`, `AllocationDonut`, `CorrelationGrid`, `ConeChart`,
+   `LedgerRows`.
+2. **Interactive calculators** (`widgets.tsx`) — RSI playground, stop-loss
+   calculator, position sizer, T-bill race, score-band explorer.
+3. **Live COMI data** (`LiveChart.tsx`) on 6 concepts.
+4. **Worked EGP examples** — the `example` field on a `Concept`.
+
+**Illustrative series are seeded, never random.** `walk(n, seed, …)` is a
+deterministic LCG. `Math.random()` would hydrate-mismatch and flicker.
+
+**Colour rule: `gain` green and `loss` red mean a real direction in the data,
+never decoration.** Module identity is carried by a separate hue per module, so
+a green line on the Learn page means what it means on the stock page. (Caught
+once already: "You paid 41,000 EGP" was rendering loss-red. Paying is not a
+loss.)
+
+**`MiniChart`'s gradient id comes from `useId()`, not from the series.** It was
+hashed from the data, and several charts deliberately reuse the same
+illustrative series with different colours — so `url(#id)` resolved to the
+first gradient on the page. Eight collisions on the first render.
+
+#### LiveChart — one fetch, lazy, and it must degrade to the diagram
+
+All instances share ONE module-level `/api/analysis` promise for **COMI**
+(daily, 180 bars), fired by an `IntersectionObserver` so opening the page stays
+as instant as it was when it was pure text. On any failure the caller's static
+SVG renders instead and **no error is surfaced** — the page is service-worker
+cached and read offline, and a teaching page should keep teaching. Variants:
+`trend`, `bollinger`, `rsi`, `levels`, `volume`, `score`.
+
+#### Two things that must not regress
+
+- **Cards rest VISIBLE.** The scroll-reveal animation is additive: `.learn-card`
+  is opaque by default and `.is-revealed` only adds a keyframe. If the
+  `IntersectionObserver` never fires — old browser, blocked script, a hidden
+  tab — the page is still a complete readable document. Verified: 0 reveals, 0
+  dimmed cards. Never invert this into "hidden until JS shows it".
+- **Widgets import their formula, never restate it.** The stop-loss calculator
+  uses `STOP_LOSS_ATR_MULTIPLIER` and the band explorer uses `scoreBand()` /
+  `SCORE_BAND_LABEL` from `lib/constants.ts`. A widget that teaches a different
+  number from the one the app computes is worse than no widget.
+
+#### Progress
+
+Per-concept read state in `localStorage` under `egx.learn.progress`, keyed by
+`conceptKey()` (the anchor id, or a slug of the title). Read in an effect, not
+during render, so server and client markup match on first paint. No backend, no
+sync, per-device — it is a reading aid, and losing it costs nothing.
 
 ## PWA / Offline
 
@@ -776,6 +860,20 @@ Components in `src/app/components/`:
 - `CreateUserModal` — full-screen on mobile, card on desktop. Leaving the password blank is the intended path; the backend generates one.
 - `PasswordRevealDialog` — shows a generated password ONCE and says plainly that it cannot be shown again. Used by both create and reset. **Copy puts the username AND password in one block** (`Username: x\nPassword: y`) because it gets pasted into a single message; copying the password alone left the admin retyping the username into the same chat. The on-screen block mirrors the copied text exactly, so what is sent is what was checked.
 - Page at `src/app/admin/page.tsx`, gated on `isAdmin` from `useAuth()`.
+
+**Learn page (`src/app/components/learn/`):**
+- `visuals.tsx` — the SVG diagram library. `MiniChart` (price path + overlay
+  lines + volatility band + horizontal rails + markers + highlight regions),
+  `ZoneScale`, `BarCompare`, `StepFlow`, `AllocationDonut`, `CorrelationGrid`,
+  `ConeChart`, `LedgerRows`, plus `walk()`/`smaOf()` for seeded illustrative
+  series. No charting dependency — `/learn` loads no Recharts.
+- `widgets.tsx` — `RsiPlayground`, `StopLossCalculator`, `PositionSizer`,
+  `TBillRace`, `ScoreBandExplorer`. Each imports its formula from
+  `lib/constants.ts` rather than restating it.
+- `LiveChart.tsx` — real COMI data in a concept card. One shared fetch, lazy via
+  `IntersectionObserver`, silently falls back to the caller's static SVG.
+- `ConceptCard.tsx` — anchor target, module-hued rail, visual slot, definition,
+  why/how blocks, worked example, mark-as-read toggle.
 
 **UI helpers:**
 - `Navbar`, `BottomTabBar` — mobile bottom nav, desktop top nav. Both append a "Users" entry when `isAdmin`; the bottom bar drops its tab min-width from 64px to 56px at 5 tabs so the labels don't truncate on a 360px screen.
