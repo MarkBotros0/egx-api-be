@@ -1609,8 +1609,8 @@ Components in `src/app/components/`:
 
 Anything that must sit clear of the bottom nav reads the
 `--bottom-nav-clearance` CSS variable from `globals.css`:
-`calc(env(safe-area-inset-bottom) + 84px)` on mobile, `0px` at `md:`. That is
-the pill's 64px height, the 10px it floats clear of the safe area, and 10px of
+`calc(env(safe-area-inset-bottom) + 70px)` on mobile, `0px` at `md:`. That is
+the pill's 52px height, the 8px it floats clear of the safe area, and 10px of
 breathing room. Consumers today: the `layout.tsx` footer, the portfolio FAB and
 the admin FAB.
 
@@ -1642,20 +1642,58 @@ Measured: nav bottom edge 61px, sticky top after scrolling 61px, clears.
 
 ### The bottom nav is a floating pill, not a bar
 
-A centred capsule (`h-[64px]`, `rounded-full`, `bg-charcoal/85`,
-`backdrop-blur-xl`), detached 10px from the bottom safe area — the shape the
+A centred capsule (`h-[52px]`, `rounded-full`, `bg-charcoal/85`,
+`backdrop-blur-xl`), detached 8px from the bottom safe area — the shape the
 newer Instagram builds use. The `<nav>` spans the screen only so the pill can
 centre itself and is `pointer-events-none`, with `pointer-events-auto` on the
 pill: **the transparent gutters either side stay tappable, and content
 genuinely scrolls past the pill there** rather than being hidden behind a solid
-bar. **The pill is FLUID** — `w-full max-w-[430px]` with `flex-1` tabs, not
-sized to its own content. It used to be ~276px wide, which on a 440px iPhone
-16 Pro Max is 63% of the screen: a third of the bar was dead gutter and the
-control read as undersized on the largest phones. Measured after: 408px, 93%
-of the screen, four 95px tabs.
-Each tab is a 52px-tall `rounded-full` target (clears the 44px minimum)
-carrying a 24px icon + 11px label; the active tab gets a filled `bg-accent/15` pill
-behind it, not just a colour change.
+bar. **The pill is FLUID** — `w-full max-w-[320px]` with `flex-1` tabs, not
+sized to its own content, so the tabs grow with the screen rather than the
+gutters doing it. Each tab is a 44px-tall `rounded-full` target — the project
+minimum exactly, and the floor on any further shrinking — carrying a 21px icon
+and a 10px label.
+
+**The size has been moved three times; the cap is what settles it.** Content-
+sized at ~276px it was 63% of a 440px iPhone 16 Pro Max and read as undersized;
+`max-w-[430px]` then made it 93% of a 375px screen and read as *very big*. At
+`max-w-[320px]` it is 85% of a 375px phone and 73% of a 440px one — measured
+320px wide, 52px tall, four 44px tabs. Note `w-full` beats the cap on small
+screens: a cap above ~343px does nothing at all on a 375px phone, which is why
+raising it had no effect there and lowering it does.
+
+#### The active highlight SLIDES, and it is one element
+
+`BottomTabBar` renders a single absolutely-positioned `<span>` that travels
+between tabs (`transform 340ms cubic-bezier(0.34, 1.4, 0.5, 1)`), rather than
+toggling a background on each tab. A per-tab background can only cross-fade,
+which reads as two things blinking; one travelling pill reads as the selection
+physically moving. The icon also scales to 1.08 and lifts 1px as its tab
+becomes active, so the motion is not purely horizontal. Both honour
+`motion-reduce`.
+
+Its geometry is **measured, never computed from the tab count** — the tabs are
+`flex-1` inside a fluid pill, so their width depends on the screen, and the
+admin tab appears and disappears with the role. Three things about that
+measurement are load-bearing, and each was a bug first:
+
+- **Query the anchors, not `rail.children`.** The highlight is itself a child,
+  so indexing `children` shifts every tab by one the moment it mounts.
+- **`isAuthenticated` and the tab count belong in the effect deps.** The bar
+  returns `null` while auth loads, so the first pass measures a rail that does
+  not exist; without those deps nothing re-runs when the real bar appears and
+  the highlight never renders at all.
+- **"Have we placed it yet" must be STATE, not a ref.** A ref mutation does not
+  re-render, so the element kept the `transition: none` it was first painted
+  with and the highlight *teleported* between tabs. It measured as
+  `transitionDuration: 0s` while the transform updated correctly — that pair is
+  the signature of this bug.
+
+Verified through the Web Animations API rather than by sampling frames:
+`getAnimations()` reports a running `transform` transition of 340ms on the
+right easing, and the element sits mid-flight 100ms in. **`requestAnimationFrame`
+does not tick in a hidden preview pane**, so frame-sampling silently returns
+zero frames and proves nothing — use `getAnimations()`.
 - Tables → cards on mobile (`space-y-3 md:hidden` + `hidden md:block` pattern)
 - Forms → full-screen modal on mobile, inline on desktop
 - Touch targets: `min-h-[44px]` minimum
