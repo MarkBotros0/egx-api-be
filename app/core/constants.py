@@ -13,6 +13,14 @@ ADX strong-trend=25, etc.) also stay inline.
 # === Cache TTLs (seconds) ===
 
 DEFAULT_CACHE_TTL_SECONDS = 900            # In-memory analysis cache (15 min)
+
+# TTL for a REMEMBERED FAILURE. Short, because a refusal is far more perishable
+# than a close: the feed may recover within the quarter-hour a good result is
+# held for. But not zero, because learning that the feed has nothing for a
+# symbol costs ~6 seconds inside the vendored client's @retry(tries=20), and
+# re-paying that on every dashboard load — which is what caching successes only
+# meant — was a large part of why the grid was slow.
+ERROR_CACHE_TTL_SECONDS = 120
 TICKERS_CACHE_TTL_SECONDS = 12 * 3600      # Ticker list rarely changes (12 h)
 MACRO_CACHE_TTL_SECONDS = 3600             # Macro data refresh cadence (1 h)
 
@@ -27,6 +35,17 @@ BATCH_DEADLINE_SECONDS = 20.0
 
 # ThreadPool worker count for the batched composite endpoint.
 BATCH_WORKERS = 6
+
+# At or above this many consecutive refusals, the feed is treated as having no
+# data for a symbol at all. Two readers depend on the SAME number and it lives
+# here so they cannot drift: `routers/cron.py` demotes such a symbol behind
+# everything healthy in its refresh queue, and `core/card_snapshot.py` marks it
+# "no price feed" on the dashboard. If those disagreed, a symbol could be
+# demoted out of the refresh queue while the grid still presented it as a card
+# that ought to be loading — which is precisely the indefinite "--" this whole
+# surface was rebuilt to remove. Low enough that a genuinely dead name stops
+# eating the budget within one pass, high enough to ride out a transient outage.
+FAILURE_DEMOTION_THRESHOLD = 3
 
 
 # === Bar fetch limits ===

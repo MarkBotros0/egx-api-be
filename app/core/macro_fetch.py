@@ -125,17 +125,37 @@ def _fetch_usdegp():
         return {"value": None, "change_pct": None, "direction": None}
 
 
+def read_risk_free_rate(db) -> float:
+    """
+    The CBE policy rate as a percent, from `settings`. Falls back to the default.
+
+    The ONE spelling of this read. It is a scoring input — `score_risk_adjusted`
+    compares every stock's annualized return against it, and it is folded into
+    the composite cache key as `rfr_tag` — so two readers disagreeing about it
+    would mean two different scores for one stock. It had grown three separate
+    copies (here, in `analysis.py`, and about to gain a third in the snapshot
+    cron); they agreed, but nothing made them.
+
+    Note this is the POLICY rate, not a 91-day T-bill auction yield: cbe.org.eg
+    rejects automated requests and no free machine-readable bill series exists,
+    so the bill rate is approximated. Say so wherever it is explained.
+    """
+    if db is None:
+        return float(DEFAULT_RISK_FREE_RATE_PCT)
+    try:
+        row = db.execute(
+            "SELECT value FROM settings WHERE key = 'risk_free_rate'"
+        ).fetchone()
+        if row and row[0] is not None:
+            return float(row[0])
+    except Exception:
+        pass
+    return float(DEFAULT_RISK_FREE_RATE_PCT)
+
+
 def _fetch_interest_rate(db):
     """Read CBE interest rate from settings table."""
-    try:
-        row = db.execute("SELECT value FROM settings WHERE key = 'risk_free_rate'").fetchone()
-        rate = float(row[0]) if row else float(DEFAULT_RISK_FREE_RATE_PCT)
-        return {
-            "value": rate,
-            "direction": "stable",
-        }
-    except Exception:
-        return {"value": float(DEFAULT_RISK_FREE_RATE_PCT), "direction": "stable"}
+    return {"value": read_risk_free_rate(db), "direction": "stable"}
 
 
 def _store_macro(db, data):

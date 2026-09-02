@@ -435,6 +435,44 @@ def init_db(db: _DB) -> None:
             f"ALTER TABLE risk_snapshot ADD COLUMN IF NOT EXISTS {column} {coltype}"
         )
 
+    # Dashboard card inputs, also riding the snapshot cron. Same argument as
+    # breadth above, and the same economics: the expensive part is the 400-bar
+    # fetch, which that pass already pays for. Scoring on data already in hand
+    # costs ~0.15s of CPU against a ~1.4s fetch.
+    #
+    # WHAT IS STORED HERE IS THE EIGHT CATEGORY SCORES, NOT THE COMPOSITE.
+    # That is load-bearing. Weighting and macro modulation are a pure function
+    # of these eight numbers (see composite.blend_categories), so the read path
+    # can apply THIS user's sliders and TODAY's regime and reproduce exactly
+    # what the stock detail page computes. Storing a blended number instead
+    # would freeze one weight set into the card and reintroduce the
+    # card-says-66 / detail-page-says-45 divergence that extras_builder.py
+    # exists to prevent. NULL means the category was not scorable, which the
+    # blend redistributes — the same meaning it has everywhere else.
+    #
+    # Extends risk_snapshot rather than adding a table: one row per symbol
+    # already exists, written by one upsert in the one pass that holds the
+    # data, and last_price / measured_at / consecutive_failures are already
+    # here. A second table would need its own staleness tracking and could
+    # drift from this one's.
+    from app.core.card_snapshot import CATEGORY_COLUMNS
+
+    for column, coltype in tuple(
+        (name, "DOUBLE PRECISION") for name in CATEGORY_COLUMNS
+    ) + (
+        # Previous close, so the card's change figure needs no second fetch.
+        ("prev_close", "DOUBLE PRECISION"),
+        # Last 30 closes as a JSON array — the card's sparkline.
+        ("sparkline_json", "TEXT"),
+        # Separate from measured_at on purpose: a symbol whose risk measured
+        # but whose scoring raised must be visible as exactly that, rather than
+        # silently carrying yesterday's score under today's timestamp.
+        ("scored_at", "TEXT"),
+    ):
+        db.execute(
+            f"ALTER TABLE risk_snapshot ADD COLUMN IF NOT EXISTS {column} {coltype}"
+        )
+
     for key in ("pe_last_successful_fetch", "pe_last_attempt_status"):
         db.execute(
             "INSERT INTO settings (key, value) VALUES (%s, '') ON CONFLICT (key) DO NOTHING",

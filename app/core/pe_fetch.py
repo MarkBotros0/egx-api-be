@@ -334,6 +334,41 @@ def get_pe_for_symbol(db, symbol: str) -> Optional[dict]:
     }
 
 
+def get_pe_for_symbols(db, symbols: list) -> dict:
+    """
+    The same read for a whole batch, in ONE query. {SYMBOL: row}.
+
+    Callers that score several symbols per request — the dashboard batch path
+    and the snapshot cron — were issuing one indexed lookup per symbol inside
+    their loop. Cheap individually, but on Neon each is a network round trip
+    from a serverless container, and both of those callers run under a
+    wall-clock deadline they can spend better on the actual fetches.
+
+    Symbols with no stored fundamentals are simply absent, matching
+    `get_pe_for_symbol` returning None: a missing value SKIPS its valuation
+    band rather than defaulting, so a stock is never punished for the feed's
+    silence.
+    """
+    if not symbols:
+        return {}
+    wanted = [s.upper() for s in symbols]
+    rows = db.execute(
+        "SELECT symbol, company_name, pe_ratio, dividend_yield, loss_making, "
+        "updated_at FROM pe_data WHERE symbol = ANY(%s)",
+        (wanted,),
+    ).fetchall()
+    return {
+        r[0]: {
+            "company_name": r[1],
+            "pe_ratio": r[2],
+            "dividend_yield": r[3],
+            "loss_making": r[4],
+            "fetched_at": r[5],
+        }
+        for r in rows
+    }
+
+
 def get_fundamentals_at(db, symbol: str, as_of: str) -> Optional[dict]:
     """
     The fundamentals in force for `symbol` on date `as_of` (ISO string).

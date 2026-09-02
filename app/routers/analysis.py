@@ -18,6 +18,8 @@ from app.core.constants import (
     BATCH_WORKERS,
     DEFAULT_RISK_FREE_RATE_PCT,
     DIVERGENCE_LOOKBACK_FULL,
+    ERROR_CACHE_TTL_SECONDS,
+    FAILURE_DEMOTION_THRESHOLD,
     INTERNAL_BARS_MIN,
     USER_BARS_MAX,
     USER_BARS_MIN,
@@ -33,8 +35,8 @@ from app.core.composite import (
 from app.core.extras_builder import build_composite_extras
 from app.core.index_membership import get_index_membership
 from app.core.levels import compute_key_levels, compute_entry_exit
-from app.core.macro_fetch import fetch_macro
-from app.core.pe_fetch import get_pe_for_symbol
+from app.core.macro_fetch import fetch_macro, read_risk_free_rate
+from app.core.pe_fetch import get_pe_for_symbol, get_pe_for_symbols
 from app.core.forecast import expected_move, outcome_band
 
 
@@ -52,17 +54,11 @@ def _last_non_null(seq):
     return None
 
 
-def _read_risk_free_rate(db) -> float:
-    """T-bill rate as a percent, from settings. Falls back to the default."""
-    if db is None:
-        return float(DEFAULT_RISK_FREE_RATE_PCT)
-    try:
-        row = db.execute("SELECT value FROM settings WHERE key = 'risk_free_rate'").fetchone()
-        if row and row[0] is not None:
-            return float(row[0])
-    except Exception:
-        pass
-    return float(DEFAULT_RISK_FREE_RATE_PCT)
+# The rate is a SCORING INPUT (score_risk_adjusted compares against it, and it
+# is folded into the cache key as rfr_tag), so it has exactly one spelling, in
+# core/macro_fetch. Kept importable under the old private name for the callers
+# in this module.
+_read_risk_free_rate = read_risk_free_rate
 
 
 def _get_egx30_close(exchange: str, interval: str, bars: int):
@@ -217,12 +213,41 @@ def read_cached_scores(symbols: list, interval: str = "Daily") -> dict:
     Anonymous dashboard traffic is what warms these entries, so the reader
     keeps hitting them.
     """
-    _, _, _, _, tags = scoring_cache_context(None)
+    db, _, macro, _, tags = scoring_cache_context(None)
     out = {}
+    missing = []
     for sym in symbols:
         cached = get(composite_cache_key(sym, interval, tags))
         if cached is not None and "error" not in cached and cached.get("score") is not None:
             out[sym.upper()] = cached
+        else:
+            missing.append(sym)
+
+    # Fall back to the nightly snapshot for whatever the in-memory cache does
+    # not hold. That cache is warmed only by a signed-in user browsing the
+    # dashboard on default weights, and since the app went closed there is no
+    # anonymous traffic to warm it at all — so this reader was usually finding
+    # almost nothing and the market-condition card sat on its last stored
+    # reading flagged stale. The snapshot is as fresh as last night's cron and
+    # is scored on the SAME default-weights, macro-free category inputs, so
+    # blending it here at user_id=None reproduces exactly what the batch path
+    # would have written.
+    if missing and db is not None and interval == "Daily":
+        try:
+            from app.core.card_snapshot import read_rows, to_card
+
+            wanted = {s.upper() for s in missing}
+            for row in read_rows(db):
+                if row["symbol"].upper() not in wanted:
+                    continue
+                card = to_card(row, DEFAULT_WEIGHTS, macro)
+                if card["score"] is not None:
+                    out[row["symbol"].upper()] = {
+                        "score": card["score"], "signal": card["signal"],
+                    }
+        except Exception:
+            pass
+
     return out
 
 
@@ -247,6 +272,29 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
     # against an identical benchmark series on both pages.
     egx30_close = _get_egx30_close("EGX", interval, INTERNAL_BARS_MIN)
 
+    # Symbols the feed has refused often enough to be demoted. Asking for them
+    # costs ~6 seconds EACH — the vendored client wraps every call in
+    # @retry(tries=20) — and 84 of the 166 symbols in the ticker file have never
+    # once returned data, with the identical set failing on every pass. Skipping
+    # them is the single largest latency cut on this path: a page of cards that
+    # happens to include four dead names was spending most of its deadline on
+    # stocks that were never going to answer.
+    #
+    # SKIPPED, NOT BLOCKLISTED. The counter is reset by the snapshot cron on a
+    # symbol's first good fetch, so one that starts working returns here on its
+    # own without anyone editing a list.
+    unfetchable = set()
+    if db is not None:
+        try:
+            rows = db.execute(
+                "SELECT symbol FROM risk_snapshot "
+                "WHERE COALESCE(consecutive_failures, 0) >= %s",
+                (FAILURE_DEMOTION_THRESHOLD,),
+            ).fetchall()
+            unfetchable = {r[0].upper() for r in rows}
+        except Exception:
+            unfetchable = set()
+
     scores = {}
     errors = []
     todo = []
@@ -259,6 +307,8 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
                 errors.append({"symbol": sym, "error": cached["error"]})
             else:
                 scores[sym] = cached
+        elif sym in unfetchable:
+            errors.append({"symbol": sym, "error": "no feed data"})
         else:
             todo.append(sym)
 
@@ -270,27 +320,38 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
                 def _cb(f):
                     try:
                         _s, r = f.result()
-                        if "error" not in r:
+                        # Cache FAILURES too, with a short TTL. This used to
+                        # store successes only, so a symbol the feed refuses
+                        # re-paid its full ~6-second refusal on every single
+                        # dashboard load, for the life of the container. A
+                        # refusal is a real, reproducible answer about the last
+                        # few minutes; it is worth remembering, just not for as
+                        # long as a price.
+                        if "error" in r:
+                            set(ck, r, ttl=ERROR_CACHE_TTL_SECONDS)
+                        else:
                             set(ck, r)
                     except Exception:
                         pass
                 return _cb
 
+            # Fundamentals for the whole batch in ONE query. score_quality's
+            # bands need them to match what the detail page scores; reading
+            # them per symbol was a Neon round trip per card, inside a handler
+            # already running against a wall-clock deadline.
+            fundamentals = {}
+            if db is not None:
+                try:
+                    fundamentals = get_pe_for_symbols(db, todo)
+                except Exception:
+                    fundamentals = {}
+
             futures: dict = {}
             for s in todo:
-                # Fundamentals are a single indexed row per symbol — cheap
-                # enough to read per symbol, and score_quality's bands need
-                # them to match what the detail page scores.
-                pe_ratio = dividend_yield = loss_making = None
-                if db is not None:
-                    try:
-                        pe_row = get_pe_for_symbol(db, s)
-                        if pe_row:
-                            pe_ratio = pe_row.get("pe_ratio")
-                            dividend_yield = pe_row.get("dividend_yield")
-                            loss_making = pe_row.get("loss_making")
-                    except Exception:
-                        pe_ratio = dividend_yield = loss_making = None
+                pe_row = fundamentals.get(s.upper()) or {}
+                pe_ratio = pe_row.get("pe_ratio")
+                dividend_yield = pe_row.get("dividend_yield")
+                loss_making = pe_row.get("loss_making")
                 f = pool.submit(_compute_batch_one, s, interval, weights, macro,
                                 egx30_close, risk_free_rate_pct, pe_ratio,
                                 dividend_yield, loss_making,

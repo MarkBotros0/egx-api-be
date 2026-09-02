@@ -42,6 +42,7 @@ in production.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from datetime import datetime, timezone
@@ -50,8 +51,20 @@ from typing import Optional
 from fastapi import APIRouter, Header, HTTPException, Query
 
 from app.core.cache import get as cache_get, make_key, set as cache_set
-from app.core.constants import INTERNAL_BARS_MIN
+from app.core.card_snapshot import CATEGORY_COLUMNS, SPARKLINE_BARS
+from app.core.composite import CATEGORY_ORDER, score_categories
+from app.core.constants import (
+    DEFAULT_RISK_FREE_RATE_PCT,
+    DIVERGENCE_LOOKBACK_FULL,
+    FAILURE_DEMOTION_THRESHOLD,
+    INTERNAL_BARS_MIN,
+)
 from app.core.db import get_db
+from app.core.extras_builder import build_composite_extras
+from app.core.index_membership import get_index_membership
+from app.core.indicators import compute_all
+from app.core.macro_fetch import read_risk_free_rate
+from app.core.pe_fetch import get_pe_for_symbols
 from app.core.risk_grade import is_tradeable, measure
 
 router = APIRouter()
@@ -71,7 +84,19 @@ MAX_CHUNK = 60
 # whatever did not get measured is still the stalest thing in the table, so the
 # next call picks it up with no cursor to maintain. This is the property that
 # design was chosen for, and this is the case that needed it.
-DEADLINE_SECONDS = 15.0
+#
+# RAISED FROM 15 TO 20 when dashboard scoring joined this pass, on measurement
+# rather than on principle. Scoring a symbol on bars already in hand costs
+# ~0.15s against a ~1.4s fetch, which sounds free and is not: at 15s the loop
+# stopped at 8.0s elapsed, and the extra ~0.9s across a chunk was enough to lose
+# one symbol per call. Measured over 15 consecutive local calls, throughput fell
+# from a clean 6/6 to 4-5 with deadline_hit true on most of them — which would
+# have quietly cut the daily coverage headroom from 1.8x to 1.4x and left
+# `stale_remaining` never reaching 0.
+#
+# 20s keeps the worst case (13s of work plus one 7s refusal) inside Vercel's
+# 30s with room for cold-start jitter and response serialization.
+DEADLINE_SECONDS = 20.0
 
 # Reserved before STARTING another symbol. Checking only elapsed time lets a
 # fetch begin at 14.9s and run to 21s, blowing the budget the deadline exists to
@@ -86,11 +111,13 @@ def _require_secret(supplied: Optional[str]) -> None:
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
-# At or above this many consecutive refusals a symbol is demoted: still retried,
-# but only once everything the feed actually serves is fresh. Low enough that a
-# genuinely dead name stops eating the budget within one pass, high enough to
-# ride out a transient outage.
-FAILURE_DEMOTION_THRESHOLD = 3
+# FAILURE_DEMOTION_THRESHOLD (at or above this many consecutive refusals a
+# symbol is demoted behind everything healthy) is imported from
+# core/constants.py, not defined here, because the DASHBOARD reads the same
+# number to decide a symbol has no price feed at all. Two spellings would let a
+# symbol be demoted out of this refresh queue while the grid still presented it
+# as a card that ought to be loading. It stays importable from this module for
+# the callers that already read it here.
 
 
 def select_stalest(universe: list, measured: dict, limit: int,
@@ -259,8 +286,19 @@ def risk_snapshot(
     benchmark = _benchmark_close()
     now = datetime.now(timezone.utc).isoformat()
 
+    # Fundamentals for the whole chunk in ONE query rather than one lookup per
+    # symbol. score_quality's valuation bands need them, and they must be the
+    # same values the detail page scores with or the card would disagree with
+    # the page it links to.
+    try:
+        fundamentals = get_pe_for_symbols(db, slice_)
+    except Exception:
+        fundamentals = {}
+
+    risk_free_rate_pct = read_risk_free_rate(db)
+
     def _upsert(symbol: str, stats: Optional[dict], tradeable: bool,
-                ok: bool) -> None:
+                ok: bool, card: Optional[dict] = None) -> None:
         """
         Record the attempt, ALWAYS — including when there was nothing to
         measure.
@@ -276,49 +314,112 @@ def risk_snapshot(
         and there is nothing usable here. `grade_universe` already ignores null
         sigmas and `/api/risk` ranks only tradeable rows, so such a symbol
         appears with a raw measurement and no band rather than a fabricated one.
+
+        `card` carries the dashboard columns and is OPTIONAL, and when it is
+        absent those columns are left ALONE rather than overwritten with NULL.
+        Same rule as NEVER WIPE ON FAILURE above, applied one level down: a
+        symbol the feed refused today has not changed price, so last night's
+        score is still the last thing anyone knew about it. Blanking it would
+        make one transient refusal empty a card — the failure this whole
+        surface was rebuilt to remove. `scored_at` moves only when a score
+        actually does, so the read path can still tell how old it is.
         """
-        db.execute(
-            """
-            INSERT INTO risk_snapshot
-                (symbol, measured_at, sigma_63_ann_pct, sigma_ewma_ann_pct,
-                 beta, turnover_egp, traded_share, last_price, tradeable,
-                 above_sma200, rsi_14, consecutive_failures)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (symbol) DO UPDATE SET
-                measured_at        = EXCLUDED.measured_at,
-                sigma_63_ann_pct   = EXCLUDED.sigma_63_ann_pct,
-                sigma_ewma_ann_pct = EXCLUDED.sigma_ewma_ann_pct,
-                beta               = EXCLUDED.beta,
-                turnover_egp       = EXCLUDED.turnover_egp,
-                traded_share       = EXCLUDED.traded_share,
-                last_price         = EXCLUDED.last_price,
-                tradeable          = EXCLUDED.tradeable,
-                above_sma200       = EXCLUDED.above_sma200,
-                rsi_14             = EXCLUDED.rsi_14,
-                -- Reset on success, accumulate on refusal. A symbol that
-                -- starts working again un-demotes itself on the first good
-                -- fetch, which is why this is a counter and not a blocklist.
-                consecutive_failures = CASE
-                    WHEN %s THEN 0
-                    ELSE COALESCE(risk_snapshot.consecutive_failures, 0) + 1
-                END
-            """,
-            (symbol, now,
-             (stats or {}).get("sigma_63_ann_pct"),
-             (stats or {}).get("sigma_ewma_ann_pct"),
-             (stats or {}).get("beta"),
-             (stats or {}).get("turnover_egp"),
-             (stats or {}).get("traded_share"),
-             (stats or {}).get("last_price"),
-             tradeable,
-             (stats or {}).get("above_sma200"),
-             (stats or {}).get("rsi_14"),
-             0 if ok else 1,
-             ok),
+        card_cols, card_vals = [], []
+        if card is not None:
+            for name, column in zip(CATEGORY_ORDER, CATEGORY_COLUMNS):
+                card_cols.append(column)
+                card_vals.append(card["categories"].get(name))
+            card_cols += ["prev_close", "sparkline_json", "scored_at"]
+            card_vals += [card.get("prev_close"),
+                          card.get("sparkline_json"), now]
+
+        columns = [
+            "symbol", "measured_at", "sigma_63_ann_pct", "sigma_ewma_ann_pct",
+            "beta", "turnover_egp", "traded_share", "last_price", "tradeable",
+            "above_sma200", "rsi_14", "consecutive_failures",
+        ] + card_cols
+        values = [
+            symbol, now,
+            (stats or {}).get("sigma_63_ann_pct"),
+            (stats or {}).get("sigma_ewma_ann_pct"),
+            (stats or {}).get("beta"),
+            (stats or {}).get("turnover_egp"),
+            (stats or {}).get("traded_share"),
+            (stats or {}).get("last_price"),
+            tradeable,
+            (stats or {}).get("above_sma200"),
+            (stats or {}).get("rsi_14"),
+            0 if ok else 1,
+        ] + card_vals
+
+        updates = [
+            f"{c} = EXCLUDED.{c}" for c in columns
+            if c not in ("symbol", "consecutive_failures")
+        ]
+        # Reset on success, accumulate on refusal. A symbol that starts working
+        # again un-demotes itself on the first good fetch, which is why this is
+        # a counter and not a blocklist.
+        updates.append(
+            "consecutive_failures = CASE WHEN %s THEN 0 "
+            "ELSE COALESCE(risk_snapshot.consecutive_failures, 0) + 1 END"
         )
 
+        db.execute(
+            f"INSERT INTO risk_snapshot ({', '.join(columns)}) "
+            f"VALUES ({', '.join(['%s'] * len(columns))}) "
+            f"ON CONFLICT (symbol) DO UPDATE SET {', '.join(updates)}",
+            tuple(values) + (ok,),
+        )
+
+    def _score_card(symbol: str, df) -> Optional[dict]:
+        """
+        The eight category scores plus the card's price fields, from bars this
+        pass has ALREADY fetched.
+
+        The fetch is the expensive part (~1.4s served, ~6s refused); this is
+        ~0.15s of pure CPU on top of it. That ratio is the whole argument for
+        scoring here rather than on demand per dashboard visit.
+
+        Stored WEIGHT-FREE and MACRO-FREE — `score_categories` takes neither —
+        so every user's own sliders and today's regime are applied at read time
+        by `blend_categories`, reproducing the detail page's number exactly.
+
+        Failure is swallowed and returns None: the risk measurement is this
+        endpoint's primary product and must not go down with a dashboard
+        convenience, the same way `pe_fetch` refuses to let the fundamentals
+        archive take down the feed the app actually serves.
+        """
+        try:
+            indicators = compute_all(df)
+            pe = fundamentals.get(symbol.upper()) or {}
+            built = build_composite_extras(
+                df, indicators,
+                interval="Daily",
+                egx30_close=benchmark,
+                include_multi_timeframe=True,
+                risk_free_rate_pct=risk_free_rate_pct,
+                pe_ratio=pe.get("pe_ratio"),
+                dividend_yield=pe.get("dividend_yield"),
+                loss_making=pe.get("loss_making"),
+                index_membership=get_index_membership(symbol),
+                divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
+            )
+            scored = score_categories(indicators, built["extras"])
+            close = df["close"]
+            return {
+                "categories": {name: s for name, (s, _) in scored.items()},
+                "prev_close": (float(close.iloc[-2])
+                               if len(close) > 1 else None),
+                "sparkline_json": json.dumps(
+                    [round(float(x), 4)
+                     for x in close.iloc[-SPARKLINE_BARS:].tolist()]
+                ),
+            }
+        except Exception:
+            return None
+
     started = time.monotonic()
-    written, skipped, failed, timed_out = 0, 0, [], False
+    written, skipped, failed, timed_out, scored = 0, 0, [], False, 0
     for symbol in slice_:
         if (time.monotonic() - started
                 > DEADLINE_SECONDS - PER_SYMBOL_BUDGET_SECONDS):
@@ -345,12 +446,22 @@ def risk_snapshot(
         close = df["close"].astype(float)
         volume = df["volume"].astype(float)
         stats = measure(close, volume, benchmark_close=benchmark)
+
+        # Scored even when `measure` declines, because the two answer different
+        # questions: `measure` needs enough history for a 63-day sigma, while a
+        # shorter-history stock still has a price, a sparkline and whatever
+        # categories ARE computable. Refusing to card a stock because it cannot
+        # be risk-graded would leave it permanently blank on the grid.
+        card = _score_card(symbol, df)
+        if card is not None:
+            scored += 1
+
         if stats is None:
             skipped += 1
-            _upsert(symbol, None, False, ok=False)
+            _upsert(symbol, None, False, ok=False, card=card)
             continue
 
-        _upsert(symbol, stats, is_tradeable(close, volume), ok=True)
+        _upsert(symbol, stats, is_tradeable(close, volume), ok=True, card=card)
         written += 1
 
     # How much of the universe is still carrying a measurement from before this
@@ -375,6 +486,13 @@ def risk_snapshot(
         # chunk should shrink, or the schedule should fire more often.
         "deadline_hit": timed_out,
         "skipped_insufficient_history": skipped,
+        # Symbols that got a dashboard card this call. Should equal
+        # processed - len(failed): a symbol whose bars arrived can always be
+        # scored, even when it has too little history to be risk-graded. A
+        # persistent gap means _score_card is raising and the grid is quietly
+        # serving older scores than it looks like it is.
+        "scored": scored,
+        "unscored": max(0, (written + skipped) - scored),
         # Named, not just counted: a symbol that fails every night is a feed
         # problem, and a bare count hides which one.
         "failed": failed,

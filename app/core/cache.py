@@ -29,13 +29,22 @@ def get(key: str) -> Optional[Any]:
     entry = _store.get(key)
     if entry is None:
         return None
-    timestamp, value = entry
-    if time.time() - timestamp > _DEFAULT_TTL:
+    timestamp, value, ttl = entry
+    if time.time() - timestamp > ttl:
         del _store[key]
         return None
     return value
 
 
-def set(key: str, value: Any) -> None:
-    """Store a value with the current timestamp."""
-    _store[key] = (time.time(), value)
+def set(key: str, value: Any, ttl: Optional[float] = None) -> None:
+    """
+    Store a value with the current timestamp.
+
+    `ttl` overrides the default for this entry. It exists so a FAILURE can be
+    remembered on a shorter leash than a price: a symbol the upstream feed
+    refuses costs ~6 seconds to learn about, and re-learning that on every
+    dashboard load was a large part of why the grid was slow — but a refusal is
+    a much more perishable fact than a close, so it must not sit for the full
+    15 minutes a good result does.
+    """
+    _store[key] = (time.time(), value, _DEFAULT_TTL if ttl is None else ttl)
