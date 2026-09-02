@@ -310,10 +310,21 @@ def build_composite_extras(
     liquidity = None
     try:
         bars_per_day = TRADING_DAYS_PER_YEAR / bars_per_year
+        # The benchmark's index IS the market's trading calendar, and it is
+        # already fetched here for beta and relative strength. Passing it lets
+        # liquidity_score see days the symbol has no row for at all — the only
+        # way to catch a stock that has quietly stopped being quoted, which a
+        # row-based test cannot do by construction. Only meaningful on Daily
+        # bars: on a Weekly view the benchmark index is weekly too, so the
+        # comparison would be against a different notion of "a session".
+        calendar = None
+        if interval == "Daily" and egx30_close is not None:
+            calendar = egx30_close.index
         liquidity = liquidity_score(
             df["volume"] / bars_per_day,
             index_membership=index_membership,
             lookback=_LIQUIDITY_LOOKBACK,
+            calendar=calendar,
         )
     except Exception:
         liquidity = None

@@ -973,6 +973,30 @@ Three deliberate properties:
    lookback window (`_DEAD_SESSION_SHARE`) has zero volume the stock is thin
    regardless of its mean, and the reason names the count.
 
+4. **Absence from the market's calendar is a fourth test, and the only one
+   that can see days the symbol has no row for.** `liquidity_score` takes an
+   optional `calendar` (the benchmark's index, already fetched for beta) and
+   flags a stock that traded on under 70% of the market's recent sessions. The
+   dead-session count above cannot do this by construction: a stock that stops
+   being quoted has no row on the days it misses, so its last 20 rows look
+   perfectly healthy. Measured on the cached panel, exactly **3 of 235 symbols**
+   change — SUCE (32% of sessions, last print three months old), LKGP (41%),
+   CPME (47%).
+
+   Two guards make it safe, and both were found by measuring rather than
+   reasoning:
+   - **The window starts at the symbol's first bar.** GOUR listed in February
+     and has traded every session since; the uncorrected ratio (52%) would have
+     condemned it. Flagging every new listing would be a worse bug than the one
+     being fixed.
+   - **The window is bounded to ~244 days INSIDE the function**, not left to the
+     caller. Handed a full 5,000-bar benchmark history the test measures
+     LIFETIME tradeability, and 31 symbols flipped — including DSCW, which
+     turns over 48 million shares a day but scored 0.47 across its whole life.
+   - `calendar` is optional, so omitting it reproduces the old behaviour
+     exactly; only the Daily path passes one, because on a Weekly view the
+     benchmark index is weekly too and "a session" would mean something else.
+
 Index membership comes from `core/index_membership.py`, which reads
 `data/egx_tickers.json` **directly**. Do NOT route this through
 `tickers._load_tickers()` — that can fire a 10 s TradingView POST on a cold

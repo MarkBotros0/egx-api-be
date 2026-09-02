@@ -910,8 +910,65 @@ _INDEX_LIQ_FLOORS = {
 # essentially never has a dead session.
 _DEAD_SESSION_SHARE = 0.3
 
+# A stock must have traded on at least this share of the MARKET's trading days
+# to count as tradeable. Measured against the benchmark calendar, not the
+# symbol's own rows -- see liquidity_score for why that distinction is the whole
+# point of the test.
+_MIN_TRADED_SHARE_OF_CALENDAR = 0.70
+
+# Below this many calendar days since listing there is nothing to judge, and a
+# fresh listing must not be condemned for not existing yet.
+_MIN_CALENDAR_DAYS = 20
+
+# How far back the calendar test looks: roughly one trading year.
+#
+# THE WINDOW MUST BE BOUNDED HERE, not left to whatever the caller happens to
+# pass. Handed a full 5,000-bar benchmark history the test measures LIFETIME
+# tradeability, and a stock that traded sparsely years ago but trades every day
+# now gets condemned — DSCW turns over 48 million shares a day and scored a
+# 0.47 lifetime share. The question this gate asks is "can you get out of this
+# TODAY", so the window is recent by construction.
+_CALENDAR_WINDOW_DAYS = 244
+
+def _traded_share_of_calendar(volume: pd.Series, calendar) -> float | None:
+    """
+    Fraction of the MARKET's trading days on which this symbol actually traded.
+
+    WHY THIS IS NOT THE SAME AS COUNTING ZERO-VOLUME ROWS. The dead-session test
+    below can only see days the symbol HAS a row for. A stock that simply stops
+    being quoted has no rows at all on the days it misses, so its last 20 rows
+    can look perfectly healthy while it trades two days in five. Measured on the
+    cached panel: SUCE traded on 32% of the market's last year and last printed
+    three months ago, LKGP on 41%, CPME on 47% — and the shipped row-based gate
+    called all three normal.
+
+    THE WINDOW STARTS AT THE SYMBOL'S FIRST BAR, and that is essential rather
+    than tidy: a stock listed three months ago is absent from most of the year
+    for a reason that says nothing about its liquidity. GOUR listed in February
+    and has traded on 100% of sessions since; without this correction the naive
+    ratio (52%) would have condemned it. Condemning every new listing would be
+    a worse bug than the one being fixed.
+
+    The window still runs to the END of the calendar, so a stock that has
+    STOPPED trading stays in scope — that is exactly the case worth catching.
+
+    Returns None when there is not enough listed history to judge.
+    """
+    if calendar is None or len(calendar) == 0 or volume is None or volume.empty:
+        return None
+    recent = calendar[-_CALENDAR_WINDOW_DAYS:]
+    try:
+        live = recent[recent >= volume.index[0]]
+    except TypeError:
+        return None                      # non-datetime index; nothing to align
+    if len(live) < _MIN_CALENDAR_DAYS:
+        return None
+    traded = int((volume.reindex(live).fillna(0) > 0).sum())
+    return traded / len(live)
+
+
 def liquidity_score(volume: pd.Series, index_membership: str | None = None,
-                    lookback: int = 20) -> dict:
+                    lookback: int = 20, calendar=None) -> dict:
     """
     Classify liquidity for a stock using volume averaged over `lookback` days,
     compared against index-appropriate thresholds.
@@ -931,13 +988,32 @@ def liquidity_score(volume: pd.Series, index_membership: str | None = None,
     are ~20x apart, and a bare "thin" hides that the judgement is relative.
     """
     empty = {"avg_volume": None, "classification": None, "thin": False,
-             "index_membership": None, "dead_sessions": None}
+             "index_membership": None, "dead_sessions": None,
+             "traded_share": None}
     if volume is None or len(volume.dropna()) < lookback:
         return empty
 
     avg = float(volume.rolling(window=lookback).mean().iloc[-1])
     if np.isnan(avg):
         return empty
+
+    tier_echo = (index_membership or "").upper() or None
+
+    # Absence from the market's calendar, checked BEFORE the row-based tests
+    # because it is the only one that can see days the symbol has no row for.
+    # `calendar` is optional: omitted, this whole branch is skipped and the
+    # function behaves exactly as it did before, which is what keeps every
+    # existing caller and test unchanged.
+    traded_share = _traded_share_of_calendar(volume, calendar)
+    if traded_share is not None and traded_share < _MIN_TRADED_SHARE_OF_CALENDAR:
+        return {
+            "avg_volume": int(avg),
+            "classification": "thin",
+            "thin": True,
+            "index_membership": tier_echo,
+            "dead_sessions": int((volume.tail(lookback) <= 0).sum()),
+            "traded_share": round(traded_share, 3),
+        }
 
     # Days with NO trading at all. A mean hides these completely: a suspended
     # stock with 19 dead sessions and one old block trade averages out to
@@ -951,8 +1027,9 @@ def liquidity_score(volume: pd.Series, index_membership: str | None = None,
             "avg_volume": int(avg),
             "classification": "thin",
             "thin": True,
-            "index_membership": (index_membership or "").upper() or None,
+            "index_membership": tier_echo,
             "dead_sessions": dead_sessions,
+            "traded_share": round(traded_share, 3) if traded_share is not None else None,
         }
 
     tier = (index_membership or "").upper()
@@ -978,6 +1055,7 @@ def liquidity_score(volume: pd.Series, index_membership: str | None = None,
         "thin": thin,
         "index_membership": tier,
         "dead_sessions": dead_sessions,
+        "traded_share": round(traded_share, 3) if traded_share is not None else None,
     }
 
 

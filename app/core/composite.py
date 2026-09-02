@@ -391,7 +391,20 @@ def score_volume(obv_rising: Optional[bool], price_rising_20d: Optional[bool],
         avg_vol = liquidity["avg_volume"]
         tier = liquidity.get("index_membership") or "EGX100"
         dead = liquidity.get("dead_sessions") or 0
-        if dead >= 1 and liquidity.get("thin"):
+        share = liquidity.get("traded_share")
+        if share is not None and share < 0.70 and liquidity.get("thin"):
+            # ABSENCE from the market's calendar, which the dead-session count
+            # below cannot see: a stock that stops being quoted has no row on
+            # the days it misses, so its recent rows can look perfectly healthy.
+            # Say it in days-out-of-ten, which is what "you may not be able to
+            # sell on the day you want to" actually means.
+            score -= 12
+            reasons.append(
+                f"Only trades about {round(share * 10)} days in 10 that the "
+                f"market is open — you may not be able to sell on the day you "
+                f"want to."
+            )
+        elif dead >= 1 and liquidity.get("thin"):
             # Sessions with no trading at all. Naming them matters: the average
             # can look respectable off one old block trade while the stock is
             # in practice untradeable.

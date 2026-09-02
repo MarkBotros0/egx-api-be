@@ -1777,3 +1777,90 @@ def test_failure_report_names_the_count_and_calls_the_panel_partial():
     assert "3" in report and "300" in report
     assert "PARTIAL" in report.upper()
     assert "COMI" in report
+
+
+# ---------------------------------------------------------------------------
+# Liquidity: absence from the market's calendar
+#
+# The dead-session count can only see days the symbol HAS a row for. A stock
+# that stops being quoted has no row at all on the days it misses, so its recent
+# rows look healthy while it trades two days in five. Measured on the cached
+# panel, three symbols were being called normal on that basis: SUCE (32% of the
+# market's sessions, last print three months old), LKGP (41%), CPME (47%).
+# ---------------------------------------------------------------------------
+
+def _calendar(n=300):
+    return pd.bdate_range("2025-01-01", periods=n)
+
+
+def test_a_stock_absent_from_the_calendar_is_thin_even_when_its_rows_look_fine():
+    """
+    Every row this stock has shows healthy volume. It simply is not there on
+    most of the days the market was open — which a row-based test cannot see.
+    """
+    cal = _calendar()
+    traded_on = cal[::3]                      # one session in three
+    vol = pd.Series(5_000_000.0, index=traded_on)
+
+    blind = liquidity_score(vol, index_membership="EGX30", lookback=20)
+    seeing = liquidity_score(vol, index_membership="EGX30", lookback=20,
+                             calendar=cal)
+
+    assert blind["thin"] is False, (
+        "the row-based gate was supposed to be blind here; if it now catches "
+        "this, the calendar test may be redundant"
+    )
+    assert seeing["thin"] is True
+    assert seeing["traded_share"] < 0.7
+
+
+def test_a_new_listing_is_not_punished_for_not_existing_yet():
+    """
+    THE false positive this gate could easily have shipped. A stock listed
+    part-way through the window is absent from most of it for a reason that
+    says nothing about liquidity. GOUR listed in February and has traded every
+    session since; the uncorrected ratio would have called it thin at 52%.
+    """
+    cal = _calendar()
+    listed_from = cal[-60:]
+    vol = pd.Series(5_000_000.0, index=listed_from)
+
+    result = liquidity_score(vol, index_membership="EGX30", lookback=20,
+                             calendar=cal)
+    assert result["traded_share"] == 1.0
+    assert result["thin"] is False
+
+
+def test_the_calendar_window_is_bounded_inside_the_function():
+    """
+    Handed a full multi-year benchmark history the test would measure LIFETIME
+    tradeability, and a stock that traded sparsely years ago but trades every
+    day now would be condemned — DSCW turns over 48 million shares a day and
+    scored 0.47 on its lifetime. The verdict must not depend on how much
+    history the caller happens to pass.
+    """
+    long_cal = pd.bdate_range("2015-01-01", periods=2800)
+    recent = long_cal[-200:]
+    vol = pd.Series(5_000_000.0, index=recent)      # dense recently, absent before
+
+    result = liquidity_score(vol, index_membership="EGX30", lookback=20,
+                             calendar=long_cal)
+    assert result["traded_share"] == 1.0, (
+        "the calendar window is not bounded — a currently-liquid stock is being "
+        "judged on history it could not have traded in"
+    )
+    assert result["thin"] is False
+
+
+def test_omitting_the_calendar_leaves_behaviour_exactly_as_it_was():
+    """
+    `calendar` is optional so the change cannot move a score for the ~98% of
+    symbols it does not apply to. Every existing caller that does not pass one
+    must get byte-identical output.
+    """
+    vol = pd.Series([5_000_000.0] * 60, index=_calendar(60))
+    without = liquidity_score(vol, index_membership="EGX30", lookback=20)
+    assert without["traded_share"] is None
+    assert without["thin"] is False
+    assert set(without) == {"avg_volume", "classification", "thin",
+                            "index_membership", "dead_sessions", "traded_share"}
