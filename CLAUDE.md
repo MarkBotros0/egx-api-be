@@ -518,8 +518,9 @@ valid, active user. The policy itself lives in `core/auth.py`:
 
 ```python
 PUBLIC_ENDPOINTS = frozenset({
-    ("POST", "/api/auth/login"),   # the way in
-    ("POST", "/api/pe/refresh"),   # Vercel cron; guarded by PE_REFRESH_SECRET
+    ("POST", "/api/auth/login"),          # the way in
+    ("POST", "/api/pe/refresh"),          # scheduled; guarded by PE_REFRESH_SECRET
+    ("POST", "/api/cron/risk_snapshot"),  # scheduled; guarded by CRON_SECRET
 })
 ```
 

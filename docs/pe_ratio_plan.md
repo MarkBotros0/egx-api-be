@@ -282,24 +282,26 @@ app.include_router(pe_router.router)
 
 ## 4. Daily refresh
 
-Add `vercel.json` in the backend deployment directory:
+Scheduled on **cron-job.org**, not in `vercel.json`. `vercel.json` defines no
+cron at all now, and the backend deliberately has no scheduler config of its
+own — both jobs are one fixed URL fired on an interval.
 
-```json
-{
-  "crons": [
-    {
-      "path": "/api/pe/refresh",
-      "schedule": "0 4 * * *"
-    }
-  ]
-}
+```
+POST https://<backend>/api/pe/refresh
+Header:   X-Refresh-Secret: <PE_REFRESH_SECRET>
+Schedule: 0 4 * * *   (04:00 UTC ≈ 06:00 Cairo, before EGX opens at 10:00)
 ```
 
-Runs 04:00 UTC daily (≈06:00 Cairo, before EGX opens at 10:00). Vercel Cron
-on the Hobby plan runs once per day, which fits our once-daily freshness need.
+**The header is not optional, and Vercel Cron never sent it.** The guard in
+`routers/pe.py` is `if expected and supplied != expected`, so with
+`PE_REFRESH_SECRET` set in production the Vercel-scheduled call was returning
+**403** every night — visible in the function logs as a 19 ms POST from a
+cron user agent. An external scheduler that sets the header is the only
+configuration in which this endpoint has ever actually run on a schedule.
 
-Set `PE_REFRESH_SECRET` as a Vercel env var and forward it via header if you
-use a non-Vercel external scheduler.
+Moving off Vercel Cron also removes the Hobby 2-cron/day limit, which is what
+made room for `POST /api/cron/risk_snapshot` (see that endpoint for its own,
+much tighter, cadence requirements).
 
 ---
 
@@ -449,5 +451,7 @@ Add:
 - [ ] `/api/pe/refresh` with correct secret returns `{success: true, count: N}`
 - [ ] `/api/pe/refresh` on upstream failure preserves prior `pe_data` rows
 - [ ] Stock detail, holdings table, and Learn page all render P/E
-- [ ] Vercel cron fires once and the settings row updates
+- [ ] The cron-job.org job fires with its `X-Refresh-Secret` header and the
+      settings row updates (a 403 here means the header is missing or wrong —
+      that is how this ran, unnoticed, for months under Vercel Cron)
 - [ ] Staleness banner appears after simulated 48h gap
