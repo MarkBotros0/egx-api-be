@@ -90,7 +90,33 @@ BB_SQUEEZE_RATIO = 0.7                     # Width below 70% of recent average =
 
 # === Default settings (DB seeds + fallbacks) ===
 
-DEFAULT_RISK_FREE_RATE_PCT = 25            # Egypt T-bill rate ~25% — high by global standards
+# The CBE overnight deposit rate, which is the app's stand-in for a risk-free
+# rate. Still very high by global standards, so Sharpe ratios here look poor
+# next to developed markets — say so whenever one is explained.
+#
+# THIS IS A MARKET FACT WITH A DATE ON IT, NOT A TUNING KNOB. It was 25 from the
+# day the app shipped until 2026-09-02, by which point the CBE had cut 825bp
+# since April 2025 (to 20.00% in Dec-2025 and 19.00% on 12 Feb 2026, held at the
+# 20 Aug 2026 meeting). Six hundred basis points of staleness is not cosmetic:
+# this one number is the Sharpe hurdle, the Sortino hurdle, the whole input to
+# score_risk_adjusted (13% of the composite), and the bar realized trades are
+# graded against via beat_t_bill_count. Too high, and the app understates every
+# Sharpe ratio and fails trades that genuinely beat cash.
+#
+# Caveat to state on screen wherever it matters: this is the POLICY rate, not a
+# 91-day T-bill auction yield. There is no free machine-readable Egyptian T-bill
+# series — cbe.org.eg rejects automated requests — so the bill rate is
+# approximated by the policy rate rather than printed from an auction.
+#
+# Phase 3 replaces this constant with a dated series in `macro_series`, fed from
+# ECONOMICS:EGINTR (keyless, and reachable through the already-vendored client),
+# so historical dates get the rate that was actually in force instead of today's.
+DEFAULT_RISK_FREE_RATE_PCT = 19            # CBE overnight deposit, as of 2026-08-20
+
+# The value that shipped before the correction above. `init_db` upgrades rows
+# still holding it, and ONLY rows still holding it, so an admin who deliberately
+# set a rate keeps theirs. Delete this once no deployment can still be on 25.
+STALE_RISK_FREE_RATE_PCT = 25
 
 
 # === Monte Carlo / risk metrics ===

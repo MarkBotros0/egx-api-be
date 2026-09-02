@@ -11,7 +11,10 @@ import os
 from contextlib import contextmanager
 from psycopg_pool import ConnectionPool
 
-from app.core.constants import DEFAULT_RISK_FREE_RATE_PCT
+from app.core.constants import (
+    DEFAULT_RISK_FREE_RATE_PCT,
+    STALE_RISK_FREE_RATE_PCT,
+)
 
 _pool = None
 _initialized = False
@@ -322,6 +325,33 @@ def init_db(db: _DB) -> None:
         "ON market_regime(observed_at DESC)"
     )
 
+    # Per-symbol risk measurements, refreshed in CHUNKS by
+    # POST /api/cron/risk_snapshot and ranked cross-sectionally at READ time.
+    #
+    # A current-value read model keyed by symbol, deliberately: there is no run
+    # to finalize and no cursor state that can corrupt, so a half-finished
+    # refresh still yields sensible percentiles because every row carries its
+    # own most recent measurement. `measured_at` is per row, which is what lets
+    # the read path report how stale its thinnest corner is instead of
+    # presenting a partly-yesterday snapshot as today's.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS risk_snapshot (
+            symbol TEXT PRIMARY KEY,
+            measured_at TEXT NOT NULL,
+            sigma_63_ann_pct DOUBLE PRECISION,
+            sigma_ewma_ann_pct DOUBLE PRECISION,
+            beta DOUBLE PRECISION,
+            turnover_egp DOUBLE PRECISION,
+            traded_share DOUBLE PRECISION,
+            last_price DOUBLE PRECISION,
+            tradeable BOOLEAN
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_risk_snapshot_time "
+        "ON risk_snapshot(measured_at DESC)"
+    )
+
     for key in ("pe_last_successful_fetch", "pe_last_attempt_status"):
         db.execute(
             "INSERT INTO settings (key, value) VALUES (%s, '') ON CONFLICT (key) DO NOTHING",
@@ -336,6 +366,17 @@ def init_db(db: _DB) -> None:
         "INSERT INTO settings (key, value) VALUES ('risk_free_rate', %s) "
         "ON CONFLICT (key) DO NOTHING",
         (str(DEFAULT_RISK_FREE_RATE_PCT),),
+    )
+    # The seed above is DO NOTHING, so an existing deployment would have kept the
+    # stale 25% forever — and that number is the Sharpe hurdle, 13% of the
+    # composite via score_risk_adjusted, and the bar realized trades are graded
+    # against. Correct it, but ONLY where it still holds the old default, so an
+    # admin who deliberately set a rate is not overwritten. Idempotent: once the
+    # row moves off the stale value this matches nothing.
+    db.execute(
+        "UPDATE settings SET value = %s "
+        "WHERE key = 'risk_free_rate' AND value = %s",
+        (str(DEFAULT_RISK_FREE_RATE_PCT), str(STALE_RISK_FREE_RATE_PCT)),
     )
 
     # "Beginner Safe" composite weight defaults — ON CONFLICT keeps existing

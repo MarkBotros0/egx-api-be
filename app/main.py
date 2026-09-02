@@ -31,6 +31,8 @@ from app.routers import (
     dividends,
     pe,
     market_regime,
+    cron,
+    risk,
 )
 
 app = FastAPI(
@@ -107,5 +109,7 @@ for router_module in (
     dividends,
     pe,
     market_regime,
+    cron,
+    risk,
 ):
     app.include_router(router_module.router)

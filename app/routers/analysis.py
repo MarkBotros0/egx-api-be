@@ -35,7 +35,7 @@ from app.core.index_membership import get_index_membership
 from app.core.levels import compute_key_levels, compute_entry_exit
 from app.core.macro_fetch import fetch_macro
 from app.core.pe_fetch import get_pe_for_symbol
-from app.core.forecast import expected_move, monte_carlo_forecast
+from app.core.forecast import expected_move, outcome_band
 
 
 def _last_non_null(seq):
@@ -485,16 +485,16 @@ def get_analysis(
         except Exception:
             beta = None
 
-        # Descriptive forecasts — NOT predictions. Expected-move is a 1-sigma
-        # historical band (~68% of days fall inside). Monte Carlo projects 60
-        # days of plausible price paths from historical mu/sigma. Both are
-        # statistical ranges, not directional signals.
+        # Outcome RANGES — not predictions, and deliberately drift-free so
+        # neither carries a direction. Both are calibrated against EGX's own
+        # measured return distribution rather than Gaussian theory; see
+        # core/forecast.py for what the old 68% / 90% claims actually delivered.
         forecast = None
         try:
             returns_full = daily_returns(close_full)
             forecast = {
                 "expected_move": expected_move(returns_full),
-                "monte_carlo": monte_carlo_forecast(
+                "outcome_band": outcome_band(
                     returns_full, float(close_full.iloc[-1])
                 ),
             }

@@ -33,15 +33,41 @@ from app.core.auth import (
 # The allowlist itself
 # ---------------------------------------------------------------------------
 
-def test_only_login_and_the_cron_are_public():
+def test_only_login_and_the_crons_are_public():
     """
     Adding an entry here means opening a hole in the app. It should take a
     deliberate edit and a failing test, never a quiet import.
+
+    Every scheduled entry MUST carry its own shared-secret guard, because the
+    middleware stops checking once a route is on this list:
+      /api/pe/refresh        -> PE_REFRESH_SECRET
+      /api/cron/risk_snapshot -> CRON_SECRET
     """
     assert PUBLIC_ENDPOINTS == frozenset({
         ("POST", "/api/auth/login"),
         ("POST", "/api/pe/refresh"),
+        ("POST", "/api/cron/risk_snapshot"),
     })
+
+
+def test_every_public_cron_checks_a_shared_secret():
+    """
+    The allowlist removes the token requirement; without a secret check in the
+    handler the route would be open to the whole internet. This walks the
+    source of each scheduled route and fails if one stops reading an env var.
+    """
+    import inspect
+
+    from app.routers import cron as cron_mod
+    from app.routers import pe as pe_mod
+
+    for module, env_var in ((pe_mod, "PE_REFRESH_SECRET"),
+                            (cron_mod, "CRON_SECRET")):
+        src = inspect.getsource(module)
+        assert f'os.environ.get("{env_var}")' in src, (
+            f"{module.__name__} is on the public allowlist but no longer reads "
+            f"{env_var} — that route is open to anyone"
+        )
 
 
 def test_login_is_reachable_without_a_token():
