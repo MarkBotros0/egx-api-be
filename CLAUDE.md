@@ -103,6 +103,10 @@ public/                         # Static assets, PWA manifest
 ## Pages & Features
 
 ### Dashboard (`src/app/page.tsx`)
+- **The only mobile route to Compare** — a `⇄ Compare` link beside the refresh
+  button in the header, icon-only at a 44×44 target on mobile and icon+label at
+  `md:`. Compare was removed from `BottomTabBar` to make room; the desktop top
+  nav still links to it as well, so on desktop there are two ways in.
 - Sticky search bar (mobile) with live symbol/name filtering
 - Index filter pills (EGX30, EGX70, EGX100, NILEX) + sector filter pills, horizontal scroll on mobile
 - Stock count display showing filtered results
@@ -1444,7 +1448,7 @@ Components in `src/app/components/`:
   why/how blocks, worked example, mark-as-read toggle.
 
 **UI helpers:**
-- `Navbar`, `BottomTabBar` — mobile bottom nav, desktop top nav. Both append a "Users" entry when `isAdmin`; the bottom bar drops its tab min-width from 64px to 56px at 5 tabs so the labels don't truncate on a 360px screen.
+- `Navbar`, `BottomTabBar` — mobile bottom nav, desktop top nav. Both append a "Users" entry when `isAdmin`. **The two no longer carry the same destinations:** Compare left the mobile pill for a button in the dashboard header (see *Dashboard*) and stayed in the desktop top nav, which has room for it. So the pill is Dashboard / Portfolio / Learn, four with Users — the old "drop the tab min-width at 5 tabs" rule is gone with the fifth tab.
 - `AuthProvider` — token + user in localStorage, an `egx.auth.present` cookie for middleware, `useAuth()` → `{user, isAuthenticated, isAdmin, login, logout}`. Re-reads the role from `/api/auth/me` on every load, so a role change lands on next refresh.
 - `LearnTooltip` — dashed-underline hover tooltip used everywhere for inline education
 - `LoadingSkeleton` — Card/Chart/Table skeletons
@@ -1454,7 +1458,37 @@ Components in `src/app/components/`:
 
 - Breakpoint: `md:` (768px) is the main one
 - Bottom nav bar (`BottomTabBar`) visible only on mobile with `md:hidden`
-- Main layout adds `pb-[60px] md:pb-0` to clear bottom nav
+
+### `--bottom-nav-clearance` — the one spelling of the nav's footprint
+
+Anything that must sit clear of the bottom nav reads the
+`--bottom-nav-clearance` CSS variable from `globals.css`:
+`calc(env(safe-area-inset-bottom) + 78px)` on mobile, `0px` at `md:`. That is
+the pill's 58px height, the 10px it floats clear of the safe area, and 10px of
+breathing room. Consumers today: the `layout.tsx` footer, the portfolio FAB and
+the admin FAB.
+
+**It exists because three hardcoded copies of that number drifted apart.** The
+footer had `pb-[60px]`, the portfolio FAB had
+`calc(env(safe-area-inset-bottom) + 76px)` and the admin FAB had a bare
+`bottom-[76px]` — **no safe-area term at all**. Measured on a 34px home
+indicator: the nav's top edge sat 94px up and the FAB's bottom edge at 76px, so
+**18px of the + button rendered behind the nav** (which is `z-50` against the
+FAB's `z-40`). The emulator reports a 0px inset, so this is invisible in a
+desktop browser and only shows on a real phone. Change the pill's height or
+offset and change the variable in the same breath.
+
+### The bottom nav is a floating pill, not a bar
+
+A centred capsule (`h-[58px]`, `rounded-full`, `bg-charcoal/85`,
+`backdrop-blur-xl`), detached 10px from the bottom safe area — the shape the
+newer Instagram builds use. The `<nav>` spans the screen only so the pill can
+centre itself and is `pointer-events-none`, with `pointer-events-auto` on the
+pill: **the transparent gutters either side stay tappable, and content
+genuinely scrolls past the pill there** rather than being hidden behind a solid
+bar. Each tab is a 46px-tall `rounded-full` target (clears the 44px minimum)
+carrying icon + 10px label; the active tab gets a filled `bg-accent/15` pill
+behind it, not just a colour change.
 - Tables → cards on mobile (`space-y-3 md:hidden` + `hidden md:block` pattern)
 - Forms → full-screen modal on mobile, inline on desktop
 - Touch targets: `min-h-[44px]` minimum
