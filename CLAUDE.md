@@ -162,7 +162,10 @@ A guided **learning path**, redesigned 2026-09-02 from the flat list of
 Plus `src/app/components/learn/`: `visuals.tsx` (the SVG diagram library),
 `widgets.tsx` (the five calculators), `LiveChart.tsx`, `ConceptCard.tsx`.
 
-**68 concepts in 9 ordered modules.** Order teaches, rather than grouping by
+**69 concepts in 9 ordered modules.** (`TOTAL_CONCEPTS` is derived from
+`ALL_CONCEPTS.length`, so the code cannot drift from itself — but this
+sentence can, and had: it read 68 while the page served 69. Do not restate
+the count anywhere it could go stale; read the constant.) Order teaches, rather than grouping by
 indicator family: Foundations → How the EGX Works → Reading a Chart → Signals
 & Levels → The Composite Score → Taking a Decision → Managing Risk → Portfolio
 Metrics → The Egyptian Context.
@@ -231,6 +234,30 @@ cached and read offline, and a teaching page should keep teaching. Variants:
   uses `STOP_LOSS_ATR_MULTIPLIER` and the band explorer uses `scoreBand()` /
   `SCORE_BAND_LABEL` from `lib/constants.ts`. A widget that teaches a different
   number from the one the app computes is worse than no widget.
+
+#### The search is shaped like a command bar, and folds punctuation
+
+`/` focuses it, Escape clears and leaves, and the live match count sits in the
+field where feedback belongs. The `/` hint is `hidden md:block` — there is no
+such key on a phone. The module pills sit ABOVE it: the modules are the order
+the page is meant to be walked, search is the shortcut for when you already
+know the term.
+
+**`normalizeSearch` folds both the query and the text to alphanumerics**, and
+that is a correctness fix rather than a nicety. The terms this page teaches are
+written with punctuation a reader has no reason to reproduce, so a plain
+substring match meant **"stop loss" returned NOTHING while "stop-loss" returned
+nine** — and the old placeholder quietly worked around it by spelling the
+hyphen out. "t bill", "p e" and "risk adjusted" now all find their concepts.
+
+**The pill strip follows the reader.** Nine pills with about three visible on a
+phone meant the active highlight kept landing off-screen. It scrolls the
+strip's own `scrollLeft`, NOT `scrollIntoView` — that walks every scrollable
+ancestor and would yank the page vertically mid-gesture, fighting the scroll
+that triggered it.
+
+A back-to-top button appears after one viewport, clears the nav via
+`--bottom-nav-clearance`, and honours `prefers-reduced-motion`.
 
 #### Progress
 
@@ -1471,8 +1498,23 @@ Returned in `signals` array from portfolio_analysis. Sorted by priority:
 |----------|------|----------|
 | `action_required` | `!!` | Stop-loss about to trigger, Death Cross, negative Sharpe, max drawdown > 20%, support broken, — |
 | `warning` | `!` | Sector/stock concentration, high correlation pairs, OBV bearish divergence, near resistance, big loss, **`cash_underperformer`** (held >90d, ann. return < T-bill), **`relative_strength_laggard`** (alpha < -10% vs EGX30), **`mfi_extreme`** at >80, **`low_liquidity_warning`** (thin volume relative to the stock's own index), **`exit_zone_active`** at medium/high confidence, **`pe_overvalued`** (P/E ≥ 25 — expensive vs the EGX median of ~12), **`pe_loss_making`** (diluted EPS < 0), **`pe_implausibly_low`** (P/E < 3 — one-off earnings or a collapsed price, NOT a bargain), **`dividend_yield_extreme`** (DY ≥ 15%) |
-| `opportunity` | `$` | Golden Cross, RSI/Stochastic oversold+bullish crossover, near support, target approaching, divergence_bullish, **`relative_strength_leader`** (alpha > +5% vs EGX30), **`mfi_extreme`** at <20, **`entry_zone_active`** (price near support + momentum not overbought), **`pe_undervalued`** (P/E < 8) |
-| `info` | `i` | Beta context, ATR-based stop-loss suggestion, macro context, profit-taking reminder, **`very_strong_composite` / `strong_composite` / `weak_composite` / `very_weak_composite`** (condition readings — all `info` severity, never action_required, because the score is not predictive), **`adx_strong_trend`** (ADX > 30, direction from DI±), **`exit_zone_active`** at low confidence |
+| `opportunity` | `$` | Golden Cross, RSI/Stochastic oversold+bullish crossover, near support, target approaching, divergence_bullish, **`relative_strength_leader`** (alpha > +5% vs EGX30), **`mfi_extreme`** at <20, **`entry_zone_active`** at medium/high confidence, **`pe_undervalued`** (P/E < 8) |
+| `info` | `i` | Beta context, ATR-based stop-loss suggestion, macro context, profit-taking reminder, **`very_strong_composite` / `strong_composite` / `weak_composite` / `very_weak_composite`** (condition readings — all `info` severity, never action_required, because the score is not predictive), **`adx_strong_trend`** (ADX > 30, direction from DI±), **`entry_zone_active` / `exit_zone_active` at LOW confidence** |
+
+**Entry and exit zones are graded by confidence, both of them.** `low` is the
+leftover bucket in `levels._entry_confidence` — price within 5% of a support
+and momentum not overbought, but the support untested and RSI unremarkable.
+Neither is a reason to buy; they are the absence of two reasons not to.
+
+`sev = "opportunity"` was assigned UNCONDITIONALLY for entry zones, directly
+beneath a comment reading *"low-confidence zones are hints, not calls to
+action"* — so a bare hint rendered at the loudest non-alert tier the panel has,
+while the exit branch eighteen lines below had always graded correctly. The
+colour compounded it: the pill, the holding row's band and the stock page's
+zone box were all gain-green regardless of confidence, which breaks the rule
+that gain/loss carry a real direction and are never decoration. All three now
+go neutral at `low`. `tests/test_fixes.py` fails the build on a bare
+`sev = "opportunity"`.
 
 New signal types added with the 8-category engine have their `learn_concept` anchors wired into the Learn page: `risk_adjusted_return`, `relative_strength`, `mfi`, `adx`, `liquidity`, `multi_timeframe`, `cash_underperformer`. Entry/exit zone signals use `entry_exit_zones`.
 
@@ -1549,8 +1591,8 @@ Components in `src/app/components/`:
 
 Anything that must sit clear of the bottom nav reads the
 `--bottom-nav-clearance` CSS variable from `globals.css`:
-`calc(env(safe-area-inset-bottom) + 78px)` on mobile, `0px` at `md:`. That is
-the pill's 58px height, the 10px it floats clear of the safe area, and 10px of
+`calc(env(safe-area-inset-bottom) + 84px)` on mobile, `0px` at `md:`. That is
+the pill's 64px height, the 10px it floats clear of the safe area, and 10px of
 breathing room. Consumers today: the `layout.tsx` footer, the portfolio FAB and
 the admin FAB.
 
@@ -1564,16 +1606,37 @@ FAB's `z-40`). The emulator reports a 0px inset, so this is invisible in a
 desktop browser and only shows on a real phone. Change the pill's height or
 offset and change the variable in the same breath.
 
+### `--top-nav-clearance` — the same lesson, at the other end
+
+`Navbar` is `sticky top-0 z-50` and carries **no `md:` visibility class**, so it
+covers the top of the viewport at every screen size. Anything that sticks
+beneath it reads `--top-nav-clearance`:
+`calc(env(safe-area-inset-top) + 61px)`.
+
+**Both sticky search bars were parking underneath it.** They were sticking
+correctly at `top-0` the whole time — behind an opaque nav at a higher
+z-index — so they simply vanished on scroll and read as broken. The dashboard's
+was worse than Learn's: a hardcoded `top-[56px]`, 5px short of the real 61px
+**and with no safe-area term at all**, so on a notched phone its top edge sat
+under the nav exactly the way the admin FAB once sat under the bottom one.
+
+Measured: nav bottom edge 61px, sticky top after scrolling 61px, clears.
+
 ### The bottom nav is a floating pill, not a bar
 
-A centred capsule (`h-[58px]`, `rounded-full`, `bg-charcoal/85`,
+A centred capsule (`h-[64px]`, `rounded-full`, `bg-charcoal/85`,
 `backdrop-blur-xl`), detached 10px from the bottom safe area — the shape the
 newer Instagram builds use. The `<nav>` spans the screen only so the pill can
 centre itself and is `pointer-events-none`, with `pointer-events-auto` on the
 pill: **the transparent gutters either side stay tappable, and content
 genuinely scrolls past the pill there** rather than being hidden behind a solid
-bar. Each tab is a 46px-tall `rounded-full` target (clears the 44px minimum)
-carrying icon + 10px label; the active tab gets a filled `bg-accent/15` pill
+bar. **The pill is FLUID** — `w-full max-w-[430px]` with `flex-1` tabs, not
+sized to its own content. It used to be ~276px wide, which on a 440px iPhone
+16 Pro Max is 63% of the screen: a third of the bar was dead gutter and the
+control read as undersized on the largest phones. Measured after: 408px, 93%
+of the screen, four 95px tabs.
+Each tab is a 52px-tall `rounded-full` target (clears the 44px minimum)
+carrying a 24px icon + 11px label; the active tab gets a filled `bg-accent/15` pill
 behind it, not just a colour change.
 - Tables → cards on mobile (`space-y-3 md:hidden` + `hidden md:block` pattern)
 - Forms → full-screen modal on mobile, inline on desktop
@@ -1581,6 +1644,43 @@ behind it, not just a colour change.
 - Safe areas: `env(safe-area-inset-top/bottom)` on navbar/footer
 - Horizontal scrolling for filter pills: `overflow-x-auto no-scrollbar`
 - Charts wrapped in Recharts `ResponsiveContainer`
+
+### Every route segment has a `loading.tsx`, and must keep one
+
+The app had **none**, anywhere. In the App Router a segment without one has no
+Suspense boundary, so the router will not commit a navigation until the target
+page's whole tree is ready: the OLD page stays on screen and a tap on the
+bottom nav reads as dead. On a phone that is the difference between "thinking"
+and "broken", and it is the one a user retaps.
+
+Measured after adding them: a nav tap commits in **11-32 ms** on a compiled
+route, with the skeleton streaming in behind it. (The first hit of a route in
+`next dev` still pays ~1.2 s to compile it — that is the dev server, not the
+boundary.)
+
+Each mirrors its own page's chrome so the transition is a fill rather than a
+flash of unrelated layout, and each reuses `CardSkeleton` / `ChartSkeleton` /
+`TableSkeleton` rather than inventing a new one. `/stock/[symbol]` matters
+most: every dashboard card links there and that page pulls 400 bars and scores
+them.
+
+**Add a route, add its `loading.tsx` in the same breath.**
+
+### Money inputs use `step="any"`, never `step={0.01}`
+
+`<input type="number">` validates its value against the step, so `step={0.01}`
+makes any third decimal a `stepMismatch` — and **EGX quotes to three decimals**
+(CIEB at 27.697). All three money fields shipped that way, and the browser
+rejected real prices with its own "Enter a valid value", truncated on mobile to
+give no reason at all. Confirmed: at `step=0.01` the browser reports *"the two
+nearest valid values are 27.69 and 27.7"*.
+
+The dividend `amount` is the most exposed of the three — it is the total that
+actually landed after the 5-10% withholding tax, so it is routinely not a round
+two-decimal figure.
+
+Quantity and dividend `shares` deliberately carry NO step, so they default to
+integers. EGX has no fractional shares.
 
 ## Styling
 
