@@ -53,6 +53,25 @@ TV_COLUMNS = [
     "dps_common_stock_prim_issue_fy",  # annual DPS (the ttm variant is ~3% covered)
     "book_value_per_share_fq",         # ~60% covered — widest fundamental we get
     "close",
+    # Added 2026-09-02, all verified live for EGX coverage before inclusion.
+    # Same single POST, so they cost nothing.
+    "market_cap_basic",                   # 82% — the missing size control
+    "total_shares_outstanding_current",   # 80% — lets a share count be checked
+    "beta_1_year",                        # 82%
+    "Value.Traded",                       # 100% — EGP turnover, the honest
+                                          #        liquidity primitive; the app
+                                          #        currently proxies it with
+                                          #        close * share volume
+    #
+    # DELIBERATELY NOT REQUESTED, coverage measured on 296 EGX rows:
+    #   return_on_equity            25%  — too thin to score against a median
+    #   price_book_ratio            33%
+    #   earnings_release_next_date  10%  — 29 symbols. The research framed this
+    #                                      as a forward-looking win; at 10% it
+    #                                      cannot carry a feature, and a badge
+    #                                      that appears on one stock in ten
+    #                                      reads as a bug.
+    #   float_shares_outstanding    55%  — revisit if free float is ever needed
 ]
 
 # Fields whose change triggers a new history row. Deliberately excludes the
@@ -126,6 +145,10 @@ def fetch_fundamentals_rows() -> list:
             "dps_annual": _clean_float(d[5]),
             "book_value_per_share": _clean_float(d[6]),
             "close": _clean_float(d[7]),
+            "market_cap": _clean_float(d[8]),
+            "shares_outstanding": _clean_float(d[9]),
+            "beta_1y": _clean_float(d[10]),
+            "value_traded_egp": _clean_float(d[11]),
         })
     return out
 
@@ -179,17 +202,25 @@ def refresh_pe_data(db, rows: Optional[list] = None) -> dict:
         db.execute(
             """
             INSERT INTO pe_data
-                (symbol, company_name, pe_ratio, dividend_yield, loss_making, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                (symbol, company_name, pe_ratio, dividend_yield, loss_making,
+                 market_cap, shares_outstanding, beta_1y, value_traded_egp,
+                 updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (symbol) DO UPDATE SET
-                company_name   = EXCLUDED.company_name,
-                pe_ratio       = EXCLUDED.pe_ratio,
-                dividend_yield = EXCLUDED.dividend_yield,
-                loss_making    = EXCLUDED.loss_making,
-                updated_at     = EXCLUDED.updated_at
+                company_name       = EXCLUDED.company_name,
+                pe_ratio           = EXCLUDED.pe_ratio,
+                dividend_yield     = EXCLUDED.dividend_yield,
+                loss_making        = EXCLUDED.loss_making,
+                market_cap         = EXCLUDED.market_cap,
+                shares_outstanding = EXCLUDED.shares_outstanding,
+                beta_1y            = EXCLUDED.beta_1y,
+                value_traded_egp   = EXCLUDED.value_traded_egp,
+                updated_at         = EXCLUDED.updated_at
             """,
             (row["symbol"], row.get("company_name"), row.get("pe_ratio"),
-             row.get("dividend_yield"), row.get("loss_making"), now),
+             row.get("dividend_yield"), row.get("loss_making"),
+             row.get("market_cap"), row.get("shares_outstanding"),
+             row.get("beta_1y"), row.get("value_traded_egp"), now),
         )
         written += 1
 

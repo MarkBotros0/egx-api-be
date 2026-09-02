@@ -25,11 +25,26 @@ WHAT THIS MODULE MUST NEVER CLAIM
 ---------------------------------
 That calm stocks go UP. They do not, reliably. Low volatility does rank
 positively against forward returns (IC +0.084, t=4.97 at 21 days), but the
-realisable long/short spread is only t=1.70 over the full sample, the mean
-forward return by quintile is flat-to-inverted, and no historical market cap
-exists in the cache to neutralise a possible size effect. High-volatility EGX
-names behave like lottery tickets: a few huge winners lift the MEAN while the
-MEDIAN is clearly worse.
+realisable long/short spread is only t=1.70 over the full sample and the mean
+forward return by quintile is flat-to-inverted. High-volatility EGX names behave
+like lottery tickets: a few huge winners lift the MEAN while the MEDIAN is
+clearly worse.
+
+THE SIZE CAVEAT IS NOW CLOSED, and it closed in this result's favour. It used to
+read "no historical market cap exists to neutralise a possible size effect";
+`fundamentals_annual` supplies one, with shares implied point-in-time as
+net_income / eps_diluted (which reproduces the scanner's current figure for COMI
+to ~2%). Measured on the liquid panel:
+
+    within-date rank corr(low_vol, small_size)   -0.406
+    low_vol raw                    IC +0.0646  t 3.54  (21d)
+    low_vol residualised on SIZE   IC +0.0573  t 4.19  (21d)
+                                   IC +0.0795  t 5.60  (63d)
+
+Removing the size component STRENGTHENS it. Calm EGX names are indeed larger,
+but size itself runs the other way here — bigger outperformed, IC -0.0499
+(t -2.36), which fails the bar in its own right. A hidden size effect would have
+had to be positively signed to explain low volatility away, and it is not.
 
 So this surface answers "how much will this move, and how deep a hole should I
 expect" — never "will it go up". Attaching a return claim to a risk grade is

@@ -140,6 +140,18 @@ def build_panel(fund: pd.DataFrame, dates) -> pd.DataFrame:
                 # Positive control: known to score IC ~ +0.08 here. Signed so
                 # that HIGHER is calmer, matching the direction that ranked well.
                 "control_low_vol": -float(rets.iloc[i - 62:i + 1].std()),
+                # SIZE, and the reason it is here. The low-volatility result is
+                # the strongest thing this app has, and its one open caveat has
+                # been that no historical market cap existed to neutralise a
+                # possible size effect. It does now, approximately: shares are
+                # implied as net_income / eps_diluted from the point-in-time
+                # annual archive, which reproduces the scanner's current figure
+                # for COMI to ~2%. Signed so HIGHER is SMALLER, matching the
+                # direction a size premium would run.
+                "size_small": (
+                    -float(np.log(max(latest["net_income"] / eps * price, 1.0)))
+                    if eps not in (None, 0) and latest["net_income"] else np.nan
+                ),
             }
             for h in HORIZONS:
                 row[f"fwd_{h}"] = (float(close.iloc[i + h]) / price - 1.0) * 100.0
@@ -202,7 +214,7 @@ def main() -> int:
         return 1
 
     factors = ["control_low_vol", "earnings_yield", "gross_profitability",
-               "asset_growth", "payout_yield"]
+               "asset_growth", "payout_yield", "size_small"]
 
     print(f"\n{'factor':<22}" + "".join(f"{str(h) + 'd IC':>12}{'t':>7}"
                                         for h in HORIZONS) + "   verdict")

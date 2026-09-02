@@ -381,6 +381,40 @@ def init_db(db: _DB) -> None:
         "ON fundamentals_annual(first_usable_date)"
     )
 
+    # Dated macro observations. `released_at` is the load-bearing column, not
+    # `observed_period`: a macro bar's timestamp is its REFERENCE period, and
+    # August's inflation is not knowable in August. Reads go through
+    # core/macro_series.get_macro_at, which filters on release.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS macro_series (
+            series_code TEXT NOT NULL,
+            observed_period TEXT NOT NULL,
+            value DOUBLE PRECISION,
+            released_at TEXT NOT NULL,
+            source TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (series_code, observed_period)
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_macro_series_released "
+        "ON macro_series(series_code, released_at)"
+    )
+
+    # Columns added after pe_data shipped. No migration framework here — every
+    # statement in init_db is idempotent, so these land on the next cold start.
+    # market_cap is the one that matters: it is the missing size control on the
+    # low-volatility result, the single open caveat on the app's best finding.
+    for column, coltype in (
+        ("market_cap", "DOUBLE PRECISION"),
+        ("shares_outstanding", "DOUBLE PRECISION"),
+        ("beta_1y", "DOUBLE PRECISION"),
+        ("value_traded_egp", "DOUBLE PRECISION"),
+    ):
+        db.execute(
+            f"ALTER TABLE pe_data ADD COLUMN IF NOT EXISTS {column} {coltype}"
+        )
+
     for key in ("pe_last_successful_fetch", "pe_last_attempt_status"):
         db.execute(
             "INSERT INTO settings (key, value) VALUES (%s, '') ON CONFLICT (key) DO NOTHING",

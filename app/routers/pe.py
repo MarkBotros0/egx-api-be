@@ -16,6 +16,7 @@ from fastapi import APIRouter, Header, HTTPException, Query
 
 from app.core.db import get_db
 from app.core.fundamentals_annual import refresh_annual_fundamentals
+from app.core.macro_series import refresh_current as refresh_macro_series
 from app.core.pe_fetch import get_pe_for_symbol, refresh_pe_data
 
 router = APIRouter()
@@ -93,4 +94,13 @@ def trigger_refresh(x_refresh_secret: Optional[str] = Header(default=None)):
     except Exception as e:
         result["annual"] = {"success": False,
                             "error": f"{type(e).__name__}: {e}"}
+
+    # Today's macro readings, one keyless POST. Same never-fail-the-feed rule:
+    # pe_data is what the app serves. History is backfilled offline by
+    # scripts/backfill_macro.py, because 5,000 FX bars do not fit in 30 seconds.
+    try:
+        result["macro"] = refresh_macro_series(db)
+    except Exception as e:
+        result["macro"] = {"success": False,
+                           "error": f"{type(e).__name__}: {e}"}
     return result
