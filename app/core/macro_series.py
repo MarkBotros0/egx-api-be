@@ -131,6 +131,37 @@ def upsert(db, series_code: str, period: str, value: float,
     )
 
 
+def get_risk_free_steps(db) -> list:
+    """
+    The whole policy-rate history as [(date, annual_pct), ...], oldest first.
+
+    Feeds `returns.annualized_cash_rate_pct`, which compounds it across one
+    trade's holding window. Read ONCE per request and passed down — the steps
+    are identical for every trade, and a ledger of fifty closed positions must
+    not make fifty macro queries.
+
+    Filters on `observed_period`, NOT `released_at`, and that is deliberate:
+    this scores an outcome that already happened rather than making a decision
+    at a past date, so there is no look-ahead to defend against. (EGINTR carries
+    a zero publication lag anyway — a policy rate is knowable the day it is
+    announced — so the two columns agree for this series regardless.)
+
+    Returns [] on any failure. Realized gains need no price fetch and must
+    paint even when everything else is down — that is the whole reason the
+    sales router is separate from portfolio_analysis — so a macro read that
+    raises must not take the ledger with it.
+    """
+    try:
+        rows = db.execute(
+            "SELECT observed_period, value FROM macro_series "
+            "WHERE series_code = %s ORDER BY observed_period",
+            (RISK_FREE_SERIES,),
+        ).fetchall()
+    except Exception:
+        return []
+    return [(str(r[0])[:10], float(r[1])) for r in rows if r[1] is not None]
+
+
 def upsert_many(db, series_code: str, rows, source: str = "tradingview") -> int:
     """
     Many dated observations for ONE series, in a single round trip.

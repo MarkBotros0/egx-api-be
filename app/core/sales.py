@@ -14,7 +14,8 @@ delivers for open positions, applied to closed ones.
 from datetime import date, datetime
 from typing import Optional
 
-from app.core.returns import annualized_return, days_between
+from app.core.returns import (annualized_cash_rate_pct, annualized_return,
+                               days_between)
 
 
 class SaleValidationError(ValueError):
@@ -80,8 +81,23 @@ def validate_sale(*, holding: dict, quantity, sell_price, sell_date, today: date
     }
 
 
-def compute_sale_metrics(sale: dict, risk_free_rate_pct: float) -> dict:
-    """Add realized P&L, holding period and the T-bill verdict to one sale."""
+def compute_sale_metrics(sale: dict, risk_free_rate_pct: float,
+                         rate_steps=None) -> dict:
+    """
+    Add realized P&L, holding period and the T-bill verdict to one sale.
+
+    `rate_steps` is the dated policy-rate history — [(date, annual_pct), ...]
+    from `macro_series.get_risk_free_steps`. When supplied, the trade is graded
+    against the rate that actually prevailed across ITS holding window rather
+    than against today's scalar, which over-credited every trade closed while
+    the rate was higher than it is now (27.25% in March 2024 against 19% today).
+
+    It stays OPTIONAL, and `risk_free_rate_pct` remains the fallback, so a
+    caller with no history — or a window the history does not reach — degrades
+    to the previous behaviour instead of failing. The hurdle actually applied is
+    returned as `t_bill_hurdle_pct` either way, because a card cannot explain a
+    verdict it cannot see.
+    """
     quantity = int(sale["quantity"])
     buy_price = float(sale["buy_price"])
     sell_price = float(sale["sell_price"])
@@ -103,6 +119,11 @@ def compute_sale_metrics(sale: dict, risk_free_rate_pct: float) -> dict:
         else None
     )
 
+    hurdle = (annualized_cash_rate_pct(rate_steps, sale["buy_date"], sale["sell_date"])
+              if rate_steps else None)
+    if hurdle is None:
+        hurdle = float(risk_free_rate_pct)
+
     return {
         **sale,
         "cost": round(cost, 2),
@@ -111,5 +132,6 @@ def compute_sale_metrics(sale: dict, risk_free_rate_pct: float) -> dict:
         "realized_pnl_pct": round(realized_pnl_pct, 2) if realized_pnl_pct is not None else None,
         "days_held": days_held,
         "annualized_return_pct": round(ann, 1) if ann is not None else None,
-        "beat_t_bill": (ann > risk_free_rate_pct) if ann is not None else None,
+        "t_bill_hurdle_pct": round(hurdle, 2),
+        "beat_t_bill": (ann > hurdle) if ann is not None else None,
     }

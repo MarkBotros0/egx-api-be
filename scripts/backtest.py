@@ -30,8 +30,14 @@ WHAT IT DELIBERATELY DOES NOT TEST
 Fundamentals. `pe_data` holds a single snapshot of today, and
 `fundamentals_history` only began collecting on 2026-08-25. Passing today's P/E
 into a 2024 score would be look-ahead bias severe enough to manufacture any
-result. Quality is therefore scored on its technical inputs only, and
-Risk-Adjusted's verdict is withheld entirely (see RISK_FREE_RATE below).
+result. Quality is therefore scored on its technical inputs only.
+
+Risk-Adjusted USED to be withheld too, because the policy rate ran flat at one
+current value across twenty years in which it ranged 8.25%-27.25%. `macro_series`
+now supplies dated rates, so each scoring date is graded against the cash return
+over its own trailing year and the verdict stands — but only when that history is
+present. With no database the run falls back to flat and re-withholds; see
+`confounded_categories`.
 
 Run:  python -m scripts.backtest            (from egx-api-be)
       python -m scripts.backtest --quick    (small universe, for a smoke test)
@@ -45,6 +51,7 @@ import os
 import pickle
 import sys
 import time
+from datetime import timedelta
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
@@ -64,6 +71,7 @@ from app.core.constants import (  # noqa: E402
     MACRO_TREND_UP_PCT,
 )
 from app.core.extras_builder import build_composite_extras  # noqa: E402
+from app.core.returns import annualized_cash_rate_pct  # noqa: E402
 from app.core.index_membership import get_index_membership  # noqa: E402
 from app.core.indicators import compute_all  # noqa: E402
 
@@ -73,15 +81,82 @@ MIN_HISTORY_BARS = 250        # a year of prior data before a stock is scorable
 REBALANCE_EVERY = 21          # trading days between scoring dates (~monthly)
 HORIZONS = (21, 63, 126)      # forward-return windows, in trading days
 
-# Flat, and deliberately so. Egypt's policy rate ran from roughly 8% (2020) to
-# 27% (2024); the app stores one current value. Rather than hardcode
-# half-remembered rates into a validation exercise, run flat and WITHHOLD
-# Risk-Adjusted's verdict — it is reported but must not be read as evidence
-# about whether that category earns its weight.
+# The FALLBACK rate, used only when no dated history is available.
+#
+# This used to be the only rate: Egypt's policy rate ran from roughly 8% (2020)
+# to 27.25% (2024) while the app stored one current value, so rather than
+# hardcode half-remembered rates into a validation exercise the whole run went
+# flat and WITHHELD Risk-Adjusted's verdict.
+#
+# `macro_series` now holds EGINTR monthly back to 2001-05, so each scoring date
+# can be graded against the cash return over ITS OWN trailing year — which is
+# what `score_risk_adjusted` compares against. The withholding is lifted only
+# when that history is actually present; see `confounded_categories`.
 RISK_FREE_RATE = float(DEFAULT_RISK_FREE_RATE_PCT)
-CONFOUNDED_CATEGORIES = {"risk_adjusted"}
+
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+
+
+def confounded_categories(rate_steps) -> set:
+    """
+    Which category verdicts must NOT be read as evidence.
+
+    The verdict may only be lifted by the data that justifies lifting it. A run
+    on a machine with no macro history keeps withholding rather than quietly
+    reporting a number it cannot support — the failure mode this whole script
+    exists to avoid.
+    """
+    return set() if rate_steps else {"risk_adjusted"}
+
+
+def rate_for_date(rate_steps, as_of, fallback: float = RISK_FREE_RATE) -> float:
+    """
+    The cash return over the trailing year ending `as_of`, as an annual rate.
+
+    A TRAILING YEAR, not a point rate, because `score_risk_adjusted` compares a
+    trailing one-year stock return against cash and the two must span the same
+    window.
+
+    NO LOOK-AHEAD BY CONSTRUCTION. Unlike the sales ledger — which scores an
+    outcome that already happened — this simulates a DECISION at a past date, so
+    a rate set afterwards must not reach it. Only steps inside [as_of - 1y,
+    as_of] contribute, so a 2024 hike cannot touch a 2020 scoring date. (EGINTR
+    carries a zero publication lag, so a rate in force is a rate that was known.)
+    """
+    if not rate_steps:
+        return float(fallback)
+    start = as_of - timedelta(days=365)
+    got = annualized_cash_rate_pct(rate_steps, start, as_of)
+    return float(got) if got is not None else float(fallback)
+
+
+def load_rate_steps() -> list:
+    """
+    Dated policy rates from `macro_series`, cached to disk after the first read.
+
+    Returns [] when the database is unreachable, which keeps this script
+    runnable offline — and keeps Risk-Adjusted withheld, which is the correct
+    behaviour when the data behind the verdict is missing.
+    """
+    path = os.path.join(CACHE_DIR, "policy_rate.pkl")
+    if os.path.exists(path):
+        try:
+            with open(path, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            pass
+    try:
+        from app.core.db import get_db
+        from app.core.macro_series import get_risk_free_steps
+        steps = get_risk_free_steps(get_db())
+    except Exception:
+        return []
+    if steps:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(path, "wb") as f:
+            pickle.dump(steps, f)
+    return steps
 
 # The vendored client wraps every call in @retry(Exception, tries=20, delay=0.5,
 # backoff=0) — a flat half-second retry twenty times, which hammers the endpoint
@@ -437,7 +512,8 @@ def rebalance_calendar(bench_close: pd.Series) -> list:
     return [idx[i] for i in range(MIN_HISTORY_BARS, usable, REBALANCE_EVERY)]
 
 
-def score_symbol(symbol: str, bench_close: pd.Series, dates: list) -> list:
+def score_symbol(symbol: str, bench_close: pd.Series, dates: list,
+                 rate_steps: list | None = None) -> list:
     """
     Every (date, score, category scores, forward returns) row for one symbol,
     evaluated on the shared rebalance calendar.
@@ -473,7 +549,9 @@ def score_symbol(symbol: str, bench_close: pd.Series, dates: list) -> list:
                 interval="Daily",
                 egx30_close=bench,
                 include_multi_timeframe=True,
-                risk_free_rate_pct=RISK_FREE_RATE,
+                # The rate that actually prevailed over THIS date's
+                # trailing year, not one flat number for twenty years.
+                risk_free_rate_pct=rate_for_date(rate_steps, as_of),
                 # Fundamentals are a today-only snapshot — passing them here
                 # would be look-ahead. This is what fundamentals_history will
                 # eventually make possible.
@@ -614,6 +692,20 @@ def main():
     if stamp_warning:
         print(stamp_warning)
 
+    # Dated policy rates decide whether Risk-Adjusted's verdict can be read at
+    # all, so this is resolved BEFORE any scoring and stated in the output. The
+    # previous CONFOUNDED_CATEGORIES was a module constant nothing ever read —
+    # the withholding existed only in a docstring.
+    rate_steps = load_rate_steps()
+    confounded = confounded_categories(rate_steps)
+    if rate_steps:
+        print(f"policy rate: {len(rate_steps)} dated steps, "
+              f"{rate_steps[0][0]} .. {rate_steps[-1][0]} — each scoring date is "
+              f"graded against its own trailing year")
+    else:
+        print(f"policy rate: NO dated history — running flat at "
+              f"{RISK_FREE_RATE}%; WITHHOLDING {sorted(confounded)}")
+
     syms = universe()
     if args.quick:
         syms = syms[:25]
@@ -656,7 +748,8 @@ def main():
     # is rather than what one symbol scored.
     unreadable: dict = {}
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        futs = {pool.submit(score_symbol, s, bench_close, dates): s for s in syms}
+        futs = {pool.submit(score_symbol, s, bench_close, dates, rate_steps): s
+                for s in syms}
         for n, fut in enumerate(as_completed(futs), 1):
             try:
                 rows.extend(fut.result())

@@ -28,6 +28,7 @@ from app.core.constants import DEFAULT_RISK_FREE_RATE_PCT
 from app.core.db import get_db
 from app.core.holdings import HOLDING_COLUMNS, row_to_holding
 from app.core.dividends import fetch_dividends, summarize_realized
+from app.core.macro_series import get_risk_free_steps
 from app.core.sales import (
     SaleValidationError,
     compute_sale_metrics,
@@ -132,7 +133,8 @@ def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
             "created_at": now,
         }
         return {
-            "sale": compute_sale_metrics(sale, _risk_free_rate_pct(db)),
+            "sale": compute_sale_metrics(sale, _risk_free_rate_pct(db),
+                                         rate_steps=get_risk_free_steps(db)),
             "holding": {**holding, "quantity": remaining, "updated_at": now},
         }
 
@@ -155,7 +157,12 @@ def get_sales(user: CurrentUser = Depends(get_current_user)):
         ).fetchall()
 
         rfr = _risk_free_rate_pct(db)
-        priced = [compute_sale_metrics(_row_to_sale(r), rfr) for r in rows]
+        # Read ONCE, outside the comprehension — the steps are the same for
+        # every trade, and a ledger of fifty closed positions must not make
+        # fifty macro queries.
+        rate_steps = get_risk_free_steps(db)
+        priced = [compute_sale_metrics(_row_to_sale(r), rfr, rate_steps=rate_steps)
+                  for r in rows]
         dividends = fetch_dividends(db, user.id)
 
         currency_row = db.execute(
