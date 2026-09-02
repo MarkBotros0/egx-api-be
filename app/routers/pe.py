@@ -15,6 +15,7 @@ from typing import Optional
 from fastapi import APIRouter, Header, HTTPException, Query
 
 from app.core.db import get_db
+from app.core.fundamentals_annual import refresh_annual_fundamentals
 from app.core.pe_fetch import get_pe_for_symbol, refresh_pe_data
 
 router = APIRouter()
@@ -75,6 +76,21 @@ def trigger_refresh(x_refresh_secret: Optional[str] = Header(default=None)):
         raise HTTPException(status_code=403, detail="Forbidden")
     try:
         db = get_db()
-        return refresh_pe_data(db)
+        result = refresh_pe_data(db)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    # The 20-year annual archive rides along on the same nightly slot: a second
+    # POST to the same host, no new cron entry, no new vendor. It is what makes
+    # a fundamental factor testable at all (see core/fundamentals_annual.py).
+    #
+    # Its failure must NOT fail this endpoint. `pe_data` is what the app
+    # actually serves; the archive is for offline analysis, and taking the live
+    # feed down with it would trade something the user sees for something only
+    # a backtest reads.
+    try:
+        result["annual"] = refresh_annual_fundamentals(db)
+    except Exception as e:
+        result["annual"] = {"success": False,
+                            "error": f"{type(e).__name__}: {e}"}
+    return result

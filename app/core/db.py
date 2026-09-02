@@ -352,6 +352,35 @@ def init_db(db: _DB) -> None:
         "ON risk_snapshot(measured_at DESC)"
     )
 
+    # Twenty years of annual fundamentals, from the *_fy_h history arrays the
+    # nightly scanner call already has access to. This is what makes a
+    # fundamental factor testable at all: pe_data is a current-value snapshot
+    # every refresh destroys, and fundamentals_history only starts 2026-08-25.
+    #
+    # first_usable_date = fiscal year end + 120 days, and it is the look-ahead
+    # guard, not decoration. NOTHING may read a row before that date; go through
+    # core/fundamentals_annual.get_annual_asof, which enforces it.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS fundamentals_annual (
+            symbol TEXT NOT NULL,
+            fiscal_year INTEGER NOT NULL,
+            eps_diluted DOUBLE PRECISION,
+            dps DOUBLE PRECISION,
+            net_income DOUBLE PRECISION,
+            revenue DOUBLE PRECISION,
+            total_assets DOUBLE PRECISION,
+            gross_profit DOUBLE PRECISION,
+            total_debt DOUBLE PRECISION,
+            first_usable_date TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (symbol, fiscal_year)
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fundamentals_annual_usable "
+        "ON fundamentals_annual(first_usable_date)"
+    )
+
     for key in ("pe_last_successful_fetch", "pe_last_attempt_status"):
         db.execute(
             "INSERT INTO settings (key, value) VALUES (%s, '') ON CONFLICT (key) DO NOTHING",

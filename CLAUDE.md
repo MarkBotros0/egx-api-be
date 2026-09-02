@@ -1258,6 +1258,51 @@ morning's reading rather than "no data" when the score cache is cold.
 `init_db`. There is no migration framework — every statement there is
 idempotent, so new columns land on the next cold start of any process.
 
+### fundamentals_annual — twenty years, from a call we already make
+
+```sql
+fundamentals_annual (symbol, fiscal_year, eps_diluted, dps, net_income,
+                     revenue, total_assets, gross_profit, total_debt,
+                     first_usable_date, updated_at,
+                     PRIMARY KEY (symbol, fiscal_year))
+```
+
+**This is what makes a fundamental factor testable at all.** `scripts/backtest.py`
+refuses to score fundamentals in its own docstring, and correctly: `pe_data` is a
+current-value snapshot every refresh destroys, and `fundamentals_history` only
+starts 2026-08-25.
+
+The TradingView scanner the nightly cron already calls also returns `*_fy_h`
+history arrays — the whole annual series per company, aligned element-wise to
+`fiscal_period_fy_h`. **Verified live: 246 of 296 EGX rows (83%), 114 symbols
+with a full 20 years, 2,555 records after filtering.** It rides along on the
+existing `/api/pe/refresh` slot as a second POST to the same host: no new cron
+entry, no new vendor. Its failure is swallowed — `pe_data` is what the app
+serves and must not go down with an archive only a backtest reads.
+
+**`first_usable_date` = fiscal year end + 120 days is the look-ahead guard, not
+decoration.** A fiscal year's figures were not knowable on 31 December of that
+year, and treating them as if they were lets any factor appear to work. Read
+through `get_annual_asof(db, as_of)`, which enforces it; querying the table
+directly in a backtest bypasses every guard in the module.
+`tests/test_fundamentals_annual.py` pins the filter, the array alignment, and
+the truncated-response refusal.
+
+**Two limits that cannot be engineered away — state them wherever results are:**
+- **The arrays are as-RESTATED, not as-first-reported.** No publish date exists
+  at any spelling for EGX, so a fixed lag is the only available defence and
+  residual restatement bias survives it. A company that later revised a bad year
+  looks better here than it did to an investor at the time.
+- **Pre-2012 is refused at ingest.** Measured symbols with a usable diluted EPS
+  per fiscal year: 2018 → 225, 2015 → 207, 2012 → 160, then a cliff —
+  2011 → 63, 2009 → 52, 2007 → 23, 2006 → 15. The rows reach further back
+  than the data does, and including them would weight a cross-sectional test
+  toward whichever handful of large caps happened to report.
+
+Note the current fiscal year is thin by construction (2025 → 100 symbols) because
+companies have not all reported; `first_usable_date` handles that without a
+special case.
+
 ### fundamentals_history — the point-in-time record
 
 ```sql
