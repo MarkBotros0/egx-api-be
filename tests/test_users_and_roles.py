@@ -298,7 +298,7 @@ def test_user_deletion_is_one_transaction(monkeypatch):
         ("COUNT(*)", [(2,)]),
     ]))
     m.delete_user("u2", admin=ADMIN)
-    assert len(db.tx_log) == 5, "every delete must run inside transaction()"
+    assert len(db.tx_log) == 6, "every delete must run inside transaction()"
 
 
 # ---------------------------------------------------------------------------

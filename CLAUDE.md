@@ -52,10 +52,12 @@ egx-api-be/                     # Python FastAPI backend
       holdings.py               # The one spelling of the open-holdings query
       returns.py                # Position-level return maths, shared open/closed
       sales.py                  # Realized-gains maths (pure)
+      dividends.py              # Dividend ledger maths + the one spelling of its queries
     routers/
       analysis.py               # GET /api/analysis (single stock + batch mode)
       portfolio.py              # CRUD /api/portfolio
       sales.py                  # GET/POST/DELETE /api/sales (realized gains)
+      dividends.py              # POST/DELETE /api/dividends
       portfolio_analysis.py     # GET/POST /api/portfolio_analysis
       pe.py                     # GET /api/pe ; POST /api/pe/refresh (cron-triggered)
       market_regime.py          # GET /api/market_regime (market-wide condition reading)
@@ -124,6 +126,7 @@ public/                         # Static assets, PWA manifest
   are carried through the edit payload unchanged so an edit cannot wipe them;
   nothing in the UI can set a new one today.
 - **Sell** action per holding (full or partial) → `RealizedGainsCard` + collapsed `ClosedPositionsTable`.
+- **Dividend** action per holding → records cash received (`AddDividendForm`), rolls into `RealizedGainsCard`'s combined headline, and lists in the collapsed `DividendsTable`.
 - Mobile: FAB (floating action button) to add; full-screen modal form
 - Desktop: inline form, top-right "+ Add Stock" button
 - Sections stacked: MacroCard → PortfolioSummary → RiskDashboard → HoldingsTable → CorrelationHeatmap → MonteCarloChart → AdvicePanel
@@ -214,6 +217,48 @@ lengths cannot honestly be averaged. `total_realized_pnl_pct` is cost-weighted.
 Trades held under 30 days report no annualized figure at all
 (`MIN_DAYS_FOR_ANNUALIZATION` in `core/returns.py`).
 
+`GET /api/sales` now also returns `dividends`, and `summary` is built by
+`summarize_realized` (which replaced `summarize_sales`) — it owns both
+ledgers so the combined headline is computed once, in tested Python, rather
+than re-derived in the browser. `total_realized_pnl_pct`, `beat_t_bill_count`
+/ `annualizable_count` and `best_trade` / `worst_trade` all stay
+**capital-gains-only**: a dividend has no cost basis and no holding period to
+annualize against, so folding it into those figures would either invent a
+basis or silently change what "return" means mid-metric.
+
+### POST /api/dividends, DELETE
+
+Records cash a company paid the user for holding it — "profit share".
+
+**A dividend is not a sale.** It reduces no position and closes no cost basis,
+so it lives in `portfolio_dividends` and is anchored to the **symbol**, with no
+`holding_id`. A sale carries one because undo must restore shares to a specific
+position; a dividend restores nothing, so the column would buy no behaviour —
+and would cost correctness, since deleting a holding would then destroy the
+record of money genuinely received. Symbol-anchoring means dividend history
+survives selling out entirely.
+
+A single INSERT, so unlike `POST /api/sales` there is nothing for
+`db.transaction()` to keep atomic.
+
+`amount` is **the total EGP that actually landed**, already net of Egypt's
+5–10% dividend withholding tax. The app computes no tax and must never present
+this as gross. `shares` is optional and used only to display a per-share figure.
+
+**Duplicate guard:** an exact `symbol + pay_date + amount` repeat returns **409**.
+The primary surface is a phone, and a double-tapped submit is the likeliest way
+this ledger goes wrong — a duplicate sale at least leaves a wrong share count,
+a duplicate dividend leaves no trace at all.
+
+**Reads are on `GET /api/sales`**, which serves both ledgers so the combined
+headline is computed in tested Python rather than in the browser.
+
+**Accepted display consequence:** nothing stops two `portfolio` rows sharing a
+symbol. When that happens the per-holding figure is that SYMBOL's total, labelled
+"(all lots)". Splitting it by today's share count would be fiction — the counts
+differed when the dividend was paid. No aggregate is affected: every total sums
+the ledger directly and never reaches it through holdings.
+
 ### GET /api/portfolio_analysis
 **The heaviest endpoint.** Per-holding analysis + portfolio-level risk metrics + Monte Carlo + macro + signals.
 - Fetches OHLCV for each holding sequentially (cache helps)
@@ -232,6 +277,60 @@ own weights (see *Auth, roles and per-user settings*); the generic
 `{key, value}` form writes the global `settings` table and requires an **admin**,
 because everything left in there is shared — `currency`, `risk_free_rate` and
 the `pe_last_*` feed status. Pre-seeded: `currency=EGP`, `risk_free_rate=25`.
+
+### The app is CLOSED — read this before adding any route
+
+**Nothing is served to anyone who is not signed in.** There is no public
+surface: no landing page, no public dashboard, no anonymous API.
+
+The backend enforces it in ONE place — `require_authentication`, an HTTP
+middleware in `app/main.py` that rejects every `/api/*` request without a
+valid, active user. The policy itself lives in `core/auth.py`:
+
+```python
+PUBLIC_ENDPOINTS = frozenset({
+    ("POST", "/api/auth/login"),   # the way in
+    ("POST", "/api/pe/refresh"),   # Vercel cron; guarded by PE_REFRESH_SECRET
+})
+```
+
+`OPTIONS` also passes, because a CORS preflight carries no `Authorization`
+header by design and blocking it breaks every browser call including login.
+
+**Default-deny is the whole point.** A router added later is locked until
+someone deliberately opens it, so the failure mode is "it 401s and I notice"
+rather than "it has been serving the dataset to the internet since it
+shipped" — which is exactly what **nine** endpoints (`tickers`, `ohlcv`,
+`analysis`, `compare`, `historical`, `intraday`, `macro`, `market_regime`,
+`pe`) were doing until 2026-09-02, with nothing in the codebase noticing.
+`tests/test_auth_gate.py` walks the app's REAL route table and fails if any
+non-allowlisted route answers an anonymous caller, so the guarantee is
+verified by enumeration rather than by memory.
+
+Routers that need the caller's identity still declare
+`Depends(get_current_user)`. The middleware is a second layer, not a
+replacement — do not remove those.
+
+**Frontend:** `src/middleware.ts` is deny-by-default too. Only `/login` and
+static assets (`/_next`, `/icons`, `/manifest.json`, `/sw.js`, favicons) are
+reachable signed out; everything else redirects to `/login?next=…`. `Navbar`
+and `BottomTabBar` return `null` when unauthenticated so the login page stands
+alone. That redirect is UX only — the `egx.auth.present` cookie is set by
+client JS and carries no signature, so the backend gate is the real guard.
+
+**Logout wipes Cache Storage** (`clearStoredAuth` → `clearCachedResponses`).
+`sw.js` is network-first but FALLS BACK to cache, so without the wipe a
+signed-out person on a shared phone could go offline and have the worker
+re-serve the last dashboard and API responses it saw. Verified: a session
+holding 15 cached entries including `/api/portfolio` drops to just the
+re-cached `/login` page.
+
+**Consequence for `/api/market_regime`:** its cached scores used to be warmed
+by anonymous dashboard traffic. There is no anonymous traffic any more, so the
+reading stays warm only while the signed-in user is on DEFAULT weights (same
+`weights_hash`, same cache key). A user with customised sliders will see the
+card fall back to its last stored reading flagged `stale`. It degrades, it does
+not break.
 
 ### Auth, roles and user management
 
@@ -264,9 +363,16 @@ be a lie. Cost is one indexed PK lookup on a pooled connection.
 Dependencies in `core/auth.py`:
 - `get_current_user` — 401 unless a valid token maps to an **active** row
 - `require_admin` — the above plus 403 for non-admins
-- `get_optional_user` — returns `None` instead of raising. `/api/analysis` uses
-  this: the dashboard is a public page (middleware guards only `/portfolio` and
-  `/admin`), so demanding a token there would break anonymous browsing.
+- `get_optional_user` — returns `None` instead of raising. **Currently unused:**
+  `/api/analysis` used it while the dashboard was public, and now requires a
+  real user like everything else. Kept because it is the right tool if a route
+  ever legitimately needs to serve both. Do not reach for it to sidestep the
+  gate — the gate would reject the request before the dependency ran anyway.
+
+Note the **anonymous WEIGHTS context is a different thing** and still exists:
+`get_weights_from_db(db, user_id=None)` and `read_cached_scores` pass `None` so
+the market-regime average stays on the default weights its bands were
+calibrated at. That is about whose sliders apply, not about who may call.
 
 ### /api/users — admin only
 
@@ -277,11 +383,11 @@ enable/disable · `DELETE /{id}`.
   returned **exactly once**, in the response to the call that created it. Only
   the bcrypt hash is stored, so it can never be read back — `PasswordRevealDialog`
   says so on screen.
-- **`DELETE` removes `portfolio_sales`, `portfolio`, `watchlist` and
-  `user_settings` first, then the user, all in one `db.transaction()`.** No
-  table has an FK to `users`, so nothing cascades and the rows would otherwise
-  survive as invisible orphans. Sales go before holdings, matching the
-  direction the sale-undo path depends on.
+- **`DELETE` removes `portfolio_sales`, `portfolio_dividends`, `portfolio`,
+  `watchlist` and `user_settings` first, then the user, all in one
+  `db.transaction()`.** No table has an FK to `users`, so nothing cascades and
+  the rows would otherwise survive as invisible orphans. Sales and dividends go
+  before holdings, matching the direction the sale-undo path depends on.
 - Guards: you cannot disable or delete **yourself**, or the **last active
   admin** — either would leave the app with nobody able to administer it.
 
@@ -655,18 +761,20 @@ Components in `src/app/components/`:
 **Portfolio views:**
 - `PortfolioSummary` — Totals + avg composite score tile + sector allocation pie/stacked bar
 - `RiskDashboard` — Sharpe/Sortino/MaxDD/VaR/Current DD grid
-- `HoldingsTable` — Full table desktop (Score column with gauge + signal), cards mobile (gauge in card header + expanded detail). Error rows use `colSpan={10}` plus a dedicated Actions cell, so a holding whose price feed is down can still be sold. `onSell` opens `SellHoldingForm` per holding.
+- `HoldingsTable` — Full table desktop (Score column with gauge + signal), cards mobile (gauge in card header + expanded detail). Error rows use `colSpan={10}` plus a dedicated Actions cell, coordinated against the expanded detail row's `colSpan={12}` — both must total the table's 12 columns, and a mismatch between the two is a bug this project has already shipped once. Dividends render as a per-symbol `DividendPill` next to the symbol, not as a new column, precisely to avoid touching either colSpan. `onSell` opens `SellHoldingForm`, `onAddDividend` opens `AddDividendForm`, per holding.
 - `MacroCard` — EGX30/USD-EGP/CBE rate indicator row
 - `AdvicePanel` — Signals rendered with severity styles + learn links
 - `AddHoldingForm` — Full-screen modal on mobile, inline on desktop
 - `SellHoldingForm` — Records a full or partial sell against a holding
-- `RealizedGainsCard` — Summary of banked gains/losses (the "Winnings" card)
+- `AddDividendForm` — Records a dividend payment (symbol, amount received, pay date, optional shares/notes) against a holding
+- `RealizedGainsCard` — Summary of banked gains/losses (the "Winnings" card). Headline is now **gains + dividends**: `total_dividends` and `dividend_count` from `summarize_realized` render alongside the capital-gains figure, clearly separated, never blended into one number.
 - `ClosedPositionsTable` — Collapsed table of past sales, expandable per row
+- `DividendsTable` — Collapsed table of past dividend payments, expandable per row, mirroring `ClosedPositionsTable`'s pattern
 
 **Admin (admin role only):**
 - `AdminUsersTable` — desktop table / mobile cards. Actions per user: reset password, disable/enable, delete. Hides the destructive actions on your own row (the backend guards them anyway).
 - `CreateUserModal` — full-screen on mobile, card on desktop. Leaving the password blank is the intended path; the backend generates one.
-- `PasswordRevealDialog` — shows a generated password ONCE with a copy button, and says plainly that it cannot be shown again. Used by both create and reset.
+- `PasswordRevealDialog` — shows a generated password ONCE and says plainly that it cannot be shown again. Used by both create and reset. **Copy puts the username AND password in one block** (`Username: x\nPassword: y`) because it gets pasted into a single message; copying the password alone left the admin retyping the username into the same chat. The on-screen block mirrors the copied text exactly, so what is sent is what was checked.
 - Page at `src/app/admin/page.tsx`, gated on `isAdmin` from `useAuth()`.
 
 **UI helpers:**
@@ -724,6 +832,18 @@ portfolio_sales (id, user_id, holding_id, symbol, name, sector, quantity,
                  -- portfolio.quantity = 0 means fully sold; the row is kept
                  -- as the undo anchor and filtered out of every read by
                  -- core/holdings.fetch_open_holdings.
+portfolio_dividends (id, user_id, symbol, name, sector, amount, pay_date,
+                     shares, notes, created_at)
+                 -- Cash the company paid for holding it. Anchored to the
+                 -- SYMBOL, deliberately with NO holding_id: a dividend
+                 -- restores nothing on undo, so the column would buy no
+                 -- behaviour and would cost correctness — deleting a holding
+                 -- would destroy the record of money genuinely received.
+                 -- amount   -> total EGP that ACTUALLY LANDED, already net of
+                 --             the 5-10% withholding tax. Never gross.
+                 -- shares   -> optional, display only. amount is never
+                 --             derived from it.
+                 -- An exact symbol+pay_date+amount repeat is rejected 409.
 settings  (key, value)   -- pre-seeded: currency, risk_free_rate,
                          --             weight_trend, weight_momentum, weight_volume,
                          --             weight_volatility, weight_divergence,
@@ -846,6 +966,7 @@ Synced to Turso via `/api/watchlist` and exposed through `WatchlistProvider` (wr
 - **EGX trading hours:** Sun–Thu, 10:00 AM – 2:30 PM Cairo time. EGX30 only updates during these hours.
 - **T+2 settlement:** mentioned on Learn page but not enforced in portfolio logic
 - **Auth:** every router scopes its queries by `user.id` from a JWT Bearer token (`app/routers/portfolio.py` and the rest); `app/main.py` calls `seed_users_from_env` to provision users.
+- **The app is closed — see *The app is CLOSED*.** A new router is denied by default; opening it means editing `PUBLIC_ENDPOINTS` in `core/auth.py`, and `tests/test_auth_gate.py` will tell you if you leave something open by accident.
 - **Pushing: switch to the `MarkBotros0` GitHub account first.** Both repos are
   owned by `MarkBotros0`, but the machine has several `gh` accounts
   authenticated at once and the active one is often `mark-aigorithm`, which
@@ -861,6 +982,7 @@ Synced to Turso via `/api/watchlist` and exposed through `WatchlistProvider` (wr
 
 ## Not Present / Deliberately Missing
 
+- **Any public/anonymous surface.** No landing page, no public dashboard, no demo mode, no read-only guest. Signed out, the only thing that exists is the login form.
 - Real-time streaming quotes (egxpy is polling, not streaming)
 - Order placement (this is analysis-only; user trades through Thndr app separately)
 - External TA libraries (ta-lib, pandas-ta) — everything is from-scratch for learning

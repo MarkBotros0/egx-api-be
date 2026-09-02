@@ -243,11 +243,12 @@ def delete_user(user_id: str, admin: CurrentUser = Depends(require_admin)):
         _guard_not_last_admin(db, target, "delete")
 
         # No table has a foreign key to `users`, so nothing cascades — without
-        # this the rows survive as invisible orphans. Sales go before holdings,
-        # matching the direction the undo path depends on, and it is all one
-        # transaction so a half-deleted user is impossible.
+        # this the rows survive as invisible orphans. Sales and dividends go
+        # before holdings, matching the direction the undo path depends on,
+        # and it is all one transaction so a half-deleted user is impossible.
         with db.transaction() as tx:
             tx.execute("DELETE FROM portfolio_sales WHERE user_id = %s", (user_id,))
+            tx.execute("DELETE FROM portfolio_dividends WHERE user_id = %s", (user_id,))
             tx.execute("DELETE FROM portfolio WHERE user_id = %s", (user_id,))
             tx.execute("DELETE FROM watchlist WHERE user_id = %s", (user_id,))
             tx.execute("DELETE FROM user_settings WHERE user_id = %s", (user_id,))

@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
+from app.core.dividends import fetch_dividend_totals
 from app.core.holdings import fetch_open_holdings
 from app.core.macro_fetch import fetch_macro
 from app.core.composite import compute_composite, get_weights_from_db, DEFAULT_WEIGHTS
@@ -71,6 +72,23 @@ def _analyze(holdings, user_id: str = None):
     signals = []
     total_invested = 0
     total_current_value = 0
+
+    # Dividends are symbol-anchored, so this is one indexed aggregate with no
+    # price fetch — it costs nothing against the 30 s budget. It must key off
+    # user_id and NOT off `holdings`, because POST /api/portfolio_analysis
+    # takes holdings from the request body.
+    dividends_by_symbol = fetch_dividend_totals(get_db(), user_id)
+
+    # Nothing stops two portfolio rows sharing a symbol, and a dividend belongs
+    # to the SYMBOL, not to one purchase lot. When that happens the UI labels
+    # the figure as the symbol's total rather than the row's own — splitting it
+    # by today's share count would be fiction, since the counts differed when
+    # the dividend was paid.
+    _symbol_counts: dict = {}
+    for _h in holdings:
+        _sym = (_h.get("symbol") or "").upper()
+        _symbol_counts[_sym] = _symbol_counts.get(_sym, 0) + 1
+
     sector_values = {}
     stock_values = {}
     all_returns = {}
@@ -151,6 +169,12 @@ def _analyze(holdings, user_id: str = None):
                     "id": h.get("id"),
                     "symbol": symbol,
                     "error": "Could not fetch market data",
+                    "dividends_collected": dividends_by_symbol.get(
+                        (h.get("symbol") or "").upper(), 0.0
+                    ),
+                    "dividends_symbol_shared": _symbol_counts.get(
+                        (h.get("symbol") or "").upper(), 0
+                    ) > 1,
                 })
                 excluded_holdings.append({
                     "symbol": symbol,
@@ -363,6 +387,8 @@ def _analyze(holdings, user_id: str = None):
                 "pnl": round(pnl, 2),
                 "pnl_pct": round(pnl_pct, 2),
                 "days_held": days_held,
+                "dividends_collected": dividends_by_symbol.get(symbol.upper(), 0.0),
+                "dividends_symbol_shared": _symbol_counts.get(symbol.upper(), 0) > 1,
                 # None until MIN_DAYS_FOR_ANNUALIZATION — see _annualized_return.
                 "annualized_return": round(ann_return, 2) if ann_return is not None else None,
                 # `is not None` throughout: a genuinely flat/suspended stock has
@@ -789,6 +815,12 @@ def _analyze(holdings, user_id: str = None):
                 "id": h.get("id"),
                 "symbol": symbol,
                 "error": f"Analysis failed: {str(e)}",
+                "dividends_collected": dividends_by_symbol.get(
+                    (h.get("symbol") or "").upper(), 0.0
+                ),
+                "dividends_symbol_shared": _symbol_counts.get(
+                    (h.get("symbol") or "").upper(), 0
+                ) > 1,
             })
             if not counted_in_totals:
                 excluded_holdings.append({

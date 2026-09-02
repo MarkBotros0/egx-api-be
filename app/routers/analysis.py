@@ -10,7 +10,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.core.auth import CurrentUser, get_optional_user
+from app.core.auth import CurrentUser, get_current_user
 from app.core.cache import get, set, make_key
 from app.core.constants import (
     BATCH_DEADLINE_SECONDS,
@@ -331,13 +331,15 @@ def get_analysis(
     bars: int = Query(200),
     mode: Optional[str] = Query(None),
     symbols: Optional[str] = Query(None),
-    # Optional, not required: the dashboard is a public page (middleware.ts
-    # guards only /portfolio), so demanding a token here would break anonymous
-    # browsing. Anonymous callers score under the global/default weights.
-    user: Optional[CurrentUser] = Depends(get_optional_user),
+    # Required: the whole app is behind sign-in now, so there is no anonymous
+    # caller to accommodate. The ANONYMOUS WEIGHTS context still exists and is
+    # a different thing — `read_cached_scores` passes user_id=None so the
+    # market-regime average stays on the default weights its bands were
+    # calibrated at.
+    user: CurrentUser = Depends(get_current_user),
 ):
     try:
-        user_id = user.id if user else None
+        user_id = user.id
 
         # Batch mode
         if mode == "batch":

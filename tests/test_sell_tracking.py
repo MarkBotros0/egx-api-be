@@ -144,10 +144,10 @@ def test_open_holdings_filter_is_spelled_once():
         )
 
 
+from app.core.dividends import summarize_realized
 from app.core.sales import (
     SaleValidationError,
     compute_sale_metrics,
-    summarize_sales,
     validate_sale,
 )
 
@@ -286,7 +286,7 @@ def test_metrics_preserve_the_original_sale_fields():
 # ---- summary ----
 
 def test_empty_summary_is_zeroed_not_null():
-    s = summarize_sales([])
+    s = summarize_realized([], [])
     assert s["total_realized_pnl"] == 0
     assert s["total_realized_pnl_pct"] is None
     assert s["win_count"] == 0 and s["loss_count"] == 0
@@ -302,7 +302,7 @@ def test_total_pct_is_cost_weighted_not_a_mean_of_percentages():
         compute_sale_metrics(_sale(quantity=10, buy_price=100.0, sell_price=150.0,
                                    symbol="SWDY"), 25.0),
     ]
-    s = summarize_sales(priced)
+    s = summarize_realized(priced, [])
     assert s["total_realized_pnl"] == 1500.0
     assert s["total_realized_pnl_pct"] == pytest.approx(13.64, abs=0.01)
 
@@ -313,7 +313,7 @@ def test_wins_and_losses_are_counted_and_extremes_identified():
         compute_sale_metrics(_sale(quantity=10, buy_price=50.0, sell_price=40.0,
                                    symbol="SWDY"), 25.0),
     ]
-    s = summarize_sales(priced)
+    s = summarize_realized(priced, [])
     assert s["win_count"] == 1 and s["loss_count"] == 1
     assert s["best_trade"]["symbol"] == "COMI"
     assert s["worst_trade"]["symbol"] == "SWDY"
@@ -326,7 +326,7 @@ def test_by_symbol_aggregates_multiple_sales_and_sorts_by_pnl():
         compute_sale_metrics(_sale(quantity=10, buy_price=50.0, sell_price=55.0,
                                    symbol="SWDY"), 25.0),
     ]
-    s = summarize_sales(priced)
+    s = summarize_realized(priced, [])
     assert [b["symbol"] for b in s["by_symbol"]] == ["COMI", "SWDY"]
     comi = s["by_symbol"][0]
     assert comi["sales_count"] == 2 and comi["quantity"] == 20
@@ -345,6 +345,6 @@ def test_t_bill_counts_ignore_trades_too_short_to_annualize():
         # Twelve days — not annualizable, must not count either way.
         compute_sale_metrics(_sale(buy_date="2026-08-20", sell_date="2026-09-01"), 25.0),
     ]
-    s = summarize_sales(priced)
+    s = summarize_realized(priced, [])
     assert s["annualizable_count"] == 2
     assert s["beat_t_bill_count"] == 1

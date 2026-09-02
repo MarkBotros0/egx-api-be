@@ -154,6 +154,38 @@ def init_db(db: _DB) -> None:
         "ON portfolio_sales(user_id)"
     )
 
+    # Dividends — cash the company paid you for holding it.
+    #
+    # Symbol-anchored, deliberately with NO holding_id. A sale carries one
+    # because DELETE /api/sales must restore shares to a specific position; a
+    # dividend restores nothing, so the column would buy no behaviour — and
+    # would cost correctness, since deleting a holding would then orphan or
+    # destroy the record of money genuinely received.
+    #
+    # `amount` is the total EGP that ACTUALLY LANDED, already net of Egypt's
+    # 5-10% dividend withholding tax. The app computes no tax and must never
+    # present this as a gross figure. `shares` is optional and exists only so
+    # the UI can show an approximate per-share number; amount is never derived
+    # from it.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_dividends (
+            id         TEXT PRIMARY KEY,
+            user_id    TEXT NOT NULL,
+            symbol     TEXT NOT NULL,
+            name       TEXT NOT NULL,
+            sector     TEXT DEFAULT '',
+            amount     DOUBLE PRECISION NOT NULL,
+            pay_date   TEXT NOT NULL,
+            shares     INTEGER,
+            notes      TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_portfolio_dividends_user "
+        "ON portfolio_dividends(user_id, symbol)"
+    )
+
     db.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
