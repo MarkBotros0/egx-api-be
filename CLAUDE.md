@@ -64,6 +64,7 @@ egx-api-be/                     # Python FastAPI backend
       indicators.py             # All technical indicators (pandas/numpy only)
       levels.py                 # Key levels (nearest support/resistance) + entry/exit zone computation
       macro_fetch.py            # Macro data fetch helper (EGX30, USD/EGP, CBE rate)
+      news_fetch.py             # TradingView news: fetch, normalise, dedupe, 30-day window
       pe_fetch.py               # Fundamentals feed (P/E, dividend yield, loss-making) via TradingView scanner
       tradingview.py            # Shared TradingView scanner client (URL/headers), also used by tickers.py
       index_membership.py       # Static EGX30/70/100/NILEX lookup — no network, for the scoring hot path
@@ -93,6 +94,7 @@ egx-api-be/                     # Python FastAPI backend
       tickers.py                # GET /api/tickers
       settings.py               # GET/PUT /api/settings  (weights live here too, section=weights)
       macro.py                  # GET /api/macro
+      news.py                   # GET /api/news (on-demand, no table)
       watchlist.py              # GET/POST/DELETE /api/watchlist
       auth.py                   # POST /api/auth/login ; GET /api/auth/me
       users.py                  # Admin-only user management (/api/users)
@@ -652,6 +654,70 @@ directly and never reaches it through holdings.
 
 ### GET /api/macro
 Returns `{ egx30, usd_egp, interest_rate }`. 1-hour cache in `macro_data` table. Graceful degradation (returns null values if source fails).
+
+### GET /api/news
+
+Stories for the caller's holdings and watchlist, with EGX30 market news below.
+**Fetched on demand — no table, no cron, nothing persisted.**
+
+**The source is TradingView's news endpoint**, not the exchange.
+`news-headlines.tradingview.com/v2/headlines?symbol=EGX:<SYM>` returns
+Reuters/Zawya/LSE stories with `relatedSymbols`, so a story maps onto holdings.
+egx.com.eg is unreachable from a server: it serves an F5 bot-challenge shell
+(`APM_DO_NOT_TOUCH`), the same wall that made the old P/E scraper never once
+succeed. **Do not re-propose scraping EGX from a serverless function.**
+
+**Two traps, both measured:**
+- **`?market=egypt` is SILENTLY IGNORED** and serves the global stock feed —
+  200 items, **zero EGX symbols**, mostly Tesla and Santander. The market half
+  is built by fanning out over EGX30 constituents and deduping.
+- **The news host sends no `Access-Control-Allow-Origin`**, so a browser cannot
+  fetch it. (The *scanner* host does reflect Origin.) This is why the work is
+  server-side rather than a preference.
+
+**Why no snapshot table.** `pe_data` and `risk_snapshot` are cached because
+their upstream refuses half the universe at ~6s each. Measured here: **24
+symbols in 1.30s** at 8 workers, median 0.37s, 0 failures — roughly 4x faster
+than egxpy's healthy path. A table, a cron, a secret and a staleness story
+would be machinery for a 1.3-second problem. **The revisit threshold is
+`NEWS_DEADLINE_SECONDS` (8.0):** if it starts tripping routinely, the
+conclusion has expired and `pe_data` is the template.
+
+**A story older than `NEWS_RECENCY_DAYS` (30) is not news.** Chosen from the
+data: across a 24-symbol sample the newest story ranged from 0 days old (ETEL)
+to **275 days** (ACGC). A 7-day window empties the feed for most holdings; 90
+days lets that 275-day-old item render as news. Filtered items are not hidden —
+`coverage` reports them, the same convention as the dashboard's *"82 stocks ·
+84 without a price feed"*. The same object also reports
+**`symbols_over_cap`** — the caller's own symbols the 40-symbol fetch cap
+excluded — so a large portfolio's missing names are visible rather than
+silently dropped.
+
+**`coverage` describes YOUR stocks only, never EGX30.** The user did not ask
+for index names, and a "no news" tally against them would read as the app
+failing rather than as an absence of news.
+
+**Dedupe MERGES symbol tags rather than dropping the duplicate.** A story
+arrives once per symbol fetched, and "Sodic Signs Medium-Term Facility With
+CIB" is tagged `EGX:OCDI` **and** `EGX:COMI`. Keeping the first copy would
+discard the fact that it concerns two holdings. Coverage is computed from
+these deduped, merged-tag stories — a symbol "has news" because a story is
+TAGGED with it, not because that symbol's own query happened to return it —
+the same distinction `dedupe_symbol_signals` vs `build_position_signals` draws
+in `portfolio_analysis`.
+
+**Headline, provider, date, url, symbols — six fields, never body text.**
+Stories are Reuters/Zawya/LSE copy; the app links out to TradingView and must
+not store or reproduce them. `tests/test_news.py` fails if a body-ish field
+survives `normalize_item`.
+
+**Nothing on the page is `gain` green or `loss` red.** Those colours mean a
+real direction in the data. A headline carries none, and no sentiment is
+computed — tinting one green would claim a reading the app has not made.
+
+Coverage is genuinely thin for small caps: of 24 sampled symbols, 2 had no news
+at all (ESRS, EKHO) and several nothing inside 30 days (QNBE 56d, ACGC 275d).
+The feature must read as honest when empty, not broken.
 
 ### GET /api/settings, PUT /api/settings
 
@@ -1759,7 +1825,7 @@ Components in `src/app/components/`:
   why/how blocks, worked example, mark-as-read toggle.
 
 **UI helpers:**
-- `Navbar`, `BottomTabBar` — mobile bottom nav, desktop top nav. **Neither carries a "Users" destination any more.** Administering accounts is not a place in the app, it is an account action, so it renders as a button beside Log out at the right-hand end of `Navbar` — icon-only on mobile where it pairs with the log-out icon, icon + label at `md:`, the same shape the dashboard's Compare button uses. It is **36px tall, not the project's usual 44px target**, deliberately: the nav row is 61px and `--top-nav-clearance` IS that number, so a taller control here silently pushes every sticky element on every page down out of alignment. **The two navs no longer carry the same destinations:** Compare left the mobile pill for a button in the dashboard header (see *Dashboard*) and stayed in the desktop top nav, which has room for it. So the pill is Dashboard / Portfolio / Learn **for everyone, admin or not** — it holds the places every user has, and its tab count no longer changes with a role. On `/admin` it shows no highlight at all (`activeIndex` is -1, so the travelling span is not rendered), which is correct for a page it does not contain.
+- `Navbar`, `BottomTabBar` — mobile bottom nav, desktop top nav. **Neither carries a "Users" destination any more.** Administering accounts is not a place in the app, it is an account action, so it renders as a button beside Log out at the right-hand end of `Navbar` — icon-only on mobile where it pairs with the log-out icon, icon + label at `md:`, the same shape the dashboard's Compare button uses. It is **36px tall, not the project's usual 44px target**, deliberately: the nav row is 61px and `--top-nav-clearance` IS that number, so a taller control here silently pushes every sticky element on every page down out of alignment. **The two navs no longer carry the same destinations:** Compare left the mobile pill for a button in the dashboard header (see *Dashboard*) and stayed in the desktop top nav, which has room for it. So the pill is Dashboard / Portfolio / Learn / News **for everyone, admin or not** — it holds the places every user has, and its tab count no longer changes with a role. On `/admin` it shows no highlight at all (`activeIndex` is -1, so the travelling span is not rendered), which is correct for a page it does not contain.
 - `AuthProvider` — token + user in localStorage, an `egx.auth.present` cookie for middleware, `useAuth()` → `{user, isAuthenticated, isAdmin, login, logout}`. Re-reads the role from `/api/auth/me` on every load, so a role change lands on next refresh.
 - `LearnTooltip` — dashed-underline hover tooltip used everywhere for inline education
 - `LoadingSkeleton` — Card/Chart/Table skeletons

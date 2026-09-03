@@ -69,3 +69,19 @@ def get_index_membership(symbol: str) -> Optional[str]:
     if not symbol:
         return None
     return _load().get(symbol.upper())
+
+
+def symbols_in_index(tier: str) -> list[str]:
+    """
+    Every symbol in `tier` ("EGX30" | "EGX70" | "EGX100" | "NILEX"), sorted.
+
+    Unknown tiers return [] rather than everything: callers fan out over this
+    list, and a typo that silently meant "the whole universe" would turn one
+    bad string into 166 HTTP requests.
+
+    Sorted so a cache key built from the result is stable across processes.
+    """
+    if not tier:
+        return []
+    want = tier.upper()
+    return sorted(s for s, t in _load().items() if t == want)
