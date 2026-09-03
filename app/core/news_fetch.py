@@ -29,7 +29,11 @@ from __future__ import annotations
 import json
 import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    TimeoutError as FuturesTimeoutError,
+    as_completed,
+)
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
@@ -238,9 +242,14 @@ def fetch_many(
                 out[symbol] = []
             if time.monotonic() >= deadline:
                 break
-    except Exception:
+    except FuturesTimeoutError:
         # as_completed raises TimeoutError when the deadline expires with
-        # futures outstanding. Whatever landed is the answer.
+        # futures outstanding. Whatever landed is the answer. Caught
+        # narrowly and deliberately: a real bug here (a broken `futures`
+        # construction, a submission error) must surface as an exception,
+        # not be swallowed into a plausible-looking partial dict the way a
+        # bare `except Exception` once hid an SQL query that never succeeded
+        # (see get_weights_from_db in CLAUDE.md).
         pass
     finally:
         # wait=False + cancel_futures: the context-manager form would block on
@@ -269,7 +278,6 @@ def build_feed(fetched: dict, yours: list[str], now: datetime, dropped=()) -> di
     mine = {s.upper() for s in yours}
 
     shaped = []
-    with_news = set()
     for symbol, raw_items in (fetched or {}).items():
         kept = 0
         for raw in raw_items or []:
@@ -280,12 +288,18 @@ def build_feed(fetched: dict, yours: list[str], now: datetime, dropped=()) -> di
             kept += 1
             if kept >= NEWS_MAX_ITEMS_PER_SYMBOL:
                 break
-        if kept and symbol.upper() in mine:
-            with_news.add(symbol.upper())
 
     stories = dedupe_stories(shaped)
     your_stories = [i for i in stories if mine & set(i["symbols"])]
     market_stories = [i for i in stories if not (mine & set(i["symbols"]))]
+
+    # Derived from the RESOLVED, deduped stories — not from which symbol's own
+    # fetch key returned an item. A held symbol's own query can come back
+    # empty while a market symbol's query still surfaces a story tagging it
+    # (the canonical case: EGX:OCDI's own feed carries a story that also tags
+    # EGX:COMI). Counting from the fetch key would then list COMI as newsless
+    # in `coverage` while a COMI story sits right there in `your_stocks`.
+    with_news = {s for story in your_stories for s in story["symbols"] if s in mine}
 
     return {
         "your_stocks": your_stories,

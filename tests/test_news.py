@@ -306,3 +306,33 @@ def test_a_story_touching_a_held_symbol_is_yours_even_when_fetched_via_market():
     assert [i["id"] for i in feed["your_stocks"]] == ["shared"]
     assert feed["market"] == []
     assert feed["your_stocks"][0]["symbols"] == ["COMI", "OCDI"]
+
+
+def test_coverage_does_not_contradict_your_stocks_when_news_arrives_via_market():
+    """
+    COMI's own query returns nothing recent, but OCDI's query returns a story
+    that also tags COMI. That story correctly lands in your_stocks — so
+    coverage must not also say COMI has no news. Counting `with_news` from the
+    per-fetch-key result (rather than from the resolved, deduped stories)
+    would produce exactly that contradiction: a symbol simultaneously shown
+    with a story and listed as newsless.
+    """
+    now = datetime(2026, 9, 3, tzinfo=timezone.utc)
+    story = _raw("shared", "OCDI", 2, now)
+    story["relatedSymbols"] = [{"symbol": "EGX:OCDI"}, {"symbol": "EGX:COMI"}]
+    fetched = {"COMI": [], "OCDI": [story]}
+
+    feed = build_feed(fetched, yours=["COMI"], now=now)
+
+    assert [i["id"] for i in feed["your_stocks"]] == ["shared"]
+    assert feed["market"] == []
+    assert feed["coverage"]["symbols_with_news"] == 1
+    assert feed["coverage"]["symbols_without_news"] == [], (
+        "COMI must not be listed as newsless while its story is on screen"
+    )
+
+
+def test_coverage_reports_symbols_the_cap_dropped():
+    now = datetime(2026, 9, 3, tzinfo=timezone.utc)
+    feed = build_feed({}, yours=["COMI"], now=now, dropped=["ZZZZ"])
+    assert feed["coverage"]["symbols_over_cap"] == ["ZZZZ"]
