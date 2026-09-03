@@ -925,6 +925,33 @@ Three defects compounded it, all now fixed:
   `StockCard` now has five distinct states (`loading` / `live` / `stale` /
   `unavailable` / `failed`).
 
+**The Refresh button did nothing, twice over, and both causes are worth
+keeping.** It fired zero requests:
+
+- **An effect-ordering hazard.** The reset effect only SCHEDULES the demotion
+  of live cards back to stale, and the upgrade effect runs in the SAME commit
+  right after it — so `upgrade` still saw every symbol as `live`, filtered them
+  all out, and returned. Its deps had already changed, so it never ran again.
+  "Already upgraded" now lives in `upgradedRef`, a ref, because refs mutate
+  synchronously and state does not. Never decide *have I done this* from state
+  a sibling effect has only just queued.
+- **The service worker was answering the refresh from its own cache.**
+  `/api/dashboard` is served stale-while-revalidate, which is right on a normal
+  visit and exactly wrong when the user has just asked for new numbers. An
+  explicit refresh now carries `?fresh=<ts>`, which `sw.js` refuses to
+  SWR-serve *or* cache, so it reaches the network and leaves no entry behind.
+
+Verified: one `\/api\/dashboard?fresh=…` plus 2 batch calls at concurrency 2,
+against 0 requests before.
+
+**The live upgrade is deliberately expensive.** It pulls the full 400 bars and
+re-runs all eight categories, so a card that upgrades carries a score computed
+on today's bar — the same number the detail page computes. Measured, 9 of 24
+finish; the other 15 keep their snapshot value and their `as of` stamp. A
+price-only upgrade would be far faster and was rejected: the card's score would
+then be last night's while the detail page rescored on today's bar, which is
+the card-vs-detail divergence this whole design exists to prevent.
+
 ### THE EIGHT CATEGORY SCORES ARE STORED, NOT THE COMPOSITE
 
 This is what keeps *One Score Per Stock* true rather than trading it away for
