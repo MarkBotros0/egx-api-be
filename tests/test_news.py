@@ -136,16 +136,18 @@ def test_recency_window_boundary():
 
 
 def test_holdings_and_watchlist_merge_into_yours_without_duplicates():
-    yours, market = select_news_symbols(["COMI", "SWDY"], ["SWDY", "ETEL"], ["ABUK"])
+    yours, market, dropped = select_news_symbols(["COMI", "SWDY"], ["SWDY", "ETEL"], ["ABUK"])
     assert yours == ["COMI", "SWDY", "ETEL"], "holdings order first, watchlist appended"
     assert market == ["ABUK"]
+    assert dropped == []
 
 
 def test_a_symbol_you_own_is_never_also_a_market_symbol():
     """Otherwise it is fetched twice and renders in both sections."""
-    yours, market = select_news_symbols(["COMI"], [], ["COMI", "ABUK"])
+    yours, market, dropped = select_news_symbols(["COMI"], [], ["COMI", "ABUK"])
     assert yours == ["COMI"]
     assert market == ["ABUK"]
+    assert dropped == []
 
 
 def test_holdings_win_the_budget_when_the_cap_binds():
@@ -154,18 +156,44 @@ def test_holdings_win_the_budget_when_the_cap_binds():
     the LEAST relevant symbols — EGX30 names they never asked about — not
     their own holdings.
     """
-    yours, market = select_news_symbols(["A", "B", "C"], ["D"], ["E", "F"], cap=5)
+    yours, market, dropped = select_news_symbols(["A", "B", "C"], ["D"], ["E", "F"], cap=5)
     assert yours == ["A", "B", "C", "D"]
     assert market == ["E"]
+    assert dropped == []
 
 
 def test_the_cap_can_exhaust_the_market_half_entirely():
-    yours, market = select_news_symbols(["A", "B"], [], ["C", "D"], cap=2)
+    yours, market, dropped = select_news_symbols(["A", "B"], [], ["C", "D"], cap=2)
     assert yours == ["A", "B"]
     assert market == []
+    assert dropped == []
 
 
 def test_symbols_are_uppercased_and_blanks_dropped():
-    yours, market = select_news_symbols(["comi", " ", ""], ["etel"], ["abuk"])
+    yours, market, dropped = select_news_symbols(["comi", " ", ""], ["etel"], ["abuk"])
     assert yours == ["COMI", "ETEL"]
     assert market == ["ABUK"]
+    assert dropped == []
+
+
+def test_combined_overflows_but_holdings_fit():
+    """
+    When combined holdings+watchlist overflows the cap but all holdings fit,
+    watchlist symbols are dropped and reported.
+    """
+    yours, market, dropped = select_news_symbols(["A", "B", "C"], ["D", "E"], ["F"], cap=4)
+    assert yours == ["A", "B", "C", "D"], "all holdings survive, watchlist D takes the last slot"
+    assert market == [], "no budget left for market symbols"
+    assert dropped == ["E"], "watchlist E is dropped and reported"
+
+
+def test_holdings_alone_overflow_cap():
+    """
+    When holdings alone exceed the cap, something must be dropped and reported.
+    This is unavoidable: you cannot fetch 45 symbols under a cap of 40. The
+    only requirement is that the dropped holding is REPORTED, not hidden.
+    """
+    yours, market, dropped = select_news_symbols(["A", "B", "C"], [], ["F"], cap=2)
+    assert yours == ["A", "B"], "cap limits yours, so C does not fit"
+    assert market == [], "no budget for market"
+    assert dropped == ["C"], "C is reported as dropped, not silently lost"

@@ -154,17 +154,23 @@ def _ordered_unique(symbols) -> list[str]:
 
 def select_news_symbols(
     holdings, watchlist, market, cap: int = NEWS_MAX_SYMBOLS
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     """
-    Split the symbol budget into (yours, market_only).
+    Split the symbol budget into (yours, market_only, dropped).
 
-    Priority is holdings, then watchlist, then the index — so when the cap
-    binds it costs the user EGX30 names they never asked about rather than
-    their own positions. A symbol you own is removed from the market half so
-    it is fetched once and rendered in one place.
+    Priority is holdings, then watchlist, then the index. When the cap binds:
+    - Index names (from market) are dropped first
+    - Watchlist names are dropped second
+    - Holdings are dropped only if holdings alone exceed the cap
+
+    A symbol you own is removed from the market half so it is fetched once
+    and rendered in one place. The third element (dropped) contains symbols
+    from holdings+watchlist that were cut by the cap, in original order.
     """
-    yours = _ordered_unique(list(holdings or []) + list(watchlist or []))[:cap]
+    all_yours = _ordered_unique(list(holdings or []) + list(watchlist or []))
+    yours = all_yours[:cap]
+    dropped = all_yours[cap:]
     mine = set(yours)
     remaining = max(0, cap - len(yours))
     market_only = [s for s in _ordered_unique(market) if s not in mine][:remaining]
-    return yours, market_only
+    return yours, market_only, dropped
