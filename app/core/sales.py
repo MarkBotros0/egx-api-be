@@ -218,3 +218,108 @@ def compute_sale_metrics(sale: dict, risk_free_rate_pct: float,
         "t_bill_hurdle_pct": round(hurdle, 2),
         "beat_t_bill": (ann > hurdle) if ann is not None else None,
     }
+
+
+def group_sale_orders(sales: list[dict]) -> list[dict]:
+    """
+    Fold the per-lot rows of one sell submit back into one order.
+
+    Selling 300 shares held as a 200 lot and a 100 lot writes TWO
+    portfolio_sales rows — each part has its own cost basis, its own holding
+    period and its own T-bill hurdle, and `plan_sale_allocation` explains at
+    length why a single blended row would be a lie. But the user placed one
+    sell order, and the ledger has to read that way, so the rows written
+    together share a `sale_group_id` and this puts them back together for
+    display. The flat list stays the input to `summarize_realized`, which
+    grades each trade against the rate that prevailed over ITS window.
+
+    Grouping is on the STORED id, never on a timestamp coincidence: rows
+    written before the column existed are NULL and fall back to their own id,
+    so each is its own order rather than all of them collapsing into one.
+
+    Money adds up; rates do not. Quantity, cost, proceeds and P&L are sums and
+    the percentage is cost-weighted, so those are exact. The annualized figure
+    and its verdict are reported ONLY when every part ran over the same window
+    — otherwise there is no one holding period to annualize over, and the
+    order says so with a null while each part keeps its own.
+
+    Input order is preserved: the ledger is sorted by sell date before it gets
+    here and an order belongs where its first row sat.
+    """
+    orders: dict[str, dict] = {}
+    order_of_keys: list[str] = []
+
+    for sale in sales:
+        key = sale.get("sale_group_id") or sale["id"]
+        if key not in orders:
+            orders[key] = {
+                "id": key,
+                "symbol": sale["symbol"],
+                "name": sale["name"],
+                "sector": sale.get("sector") or "",
+                "sell_price": sale["sell_price"],
+                "sell_date": sale["sell_date"],
+                "notes": sale.get("notes") or "",
+                "created_at": sale.get("created_at"),
+                "lots": [],
+            }
+            order_of_keys.append(key)
+        orders[key]["lots"].append(sale)
+
+    out = []
+    for key in order_of_keys:
+        order = orders[key]
+        lots = order["lots"]
+
+        quantity = sum(int(l["quantity"]) for l in lots)
+        cost = sum(float(l["cost"]) for l in lots)
+        proceeds = sum(float(l["proceeds"]) for l in lots)
+        realized_pnl = proceeds - cost
+
+        order.update({
+            "lots_count": len(lots),
+            "quantity": quantity,
+            "cost": round(cost, 2),
+            "proceeds": round(proceeds, 2),
+            "realized_pnl": round(realized_pnl, 2),
+            # Cost-weighted, which for a sum over the same parts is just the
+            # ratio of the two totals. A mean of the parts' percentages would
+            # weight a 10-share lot like a 200-share one.
+            "realized_pnl_pct": round(realized_pnl / cost * 100, 2) if cost > 0 else None,
+            "buy_date": min(l["buy_date"] for l in lots),
+            "buy_date_latest": max(l["buy_date"] for l in lots),
+        })
+
+        if len(lots) == 1:
+            # The overwhelming case, and every sale recorded before orders
+            # existed. Copy the row's own figures rather than recomputing
+            # them, so a single-lot order is the sale, to the last decimal.
+            only = lots[0]
+            for field in ("days_held", "annualized_return_pct",
+                          "beat_t_bill", "t_bill_hurdle_pct"):
+                order[field] = only.get(field)
+        elif len({l["buy_date"] for l in lots}) == 1:
+            # Parts bought on one day and sold on one day share a window, so
+            # the order's own percentage annualizes over it honestly.
+            order["days_held"] = lots[0]["days_held"]
+            hurdle = lots[0].get("t_bill_hurdle_pct")
+            ann = (annualized_return(order["realized_pnl_pct"], order["days_held"])
+                   if order["realized_pnl_pct"] is not None else None)
+            order["annualized_return_pct"] = round(ann, 1) if ann is not None else None
+            order["t_bill_hurdle_pct"] = hurdle
+            order["beat_t_bill"] = (
+                (ann > hurdle) if ann is not None and hurdle is not None else None
+            )
+        else:
+            # Different holding periods. There is no single annualized return
+            # here any more than there is one across the whole ledger, and
+            # inventing one would be the error summarize_realized refuses to
+            # make. The parts each carry theirs.
+            order["days_held"] = None
+            order["annualized_return_pct"] = None
+            order["t_bill_hurdle_pct"] = None
+            order["beat_t_bill"] = None
+
+        out.append(order)
+
+    return out

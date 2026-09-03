@@ -156,6 +156,16 @@ def init_db(db: _DB) -> None:
         "CREATE INDEX IF NOT EXISTS idx_portfolio_sales_user "
         "ON portfolio_sales(user_id)"
     )
+    # One SUBMIT, one order. Selling 300 shares held as a 200 lot and a 100 lot
+    # writes two rows — each keeps its own cost basis, holding period and T-bill
+    # hurdle, which is the whole reason they are separate — but the user placed
+    # one sell order and the ledger has to read that way. Rows written together
+    # share this id and core/sales.group_sale_orders folds them back up.
+    #
+    # Rows written before the column existed are NULL and read as their own
+    # order (COALESCE to the row's id). Nothing backfills it: the grouping is a
+    # fact about how a sale was recorded, not something to infer afterwards.
+    db.execute("ALTER TABLE portfolio_sales ADD COLUMN IF NOT EXISTS sale_group_id TEXT")
 
     # Dividends — cash the company paid you for holding it.
     #

@@ -32,6 +32,7 @@ from app.core.macro_series import get_risk_free_steps
 from app.core.sales import (
     SaleValidationError,
     compute_sale_metrics,
+    group_sale_orders,
     validate_position_sale,
 )
 
@@ -39,7 +40,7 @@ router = APIRouter()
 
 _SALE_COLUMNS = (
     "id, holding_id, symbol, name, sector, quantity, buy_price, buy_date, "
-    "sell_price, sell_date, notes, created_at"
+    "sell_price, sell_date, notes, created_at, sale_group_id"
 )
 
 
@@ -48,7 +49,7 @@ def _row_to_sale(row) -> dict:
         "id": row[0], "holding_id": row[1], "symbol": row[2], "name": row[3],
         "sector": row[4], "quantity": row[5], "buy_price": row[6],
         "buy_date": row[7], "sell_price": row[8], "sell_date": row[9],
-        "notes": row[10], "created_at": row[11],
+        "notes": row[10], "created_at": row[11], "sale_group_id": row[12],
     }
 
 
@@ -108,6 +109,11 @@ def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
 
         now = datetime.utcnow().isoformat() + "Z"
         notes = body.get("notes", "")
+        # One submit, one order id, however many lots it reaches into. The
+        # ledger groups on this, so it is stamped even on a single-lot sale —
+        # a row that has one is unambiguous, and a NULL only ever means
+        # "written before orders existed".
+        group_id = str(uuid.uuid4())
         sales: list[dict] = []
         remaining_by_lot: dict[str, int] = {}
 
@@ -134,13 +140,13 @@ def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
                 sale_id = str(uuid.uuid4())
                 tx.execute(
                     f"INSERT INTO portfolio_sales ({_SALE_COLUMNS}, user_id) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         sale_id, part["id"], part["symbol"], part["name"],
                         part.get("sector") or "", part["quantity"],
                         float(part["buy_price"]), part["buy_date"],
                         clean["sell_price"], clean["sell_date"],
-                        notes, now, user.id,
+                        notes, now, group_id, user.id,
                     ),
                 )
                 remaining_by_lot[part["id"]] = updated[0]
@@ -150,14 +156,17 @@ def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
                     "quantity": part["quantity"], "buy_price": float(part["buy_price"]),
                     "buy_date": part["buy_date"], "sell_price": clean["sell_price"],
                     "sell_date": clean["sell_date"], "notes": notes,
-                    "created_at": now,
+                    "created_at": now, "sale_group_id": group_id,
                 })
 
         # Read ONCE for the whole request, not once per lot consumed.
         rfr = _risk_free_rate_pct(db)
         rate_steps = get_risk_free_steps(db)
+        priced = [compute_sale_metrics(s, rfr, rate_steps=rate_steps) for s in sales]
         return {
-            "sales": [compute_sale_metrics(s, rfr, rate_steps=rate_steps) for s in sales],
+            "sales": priced,
+            # What the user placed — one order, however many rows it wrote.
+            "orders": group_sale_orders(priced),
             "holdings": [
                 {**lot, "quantity": remaining_by_lot[lot["id"]], "updated_at": now}
                 for lot in lots if lot["id"] in remaining_by_lot
@@ -196,7 +205,12 @@ def get_sales(user: CurrentUser = Depends(get_current_user)):
         ).fetchone()
 
         return {
+            # The flat per-lot rows. `summarize_realized` eats THESE, not the
+            # orders: it grades each trade against the rate that prevailed over
+            # its own window, which is exactly what an order cannot state.
             "sales": priced,
+            # The same rows folded back into what the user actually placed.
+            "orders": group_sale_orders(priced),
             "dividends": dividends,
             "summary": summarize_realized(priced, dividends),
             "currency": currency_row[0] if currency_row else "EGP",
@@ -209,31 +223,50 @@ def get_sales(user: CurrentUser = Depends(get_current_user)):
 
 @router.delete("/api/sales")
 def delete_sale(id: str = Query(...), user: CurrentUser = Depends(get_current_user)):
+    """
+    Undo a sale, restoring the shares to the lots they came from.
+
+    `id` is an ORDER id or a single row's id, and the WHERE clause accepts
+    either. That is deliberate rather than lax: the ledger shows one line per
+    submit, so undoing what is on screen has to undo the whole thing — a delete
+    that removed one part of a two-lot order would give back half the shares
+    and leave the line still sitting there. The expanded row can still address
+    one part by its own id when that is genuinely what is wanted.
+
+    Every row's restore runs in ONE transaction, so a two-lot undo cannot
+    half-land any more than the sale that wrote it could.
+    """
     try:
         db = get_db()
         with db.transaction() as tx:
-            row = tx.execute(
-                "DELETE FROM portfolio_sales WHERE id = %s AND user_id = %s "
-                "RETURNING holding_id, quantity",
-                (id, user.id),
-            ).fetchone()
-            if row is None:
+            rows = tx.execute(
+                "DELETE FROM portfolio_sales "
+                "WHERE (id = %s OR sale_group_id = %s) AND user_id = %s "
+                "RETURNING id, holding_id, quantity",
+                (id, id, user.id),
+            ).fetchall()
+            if not rows:
                 raise HTTPException(status_code=404, detail=f"Sale not found: {id}")
-            holding_id, quantity = row[0], int(row[1])
 
-            # If the user hard-deleted the holding, there is nothing to restore
-            # the shares to — the sale still goes, and restored stays None.
-            restored = tx.execute(
-                "UPDATE portfolio SET quantity = quantity + %s, updated_at = %s "
-                "WHERE id = %s AND user_id = %s RETURNING quantity",
-                (quantity, datetime.utcnow().isoformat() + "Z", holding_id, user.id),
-            ).fetchone()
+            now = datetime.utcnow().isoformat() + "Z"
+            restored = []
+            for row_id, holding_id, quantity in rows:
+                # If the user hard-deleted the holding, there is nothing to
+                # restore the shares to — the sale still goes, and this part
+                # reports None rather than failing the whole undo.
+                back = tx.execute(
+                    "UPDATE portfolio SET quantity = quantity + %s, updated_at = %s "
+                    "WHERE id = %s AND user_id = %s RETURNING quantity",
+                    (int(quantity), now, holding_id, user.id),
+                ).fetchone()
+                restored.append({
+                    "sale_id": row_id,
+                    "holding_id": holding_id,
+                    "quantity": int(quantity),
+                    "restored_quantity": back[0] if back else None,
+                })
 
-        return {
-            "deleted": id,
-            "holding_id": holding_id,
-            "restored_quantity": restored[0] if restored else None,
-        }
+        return {"deleted": id, "restored": restored}
 
     except HTTPException:
         raise

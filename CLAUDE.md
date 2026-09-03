@@ -179,12 +179,35 @@ there is more than one.
   deliberately down to symbol, quantity, buy price, buy date). Existing values
   are carried through the edit payload unchanged so an edit cannot wipe them;
   nothing in the UI can set a new one today.
-- **Sell** action per holding (full or partial) → `RealizedGainsCard` + collapsed `ClosedPositionsTable`.
-- **Dividend** action per holding → records cash received (`AddDividendForm`), rolls into `RealizedGainsCard`'s combined headline, and lists in the collapsed `DividendsTable`.
+- **Sell** and **Dividend** actions per card → both land in `RealizedSection`.
 - Mobile: FAB (floating action button) to add; full-screen modal form
 - Desktop: inline form, top-right "+ Add Stock" button
-- Sections stacked: MacroCard → PortfolioSummary → RiskDashboard → HoldingsTable → CorrelationHeatmap → MonteCarloChart → AdvicePanel
 - Re-runs analysis when composite weights change (listens to `weightsVersion`)
+
+**Section order — what you hold comes first, then what you banked.**
+
+```
+PE banner → PortfolioSummary → HoldingsTable → RealizedSection
+          → AdvicePanel → RiskDashboard → CorrelationHeatmap
+          → MonteCarloChart → MacroCard
+```
+
+The holdings table sits directly under the summary that totals it; everything
+below is either already banked or is analysis ABOUT those holdings. (Advice
+therefore sits below the realized section rather than pinned to the rows it
+describes — a deliberate call, and the one to revisit first if the order feels
+wrong.)
+
+**Realized is ONE section, not three cards.** The Winnings headline, Closed
+Positions and Dividends Received used to stack as three separate disclosures
+answering one question. `RealizedSection` makes the combined headline the
+section header — so the figure worth seeing at a glance stays visible — with
+the two ledgers plus a By-stock breakdown behind a tap, as TABS. Tabs rather
+than stacked lists because the shapes differ: a sale has a buy price, a holding
+period and a verdict against cash; a dividend has none of those, and stacking
+them invites reading one set of columns as the other. Capital gains and
+dividends stay separate figures throughout, summed only in the one headline
+that says it is summing them.
 
 ### Compare (`src/app/compare/page.tsx`)
 - 2–5 stock selection with autocomplete dropdown
@@ -498,6 +521,34 @@ The date check follows the allocation, not the position: selling 150 of a
 lot's purchase is legitimate. Reaching into that lot rejects it, naming the
 date. `validate_position_sale` and `plan_sale_allocation` are pure, so the
 whole surface is tested without Postgres (`tests/test_sell_tracking.py`).
+
+**One SUBMIT is one ORDER, and the ledger shows it that way.** Storing a row
+per lot is right and the display that followed from it was not — selling 300
+shares appeared as two closed positions, which is not what the user did. Every
+row written together carries a **`sale_group_id`**, and `GET /api/sales`
+returns `orders` beside the flat `sales`: same rows, folded up by
+`sales.group_sale_orders`.
+
+- **`summary` is still built from `sales`, never from `orders`.** Each trade is
+  graded against the rate that prevailed over ITS window, which is precisely
+  what an order spanning two purchases cannot state.
+- **Money adds up; rates do not.** Quantity, cost, proceeds and P&L are sums
+  and the percentage is cost-weighted, so those are exact. `days_held`,
+  `annualized_return_pct`, `beat_t_bill` and `t_bill_hurdle_pct` are reported
+  **only when every part ran over the same window** — otherwise null, with each
+  part keeping its own. A single-lot order copies the row's figures rather than
+  recomputing them, so it is the sale to the last decimal.
+- **Grouping is on the STORED id, never on a `created_at` coincidence.** Rows
+  written before the column existed are NULL and read as their own order
+  (`COALESCE(sale_group_id, id)`). Nothing backfills it — how a sale was
+  recorded is a fact, not something to infer afterwards.
+- **`DELETE /api/sales?id=` accepts an order id OR a single row id** and
+  removes every row it names, restoring each lot inside one transaction. That
+  is deliberate rather than lax: the ledger shows one line per submit, so
+  undoing what is on screen has to undo the whole thing — a delete that removed
+  one part of a two-lot order would hand back half the shares and leave the
+  line still sitting there. The confirm dialog says how many purchases it
+  reaches. Addressing one part by its own id still works from the expanded row.
 
 A full sell sets `quantity = 0` rather than deleting the row: the holding stays
 as the anchor that makes `DELETE /api/sales` restore the position exactly, with
@@ -1641,9 +1692,7 @@ Components in `src/app/components/`:
 - `AddHoldingForm` — Full-screen modal on mobile, inline on desktop
 - `SellHoldingForm` — Records a sell against a POSITION (`position={symbol, name, lots}`), up to its total shares across every open lot. Shows the FIFO split and sums the realized figure over those parts; `min` on the date picker is the newest lot the sale reaches, so it relaxes as the quantity falls back inside the older lot.
 - `AddDividendForm` — Records a dividend payment (symbol, amount received, pay date, optional shares/notes) against a holding
-- `RealizedGainsCard` — Summary of banked gains/losses (the "Winnings" card). Headline is now **gains + dividends**: `total_dividends` and `dividend_count` from `summarize_realized` render alongside the capital-gains figure, clearly separated, never blended into one number.
-- `ClosedPositionsTable` — Collapsed table of past sales, expandable per row
-- `DividendsTable` — Collapsed table of past dividend payments, expandable per row, mirroring `ClosedPositionsTable`'s pattern
+- `RealizedSection` — **everything banked, in one collapsed section**, replacing `RealizedGainsCard` / `ClosedPositionsTable` / `DividendsTable` (all three deleted). The header is the combined gains + dividends headline, stated as two separate figures. Inside: the record/proceeds/best/worst row, the T-bill count, then tabs — **Closed** (rendered from `orders`, so one submit is one line; a `N lots` pill and a Show-purchases toggle expose the parts, each with its own basis and annualized figure), **Dividends**, **By stock**. The tab opened first is the first non-empty one. Undo on a closed row removes the WHOLE order and says how many purchases that is.
 
 **Admin (admin role only):**
 - `AdminUsersTable` — desktop table / mobile cards. Actions per user: reset password, disable/enable, delete. Hides the destructive actions on your own row (the backend guards them anyway).
@@ -1838,10 +1887,16 @@ user_settings (user_id, key, value, PRIMARY KEY (user_id, key))
 portfolio (id, symbol, name, buy_price, buy_date, quantity, notes, sector,
            target_price, stop_loss, created_at, updated_at)
 portfolio_sales (id, user_id, holding_id, symbol, name, sector, quantity,
-                 buy_price, buy_date, sell_price, sell_date, notes, created_at)
+                 buy_price, buy_date, sell_price, sell_date, notes, created_at,
+                 sale_group_id)
                  -- Cost basis is SNAPSHOTTED, not joined: a sale is a
                  -- historical fact and must not change when the holding it
                  -- came from is later edited or deleted.
+                 -- sale_group_id -> shared by every row ONE submit wrote, so a
+                 --   sale spanning two purchase lots reads as one order in the
+                 --   ledger and undoes as one. NULL on rows written before the
+                 --   column existed; those read as their own single-part
+                 --   order. Added by ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
                  -- portfolio.quantity = 0 means fully sold; the row is kept
                  -- as the undo anchor and filtered out of every read by
                  -- core/holdings.fetch_open_holdings.

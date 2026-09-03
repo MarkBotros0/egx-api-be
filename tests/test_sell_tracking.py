@@ -468,3 +468,109 @@ def test_t_bill_counts_ignore_trades_too_short_to_annualize():
     s = summarize_realized(priced, [])
     assert s["annualizable_count"] == 2
     assert s["beat_t_bill_count"] == 1
+
+
+# ---- one submit, one order in the ledger ----
+#
+# A sale spanning two purchase lots writes two portfolio_sales rows, because
+# each part has its own cost basis, its own holding period and its own T-bill
+# hurdle. The LEDGER still has to read as one sell order, so the rows carry a
+# shared sale_group_id and group_sale_orders folds them back up.
+
+from app.core.sales import group_sale_orders
+
+
+_row_seq = iter(range(1, 10_000))
+
+
+def _priced(**kw):
+    group = kw.pop("sale_group_id", None)
+    s = _sale(**kw)
+    # Every portfolio_sales row has its own primary key — the fixture has to
+    # too, or the legacy fallback below would group two rows that share one.
+    s["id"] = f"s{next(_row_seq)}"
+    s["sale_group_id"] = group
+    return compute_sale_metrics(s, risk_free_rate_pct=19.0)
+
+
+def test_a_sale_spanning_two_lots_is_one_order():
+    # 200 bought at 41.00 and 100 at 45.20, all 300 sold at 52.00.
+    orders = group_sale_orders([
+        _priced(quantity=200, buy_price=41.0, sell_price=52.0,
+                buy_date="2026-01-12", sale_group_id="g1"),
+        _priced(quantity=100, buy_price=45.2, sell_price=52.0,
+                buy_date="2026-03-03", sale_group_id="g1"),
+    ])
+    assert len(orders) == 1
+    o = orders[0]
+    assert o["id"] == "g1"
+    assert o["quantity"] == 300
+    assert o["lots_count"] == 2
+    # 200*(52-41) + 100*(52-45.20) = 2200 + 680
+    assert o["realized_pnl"] == pytest.approx(2880.0)
+    assert o["cost"] == pytest.approx(200 * 41.0 + 100 * 45.2)
+    assert len(o["lots"]) == 2
+
+
+def test_the_order_percentage_is_cost_weighted_not_a_mean():
+    # +26.83% on the 200-share lot, +15.04% on the 100-share one. A mean of
+    # those says 20.94%. Weighted by what was actually at risk — 2,880 made on
+    # 12,720 put up — it is 22.64%.
+    orders = group_sale_orders([
+        _priced(quantity=200, buy_price=41.0, sell_price=52.0, sale_group_id="g1"),
+        _priced(quantity=100, buy_price=45.2, sell_price=52.0, sale_group_id="g1"),
+    ])
+    assert orders[0]["realized_pnl_pct"] == pytest.approx(22.64, abs=0.01)
+
+
+def test_an_order_spanning_holding_periods_states_no_annualized_figure():
+    """
+    The parts ran for different lengths, so there is no one figure to report —
+    the same refusal summarize_realized makes when it declines to average
+    annualized returns. Null here, stated per part in the expanded row.
+    """
+    orders = group_sale_orders([
+        _priced(quantity=200, buy_price=41.0, sell_price=52.0,
+                buy_date="2024-01-12", sell_date="2026-09-01", sale_group_id="g1"),
+        _priced(quantity=100, buy_price=45.2, sell_price=52.0,
+                buy_date="2025-03-03", sell_date="2026-09-01", sale_group_id="g1"),
+    ])
+    o = orders[0]
+    assert o["annualized_return_pct"] is None
+    assert o["beat_t_bill"] is None
+    # ...but each part still carries its own, which is the whole reason the
+    # rows are stored separately.
+    assert all(l["annualized_return_pct"] is not None for l in o["lots"])
+
+
+def test_a_single_lot_order_reports_exactly_what_the_sale_reports():
+    """Every sale recorded before this existed, and most recorded after it."""
+    sale = _priced(quantity=100, buy_price=50.0, sell_price=60.0,
+                   buy_date="2025-09-01", sell_date="2026-09-01",
+                   sale_group_id="g1")
+    o = group_sale_orders([sale])[0]
+    assert o["lots_count"] == 1
+    for field in ("quantity", "cost", "proceeds", "realized_pnl",
+                  "realized_pnl_pct", "annualized_return_pct",
+                  "beat_t_bill", "t_bill_hurdle_pct", "days_held"):
+        assert o[field] == sale[field], field
+
+
+def test_a_legacy_row_with_no_group_id_is_its_own_order():
+    # Nothing backfills the column; rows written before it are NULL and must
+    # not collapse into one giant order keyed on None.
+    orders = group_sale_orders([
+        _priced(quantity=10, buy_price=50.0, sell_price=60.0, sale_group_id=None),
+        _priced(quantity=20, buy_price=50.0, sell_price=70.0, sale_group_id=None),
+    ])
+    assert len(orders) == 2
+    assert {o["lots_count"] for o in orders} == {1}
+
+
+def test_orders_keep_the_ledger_ordering():
+    orders = group_sale_orders([
+        _priced(quantity=10, sell_date="2026-09-01", sale_group_id="g1"),
+        _priced(quantity=10, sell_date="2026-05-01", sale_group_id="g2"),
+        _priced(quantity=10, sell_date="2026-09-01", sale_group_id="g1"),
+    ])
+    assert [o["id"] for o in orders] == ["g1", "g2"]
