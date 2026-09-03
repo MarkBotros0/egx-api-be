@@ -195,3 +195,29 @@ USDEGP_DIRECTION_THRESHOLD_PCT = 0.1
 
 COMPARE_DEFAULT_LOOKBACK_DAYS = 180        # Default window when caller omits start/end
 HISTORICAL_DEFAULT_LOOKBACK_DAYS = 365     # Default window for /historical when caller omits start/end
+
+
+# === News feed ===
+
+# A story older than this is not news. Chosen from measurement, not taste:
+# across a 24-character sample the newest story was 0 days old for ETEL and
+# 275 days old for ACGC. A 7-day window empties the feed for most holdings;
+# 90 days lets that 275-day-old item render as news.
+NEWS_RECENCY_DAYS = 30
+
+# Ceiling on symbols fetched per request. Holdings win the budget, then
+# watchlist, then EGX30. Measured: 24 symbols fan out in 1.30s at 8 workers.
+NEWS_MAX_SYMBOLS = 40
+NEWS_FETCH_WORKERS = 8
+
+# Wall clock for the whole fan-out, mirroring BATCH_DEADLINE_SECONDS. The
+# source is fast, but an unbounded fan-out is how the dashboard broke. This
+# doubles as the tripwire in the spec: routinely tripping it means the
+# on-demand design no longer holds and the pe_data snapshot pattern applies.
+NEWS_DEADLINE_SECONDS = 8.0
+NEWS_REQUEST_TIMEOUT_SECONDS = 6.0
+
+# Per symbol, after the recency filter. COMI alone returns 98 stories and the
+# raw payload across 22 symbols measured 419 KB; this is what keeps the
+# response small enough for a phone on a mobile connection.
+NEWS_MAX_ITEMS_PER_SYMBOL = 10
