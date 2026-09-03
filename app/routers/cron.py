@@ -329,9 +329,11 @@ def risk_snapshot(
             for name, column in zip(CATEGORY_ORDER, CATEGORY_COLUMNS):
                 card_cols.append(column)
                 card_vals.append(card["categories"].get(name))
-            card_cols += ["prev_close", "sparkline_json", "scored_at"]
+            card_cols += ["prev_close", "sparkline_json", "scored_at",
+                          "last_bar_date"]
             card_vals += [card.get("prev_close"),
-                          card.get("sparkline_json"), now]
+                          card.get("sparkline_json"), now,
+                          card.get("last_bar_date")]
 
         columns = [
             "symbol", "measured_at", "sigma_63_ann_pct", "sigma_ewma_ann_pct",
@@ -408,6 +410,12 @@ def risk_snapshot(
             close = df["close"]
             return {
                 "categories": {name: s for name, (s, _) in scored.items()},
+                # WHICH SESSION this close belongs to. The cron runs after the
+                # 14:30 Cairo close, so `measured_at` (our clock) and the bar's
+                # own date are different facts — and the card must show this
+                # one. Labelling a daily close with the fetch time claimed a
+                # precision the number never had.
+                "last_bar_date": str(df.index[-1])[:10],
                 "prev_close": (float(close.iloc[-2])
                                if len(close) > 1 else None),
                 "sparkline_json": json.dumps(

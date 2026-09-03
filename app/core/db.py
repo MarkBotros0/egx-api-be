@@ -478,6 +478,13 @@ def init_db(db: _DB) -> None:
         # but whose scoring raised must be visible as exactly that, rather than
         # silently carrying yesterday's score under today's timestamp.
         ("scored_at", "TEXT"),
+        # The DATE OF THE BAR the price came from — which session this close
+        # belongs to. NOT the same fact as `measured_at`, and confusing the two
+        # is actively misleading: the cron runs after the 14:30 Cairo close, so
+        # a row measured at 22:33 carries that day's CLOSING price, and a card
+        # labelled "as of 22:33:28" claims a precision the number does not have.
+        # Seconds are meaningless on a daily bar. This is what the UI shows.
+        ("last_bar_date", "TEXT"),
     ):
         db.execute(
             f"ALTER TABLE risk_snapshot ADD COLUMN IF NOT EXISTS {column} {coltype}"

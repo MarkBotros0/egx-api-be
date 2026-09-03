@@ -65,7 +65,7 @@ SPARKLINE_BARS = 30
 _READ_COLUMNS = (
     "symbol", "measured_at", "scored_at", "last_price", "prev_close",
     "sparkline_json", "tradeable", "sigma_63_ann_pct",
-    "COALESCE(consecutive_failures, 0)",
+    "COALESCE(consecutive_failures, 0)", "last_bar_date",
 ) + CATEGORY_COLUMNS
 
 
@@ -94,9 +94,10 @@ def read_rows(db) -> list:
             "tradeable": r[6],
             "sigma_63_ann_pct": r[7],
             "consecutive_failures": r[8] or 0,
+            "last_bar_date": r[9],
         }
         for i, name in enumerate(CATEGORY_ORDER):
-            row[name] = r[9 + i]
+            row[name] = r[10 + i]
         out.append(row)
     return out
 
@@ -142,6 +143,21 @@ def to_card(row: dict, weights: dict, macro: Optional[dict]) -> dict:
         "sparkline": _sparkline(row.get("sparkline_json")),
         "measured_at": row.get("measured_at"),
         "scored_at": row.get("scored_at"),
+        # The SESSION this price belongs to — what the card shows. Distinct
+        # from measured_at, which is our cron's clock: the job runs after the
+        # 14:30 Cairo close, so a row fetched at 22:33 carries that day's
+        # CLOSE, and labelling it "22:33:28" implied a precision a daily bar
+        # does not have.
+        #
+        # Falls back to measured_at's DATE for rows written before the column
+        # existed, so they show "2 Sep close" rather than nothing while the
+        # cron walks round to them. Sound at DAY granularity under the
+        # documented schedule (15:00-17:00 Cairo, hours after the close and
+        # well before midnight), which is the only granularity shown. Not a
+        # backfill — nothing is written; the real value replaces this the
+        # moment the symbol is next measured.
+        "last_bar_date": row.get("last_bar_date")
+        or ((row.get("measured_at") or "")[:10] or None),
         "tradeable": row.get("tradeable"),
         "sigma_63_ann_pct": row.get("sigma_63_ann_pct"),
     }
