@@ -156,6 +156,11 @@ Authorization: Bearer <token>
     "symbols_requested":      9,
     "symbols_with_news":      5,
     "symbols_without_news":   ["ESRS", "EKHO", "ACGC", "QNBE"],
+    // Your own symbols the 40-symbol cap excluded. Normally []. A dropped
+    // holding must be VISIBLE, never silently absent — the same rule as the
+    // dashboard's "82 stocks · 84 without a price feed". Added 2026-09-03
+    // after Task 4's review found the truncation was silent.
+    "symbols_over_cap":       [],
     "window_days":            30
   },
   "fetched_at": "2026-09-03T12:40:00Z",
