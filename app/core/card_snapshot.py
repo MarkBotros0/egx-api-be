@@ -173,3 +173,73 @@ def to_card(row: dict, weights: dict, macro: Optional[dict]) -> dict:
         card["change_pct"] = (price - prev) / prev * 100
 
     return card
+
+
+def upsert_snapshot(db, symbol: str, now: str, stats: Optional[dict],
+                    tradeable: bool, ok: bool,
+                    card: Optional[dict] = None) -> None:
+    """
+    Write one symbol's row. THE one spelling of this INSERT.
+
+    Two callers write here and they must not drift: the scheduled
+    `POST /api/cron/risk_snapshot`, and the dashboard's live upgrade in
+    `routers/analysis.py` — which fetches the same 400 bars and scores them
+    identically, so throwing that away and waiting for the cron to redo it
+    would be pure waste. A user browsing the grid now freshens the table for
+    the next reader, and because selection is stalest-first the cron then
+    spends its budget on symbols nobody has looked at.
+
+    `card` is OPTIONAL and when absent those columns are LEFT ALONE rather than
+    overwritten with NULL. Same rule as NEVER WIPE ON FAILURE: a symbol the
+    feed refused today has not changed price, so the last thing anyone knew
+    about it is still the best thing to show. `scored_at` moves only when a
+    score actually does.
+
+    `ok` resets `consecutive_failures` to 0 and anything else increments it, so
+    a symbol that starts working un-demotes itself on its first good fetch —
+    a counter, never a blocklist.
+    """
+    card_cols, card_vals = [], []
+    if card is not None:
+        for name, column in zip(CATEGORY_ORDER, CATEGORY_COLUMNS):
+            card_cols.append(column)
+            card_vals.append(card["categories"].get(name))
+        card_cols += ["prev_close", "sparkline_json", "scored_at",
+                      "last_bar_date"]
+        card_vals += [card.get("prev_close"), card.get("sparkline_json"),
+                      now, card.get("last_bar_date")]
+
+    columns = [
+        "symbol", "measured_at", "sigma_63_ann_pct", "sigma_ewma_ann_pct",
+        "beta", "turnover_egp", "traded_share", "last_price", "tradeable",
+        "above_sma200", "rsi_14", "consecutive_failures",
+    ] + card_cols
+    values = [
+        symbol, now,
+        (stats or {}).get("sigma_63_ann_pct"),
+        (stats or {}).get("sigma_ewma_ann_pct"),
+        (stats or {}).get("beta"),
+        (stats or {}).get("turnover_egp"),
+        (stats or {}).get("traded_share"),
+        (stats or {}).get("last_price"),
+        tradeable,
+        (stats or {}).get("above_sma200"),
+        (stats or {}).get("rsi_14"),
+        0 if ok else 1,
+    ] + card_vals
+
+    updates = [
+        f"{c} = EXCLUDED.{c}" for c in columns
+        if c not in ("symbol", "consecutive_failures")
+    ]
+    updates.append(
+        "consecutive_failures = CASE WHEN %s THEN 0 "
+        "ELSE COALESCE(risk_snapshot.consecutive_failures, 0) + 1 END"
+    )
+
+    db.execute(
+        f"INSERT INTO risk_snapshot ({', '.join(columns)}) "
+        f"VALUES ({', '.join(['%s'] * len(columns))}) "
+        f"ON CONFLICT (symbol) DO UPDATE SET {', '.join(updates)}",
+        tuple(values) + (ok,),
+    )

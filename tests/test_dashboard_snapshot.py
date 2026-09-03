@@ -283,16 +283,55 @@ def test_every_category_has_a_column_and_init_db_creates_it():
     )
 
 
-def test_the_cron_writes_every_category_column():
-    """The writer must iterate the shared list, not a copy of it."""
-    source = open(
+def test_the_writer_writes_every_category_column():
+    """
+    The writer must iterate the shared list, not a copy of it.
+
+    The INSERT lives in core/card_snapshot.upsert_snapshot rather than in the
+    cron, because two callers write that row — the scheduled job and the
+    dashboard's live upgrade — and two spellings would drift.
+    """
+    writer = open(
+        os.path.join(os.path.dirname(__file__), "..", "app", "core",
+                     "card_snapshot.py"),
+        encoding="utf-8",
+    ).read()
+    assert "CATEGORY_COLUMNS" in writer
+
+    cron = open(
         os.path.join(os.path.dirname(__file__), "..", "app", "routers", "cron.py"),
         encoding="utf-8",
     ).read()
-    assert "CATEGORY_COLUMNS" in source
-    assert "score_categories" in source, (
+    assert "upsert_snapshot" in cron, "the cron no longer uses the shared writer"
+    assert "score_categories" in cron, (
         "the snapshot cron no longer scores; the dashboard would serve "
         "permanently null scores"
+    )
+
+
+def test_the_live_upgrade_writes_back_to_the_snapshot():
+    """
+    A dashboard batch call must persist what it fetched.
+
+    It already pays for 400 bars and a full rescore per symbol. Throwing that
+    away and leaving the cron to redo the identical work is the waste this
+    exists to remove — and because selection is stalest-first, a symbol
+    freshened by a reader also drops to the back of the cron's queue, so the
+    budget follows the symbols nobody is looking at.
+    """
+    source = open(
+        os.path.join(os.path.dirname(__file__), "..", "app", "routers",
+                     "analysis.py"),
+        encoding="utf-8",
+    ).read()
+    assert "upsert_snapshot" in source, (
+        "the batch path no longer writes its results back; every dashboard "
+        "visit discards a full fetch and rescore"
+    )
+    # It must store the WEIGHT-FREE categories, never the blended composite.
+    assert "score_categories" in source, (
+        "the batch path is not producing weight-free category scores, so what "
+        "it writes could not serve another user's sliders"
     )
 
 
@@ -317,18 +356,22 @@ def test_a_failed_fetch_does_not_blank_an_existing_score():
     transient refusal empty a card — the exact failure this surface was rebuilt
     to remove. The writer omits the card columns entirely when it has no card,
     so they are left alone rather than set to NULL.
+
+    The guard lives in core/card_snapshot.upsert_snapshot, the one writer both
+    the cron and the dashboard's live upgrade go through.
     """
     source = open(
-        os.path.join(os.path.dirname(__file__), "..", "app", "routers", "cron.py"),
+        os.path.join(os.path.dirname(__file__), "..", "app", "core",
+                     "card_snapshot.py"),
         encoding="utf-8",
     ).read()
     tree = ast.parse(source)
 
     upsert = None
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_upsert":
+        if isinstance(node, ast.FunctionDef) and node.name == "upsert_snapshot":
             upsert = node
-    assert upsert is not None, "_upsert disappeared from the snapshot cron"
+    assert upsert is not None, "upsert_snapshot disappeared from card_snapshot"
 
     # The card columns must be assembled conditionally, guarded on `card`.
     guarded = any(

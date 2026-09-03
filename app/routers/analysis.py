@@ -4,7 +4,9 @@ GET /api/analysis — Fetch OHLCV data and compute all technical indicators for 
 Also supports ?mode=batch&symbols=A,B,C for lightweight composite-only batch scoring.
 """
 
+import json
 import time
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Optional
 
@@ -30,13 +32,16 @@ from app.core.indicators import (
     compute_beta, daily_returns, sma, cumulative_returns,
 )
 from app.core.composite import (
-    compute_composite, get_weights_from_db, weights_hash, DEFAULT_WEIGHTS,
+    compute_composite, get_weights_from_db, score_categories, weights_hash,
+    DEFAULT_WEIGHTS,
 )
 from app.core.extras_builder import build_composite_extras
 from app.core.index_membership import get_index_membership
 from app.core.levels import compute_key_levels, compute_entry_exit
 from app.core.macro_fetch import fetch_macro, read_risk_free_rate
+from app.core.card_snapshot import upsert_snapshot
 from app.core.pe_fetch import get_pe_for_symbol, get_pe_for_symbols
+from app.core.risk_grade import is_tradeable, measure
 from app.core.forecast import expected_move, outcome_band
 
 
@@ -109,10 +114,11 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict,
 
         df = get_OHLCV_data(symbol, "EGX", interval, INTERNAL_BARS_MIN)
         if df is None or df.empty:
-            return symbol, {"error": "no data"}
+            return symbol, {"error": "no data"}, None
 
         df.columns = [c.lower() for c in df.columns]
         close = df["close"]
+        volume = df["volume"].astype(float)
         current_price = float(close.iloc[-1])
 
         indicators = compute_all(df)
@@ -155,10 +161,29 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict,
             # a dated figure with an undated one and the reader lost the very
             # fact they were checking.
             "last_bar_date": str(df.index[-1])[:10],
+        }, {
+            # Everything needed to WRITE this row back to the snapshot, so a
+            # user browsing the grid freshens the table for the next reader
+            # instead of the work being discarded and the cron redoing it.
+            #
+            # Returned SEPARATELY rather than tucked inside the response dict:
+            # that dict is serialized to the browser and cached in memory, and
+            # neither wants a payload only the writer reads.
+            #
+            # Weight-free and macro-free, exactly as the cron stores it —
+            # `score_categories` takes neither, which is what lets one stored
+            # row serve every user's own sliders.
+            "categories": {n: sc for n, (sc, _) in
+                           score_categories(indicators, built["extras"]).items()},
+            "prev_close": prev_close if len(close) > 1 else None,
+            "sparkline_json": json.dumps([round(float(x), 4) for x in sparkline]),
+            "last_bar_date": str(df.index[-1])[:10],
+            "stats": measure(close, volume, benchmark_close=egx30_close),
+            "tradeable": is_tradeable(close, volume),
         }
 
     except Exception as e:
-        return symbol, {"error": str(e)}
+        return symbol, {"error": str(e)}, None
 
 
 def scoring_cache_context(user_id: str = None):
@@ -329,7 +354,7 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
                 ck = composite_cache_key(sym, interval, tags)
                 def _cb(f):
                     try:
-                        _s, r = f.result()
+                        _s, r, _snap = f.result()
                         # Cache FAILURES too, with a short TTL. This used to
                         # store successes only, so a symbol the feed refuses
                         # re-paid its full ~6-second refusal on every single
@@ -373,12 +398,14 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
                 futures[f] = s
 
             deadline = time.monotonic() + BATCH_DEADLINE_SECONDS
+            fresh: list = []
             for fut, sym in futures.items():
                 remaining = deadline - time.monotonic()
+                snap = None
                 try:
                     if remaining <= 0:
                         raise FuturesTimeoutError()
-                    _sym, result = fut.result(timeout=remaining)
+                    _sym, result, snap = fut.result(timeout=remaining)
                 except FuturesTimeoutError:
                     result = {"error": "upstream timeout"}
                 except Exception as e:
@@ -387,6 +414,34 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
                     errors.append({"symbol": sym, "error": result["error"]})
                 else:
                     scores[sym] = result
+                    if snap is not None:
+                        fresh.append((sym, snap))
+
+            # Persist what we just fetched. The 400 bars and the full rescore
+            # are already paid for; discarding them and waiting for the cron to
+            # redo the identical work is the waste this removes. Because
+            # selection is stalest-first, a symbol freshened here also drops to
+            # the back of the cron's queue on its own — the budget follows the
+            # symbols nobody is looking at.
+            #
+            # ONLY on success, and never incrementing the failure counter: a
+            # timeout here means our deadline expired, not that the feed
+            # refused, and treating the two alike would demote healthy symbols
+            # out of the dashboard.
+            #
+            # Swallowed entirely — this is a write-behind on a READ path, and
+            # scores that are already computed must not fail to render because
+            # a cache write did not land.
+            if fresh and db is not None:
+                written_at = datetime.now(timezone.utc).isoformat()
+                for sym, snap in fresh:
+                    try:
+                        upsert_snapshot(
+                            db, sym, written_at, snap["stats"],
+                            bool(snap["tradeable"]), True, snap,
+                        )
+                    except Exception:
+                        pass
         finally:
             # Don't block on stuck threads — Vercel recycles the container.
             pool.shutdown(wait=False)

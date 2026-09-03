@@ -51,7 +51,7 @@ from typing import Optional
 from fastapi import APIRouter, Header, HTTPException, Query
 
 from app.core.cache import get as cache_get, make_key, set as cache_set
-from app.core.card_snapshot import CATEGORY_COLUMNS, SPARKLINE_BARS
+from app.core.card_snapshot import SPARKLINE_BARS, upsert_snapshot
 from app.core.composite import CATEGORY_ORDER, score_categories
 from app.core.constants import (
     DEFAULT_RISK_FREE_RATE_PCT,
@@ -305,73 +305,15 @@ def risk_snapshot(
 
         This is load-bearing under stalest-first selection. A symbol with no row
         is maximally stale, so if a failure wrote nothing it would be re-picked
-        on every single call. The EGX has ~34 effectively dead names and plenty
-        of short-history ones; left unwritten they would fill a 20-slot batch
-        forever and the rest of the universe would never refresh again. Verified
-        in simulation before this guard existed.
+        on every single call. The EGX has ~34 effectively dead names; left
+        unwritten they would fill every batch forever and the rest of the
+        universe would never refresh again. Verified in simulation.
 
-        A null sigma with tradeable=False is also the honest record: we looked,
-        and there is nothing usable here. `grade_universe` already ignores null
-        sigmas and `/api/risk` ranks only tradeable rows, so such a symbol
-        appears with a raw measurement and no band rather than a fabricated one.
-
-        `card` carries the dashboard columns and is OPTIONAL, and when it is
-        absent those columns are left ALONE rather than overwritten with NULL.
-        Same rule as NEVER WIPE ON FAILURE above, applied one level down: a
-        symbol the feed refused today has not changed price, so last night's
-        score is still the last thing anyone knew about it. Blanking it would
-        make one transient refusal empty a card — the failure this whole
-        surface was rebuilt to remove. `scored_at` moves only when a score
-        actually does, so the read path can still tell how old it is.
+        The statement itself lives in `core/card_snapshot.upsert_snapshot`,
+        because the dashboard's live upgrade writes the same row and two
+        spellings of that INSERT would drift.
         """
-        card_cols, card_vals = [], []
-        if card is not None:
-            for name, column in zip(CATEGORY_ORDER, CATEGORY_COLUMNS):
-                card_cols.append(column)
-                card_vals.append(card["categories"].get(name))
-            card_cols += ["prev_close", "sparkline_json", "scored_at",
-                          "last_bar_date"]
-            card_vals += [card.get("prev_close"),
-                          card.get("sparkline_json"), now,
-                          card.get("last_bar_date")]
-
-        columns = [
-            "symbol", "measured_at", "sigma_63_ann_pct", "sigma_ewma_ann_pct",
-            "beta", "turnover_egp", "traded_share", "last_price", "tradeable",
-            "above_sma200", "rsi_14", "consecutive_failures",
-        ] + card_cols
-        values = [
-            symbol, now,
-            (stats or {}).get("sigma_63_ann_pct"),
-            (stats or {}).get("sigma_ewma_ann_pct"),
-            (stats or {}).get("beta"),
-            (stats or {}).get("turnover_egp"),
-            (stats or {}).get("traded_share"),
-            (stats or {}).get("last_price"),
-            tradeable,
-            (stats or {}).get("above_sma200"),
-            (stats or {}).get("rsi_14"),
-            0 if ok else 1,
-        ] + card_vals
-
-        updates = [
-            f"{c} = EXCLUDED.{c}" for c in columns
-            if c not in ("symbol", "consecutive_failures")
-        ]
-        # Reset on success, accumulate on refusal. A symbol that starts working
-        # again un-demotes itself on the first good fetch, which is why this is
-        # a counter and not a blocklist.
-        updates.append(
-            "consecutive_failures = CASE WHEN %s THEN 0 "
-            "ELSE COALESCE(risk_snapshot.consecutive_failures, 0) + 1 END"
-        )
-
-        db.execute(
-            f"INSERT INTO risk_snapshot ({', '.join(columns)}) "
-            f"VALUES ({', '.join(['%s'] * len(columns))}) "
-            f"ON CONFLICT (symbol) DO UPDATE SET {', '.join(updates)}",
-            tuple(values) + (ok,),
-        )
+        upsert_snapshot(db, symbol, now, stats, tradeable, ok, card)
 
     def _score_card(symbol: str, df) -> Optional[dict]:
         """
