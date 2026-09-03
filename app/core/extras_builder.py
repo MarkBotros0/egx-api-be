@@ -333,7 +333,7 @@ def build_composite_extras(
     # Both scale by bars_per_year. With the daily constants hardcoded, a stock
     # that doubled over five years of weekly bars reported "+94% annualized"
     # (true: ~15%), and its volatility was inflated by sqrt(252/52) = 2.2x.
-    # Those two feed Risk-Adjusted, which compares against the 25% T-bill.
+    # Those two feed Risk-Adjusted, which compares against the policy rate.
     ann_return_pct = annualized_return(
         close, lookback=bars_per_year, periods_per_year=bars_per_year
     )

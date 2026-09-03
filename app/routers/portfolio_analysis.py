@@ -914,7 +914,7 @@ def _analyze(holdings, user_id: str = None):
                         "learn_concept": "pe_ratio"})
 
             # Dividend yield. Framed as evidence of cash generation, never as
-            # income — no EGX yield competes with a ~25% T-bill.
+            # income — no EGX yield competes with the policy rate.
             if pe_info_h and pe_info_h.get("dividend_yield") is not None:
                 dy = float(pe_info_h["dividend_yield"])
                 if dy >= 15:
@@ -925,7 +925,7 @@ def _analyze(holdings, user_id: str = None):
                 elif dy >= 4:
                     signals.append({"type": "dividend_yield_solid", "severity": "info", "symbol": symbol,
                         "message": f"{symbol} yields {dy:.1f}% — an above-median EGX payer.",
-                        "explanation": "Read this as evidence the company generates real cash and returns it, not as income: even this yield loses to the ~25% T-bill. It is a quality marker, not a reason to buy on its own.",
+                        "explanation": f"Read this as evidence the company generates real cash and returns it, not as income: even this yield loses to the ~{risk_free_rate_pct:.0f}% policy rate. It is a quality marker, not a reason to buy on its own.",
                         "learn_concept": "dividend_yield"})
 
         except Exception as e:

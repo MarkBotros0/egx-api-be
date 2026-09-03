@@ -87,7 +87,7 @@ PRESETS = {
                          "divergence": 25, "quality": 5, "risk_adjusted": 5,
                          "relative_strength": 5},
     # New preset: for cash-equivalent-conscious investors who care most about
-    # beating the 25% T-bill and preserving capital.
+    # beating the ~19% policy rate and preserving capital.
     "income_defensive": {"trend": 15, "momentum": 8, "volume": 10, "volatility": 15,
                          "divergence": 2, "quality": 20, "risk_adjusted": 25,
                          "relative_strength": 5},
@@ -631,7 +631,7 @@ def score_quality(multi_timeframe: Optional[dict],
     # is almost always a special dividend or a collapsed share price, not
     # income quality. Every reason frames the payout as evidence of
     # cash-generative discipline, never as "good income" — even 7% loses badly
-    # to a ~25% T-bill, and saying otherwise would mislead.
+    # to the ~19% policy rate, and saying otherwise would mislead.
     # 0.0 means "pays nothing", which is normal for a growth company and not a
     # defect, so it scores the same as unknown.
     if dividend_yield is not None and dividend_yield > 0:
@@ -672,7 +672,7 @@ def score_risk_adjusted(annualized_return_pct: Optional[float],
     Score the risk-adjusted category (0-100).
 
     This is the most important category for an Egyptian retail investor:
-    with T-bills paying ~25% annualized risk-free, any stock returning less
+    with cash paying ~19% annualized risk-free, any stock returning less
     is LOSING real money vs cash. Also penalises stocks whose daily range
     (ATR) is so wide that a reasonable stop-loss would be instantly hit.
 

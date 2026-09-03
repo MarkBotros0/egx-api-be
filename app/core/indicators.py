@@ -867,9 +867,9 @@ def annualized_return(close: pd.Series, lookback: int = 252,
     daily default while passing weekly bars treats 252 weeks as one year:
     a stock that doubled over five years then reports "+94% annualized"
     instead of ~15%, which the Risk-Adjusted scorer compares against the
-    ~25% T-bill rate.
+    ~19% policy rate.
 
-    Used to compare per-stock return vs the risk-free rate (T-bill ~25% in Egypt).
+    Used to compare per-stock return vs the risk-free rate (~19% in Egypt).
     Returns None if insufficient history — caller must handle that.
 
     NOTE the caller is responsible for the minimum-history gate. Annualizing
