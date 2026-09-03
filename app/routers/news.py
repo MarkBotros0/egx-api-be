@@ -42,7 +42,15 @@ def get_news(user: CurrentUser = Depends(get_current_user)):
 
     yours, market, dropped = select_news_symbols(holdings, watch, symbols_in_index("EGX30"))
 
-    key = cache.make_key("news", ",".join(yours), ",".join(market))
+    # `dropped` is baked into the cached payload (coverage.symbols_over_cap),
+    # so it must be part of the key that addresses it — CLAUDE.md's "One Score
+    # Per Stock" rule: any value in a cached response belongs in its cache
+    # key. Two callers can share identical post-cap `yours`/`market` while
+    # differing only in what the cap dropped (one holds exactly 40 symbols,
+    # the other holds the same 40 plus a watchlist symbol that overflows) —
+    # without `dropped` here they'd collide on one key and whoever populates
+    # the cache first would silently decide the other's symbols_over_cap.
+    key = cache.make_key("news", ",".join(yours), ",".join(market), ",".join(dropped))
     hit = cache.get(key)
     if hit is not None:
         return hit

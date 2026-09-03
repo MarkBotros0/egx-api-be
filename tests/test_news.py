@@ -378,3 +378,59 @@ def test_no_sql_in_the_news_router_has_an_unescaped_percent():
             if "SELECT" in sql.upper():
                 stripped = sql.replace("%s", "").replace("%%", "")
                 assert "%" not in stripped, f"unescaped % in SQL: {sql!r}"
+
+
+def test_the_cache_key_includes_dropped_so_one_users_cap_overflow_never_leaks_to_another():
+    """
+    `dropped` is baked into the cached payload (coverage.symbols_over_cap), so
+    CLAUDE.md's rule applies: anything in a cached response belongs in its
+    cache key. Two callers can share identical post-cap `yours`/`market` while
+    differing only in what the cap dropped — e.g. user A holds exactly 40
+    symbols while user B holds the same 40 plus a watchlist symbol that
+    overflows the cap. Without `dropped` in the key they collide, and whoever
+    populates the cache first silently decides the other user's
+    `symbols_over_cap` — a dropped holding becomes invisible again for the
+    second caller.
+
+    `make_key` itself is pure and was never the bug (it happily joins any
+    number of arguments), so exercising it alone would prove nothing about
+    the router. The part that regresses is the ROUTER's call site — whether
+    it actually passes `dropped` in — so this pins both: the join behaviour
+    make_key must have, and that app/routers/news.py's real call to
+    cache.make_key(...) includes `dropped` among its arguments. Neither half
+    needs a DB or an HTTP client.
+    """
+    from app.core import cache
+
+    yours = ["A", "B", "C"]
+    market = ["D"]
+
+    key_a = cache.make_key("news", ",".join(yours), ",".join(market), ",".join([]))
+    key_b = cache.make_key("news", ",".join(yours), ",".join(market), ",".join(["E"]))
+    assert key_a != key_b, (
+        "identical yours/market but different dropped must produce different keys"
+    )
+
+    key_a_again = cache.make_key("news", ",".join(yours), ",".join(market), ",".join([]))
+    assert key_a == key_a_again, (
+        "identical yours/market/dropped must produce the same key"
+    )
+
+    # Pin the router's actual call site: make_key being pure proves nothing
+    # about news.py unless the call it makes is checked too.
+    tree = ast.parse(pathlib.Path("app/routers/news.py").read_text(encoding="utf-8"))
+    make_key_calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "make_key"
+    ]
+    assert make_key_calls, "no cache.make_key(...) call found in app/routers/news.py"
+    call = make_key_calls[0]
+    arg_dumps = [ast.dump(a) for a in call.args]
+    assert any("dropped" in dump for dump in arg_dumps), (
+        "cache.make_key(...) in news.py must include `dropped` among its "
+        "arguments -- it is baked into the cached payload "
+        "(coverage.symbols_over_cap), so it must be part of the key that "
+        "addresses that payload"
+    )
