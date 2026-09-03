@@ -1724,11 +1724,19 @@ Components in `src/app/components/`:
 - `RiskDashboard` — Sharpe/Sortino/MaxDD/VaR/Current DD grid
 - `HoldingsTable` — Full table desktop (Score column with gauge + signal), cards mobile (gauge in card header + expanded detail). **Rows are POSITIONS, from `lib/positions.ts::groupHoldings`** — one per symbol, keyed by symbol; the purchases behind an average appear as `LotList` inside the expanded row, which is also where per-lot Edit/Delete live once there is more than one. Error rows use `colSpan={10}` plus a dedicated Actions cell, coordinated against the expanded detail row's `colSpan={12}` — both must total the table's 12 columns, and a mismatch between the two is a bug this project has already shipped once. The lot list goes INSIDE the existing expanded cell, so it adds no column. The symbol cell carries no badges (see *Portfolio*); the dividend total lives in the expanded detail, which also keeps it out of the colSpan arithmetic. `onSell` takes a **symbol** (the page resolves the lots), `onAddDividend` opens `AddDividendForm`.
 - `MacroCard` — EGX30/USD-EGP/CBE rate indicator row
-- `AdvicePanel` — Signals rendered with severity styles + learn links
+- `AdvicePanel` — Signals rendered with severity styles + learn links, and
+  **collapsed behind one tap** the way `RealizedSection` is (a `<details>`,
+  so it renders closed on the server and cannot flash open before
+  hydration). A ten-holding portfolio makes twenty-odd signals, which is
+  several phone screens between the holdings above and the risk metrics
+  below. **The count line is what makes collapsing safe:** the summary
+  carries a pill per severity in that severity's own colour, so "2 urgent"
+  is on screen with the panel shut — the same trade `RealizedSection`
+  makes by keeping its headline figure in the summary.
 - `AddHoldingForm` — Full-screen modal on mobile, inline on desktop
 - `SellHoldingForm` — Records a sell against a POSITION (`position={symbol, name, lots}`), up to its total shares across every open lot. Shows the FIFO split and sums the realized figure over those parts; `min` on the date picker is the newest lot the sale reaches, so it relaxes as the quantity falls back inside the older lot.
 - `AddDividendForm` — Records a dividend payment (symbol, amount received, pay date, optional shares/notes) against a holding
-- `RealizedSection` — **everything banked, in one collapsed section**, replacing `RealizedGainsCard` / `ClosedPositionsTable` / `DividendsTable` (all three deleted). The header is the combined gains + dividends headline, stated as two separate figures. Inside: the record/proceeds/best/worst row, the T-bill count, then tabs — **Closed** (rendered from `orders`, so one submit is one line; a `N lots` pill and a Show-purchases toggle expose the parts, each with its own basis and annualized figure), **Dividends**, **By stock**. The tab opened first is the first non-empty one. Undo on a closed row removes the WHOLE order and says how many purchases that is.
+- `RealizedSection` — **everything banked, in one collapsed section**, replacing `RealizedGainsCard` / `ClosedPositionsTable` / `DividendsTable` (all three deleted). The header is the combined gains + dividends headline, stated as two separate figures. Inside: the record/proceeds/best/worst row, the T-bill count, then tabs — **Closed** (rendered from `orders`, so one submit is one line; a `N lots` pill and a Show-purchases toggle expose the parts, each with its own basis and annualized figure), **Dividends**, **By stock**. The tab opened first is the first non-empty one. Undo on a closed row removes the WHOLE order and says how many purchases that is. Rows in all three tabs name the COMPANY beside the ticker — four opaque letters are not what a reader recognises — truncated rather than wrapped, and dropped entirely when the stored name is just the symbol again (`_bucket` in `core/dividends.py` falls back to it), which would otherwise render as "COMI COMI".
 
 **Admin (admin role only):**
 - `AdminUsersTable` — desktop table / mobile cards. Actions per user: reset password, disable/enable, delete. Hides the destructive actions on your own row (the backend guards them anyway).
