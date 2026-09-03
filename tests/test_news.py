@@ -17,6 +17,7 @@ from app.core.news_fetch import (
     dedupe_stories,
     is_recent,
     normalize_item,
+    select_news_symbols,
 )
 
 
@@ -132,3 +133,39 @@ def test_recency_window_boundary():
     assert is_recent(at(31), now, 30) is False
     # ACGC's real newest story was 275 days old. It is not news.
     assert is_recent(at(275), now, 30) is False
+
+
+def test_holdings_and_watchlist_merge_into_yours_without_duplicates():
+    yours, market = select_news_symbols(["COMI", "SWDY"], ["SWDY", "ETEL"], ["ABUK"])
+    assert yours == ["COMI", "SWDY", "ETEL"], "holdings order first, watchlist appended"
+    assert market == ["ABUK"]
+
+
+def test_a_symbol_you_own_is_never_also_a_market_symbol():
+    """Otherwise it is fetched twice and renders in both sections."""
+    yours, market = select_news_symbols(["COMI"], [], ["COMI", "ABUK"])
+    assert yours == ["COMI"]
+    assert market == ["ABUK"]
+
+
+def test_holdings_win_the_budget_when_the_cap_binds():
+    """
+    The cap exists to bound the fan-out. When it binds it must cost the user
+    the LEAST relevant symbols — EGX30 names they never asked about — not
+    their own holdings.
+    """
+    yours, market = select_news_symbols(["A", "B", "C"], ["D"], ["E", "F"], cap=5)
+    assert yours == ["A", "B", "C", "D"]
+    assert market == ["E"]
+
+
+def test_the_cap_can_exhaust_the_market_half_entirely():
+    yours, market = select_news_symbols(["A", "B"], [], ["C", "D"], cap=2)
+    assert yours == ["A", "B"]
+    assert market == []
+
+
+def test_symbols_are_uppercased_and_blanks_dropped():
+    yours, market = select_news_symbols(["comi", " ", ""], ["etel"], ["abuk"])
+    assert yours == ["COMI", "ETEL"]
+    assert market == ["ABUK"]

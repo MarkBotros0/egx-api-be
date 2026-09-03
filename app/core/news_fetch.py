@@ -29,7 +29,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from app.core.constants import NEWS_RECENCY_DAYS
+from app.core.constants import NEWS_MAX_SYMBOLS, NEWS_RECENCY_DAYS
 
 # The whole of a NewsItem. Deliberately excludes every body-ish field the
 # upstream offers — see test_normalize_never_carries_article_body.
@@ -139,3 +139,32 @@ def dedupe_stories(items: list[dict]) -> list[dict]:
         key=lambda i: _parsed(i) or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
+
+
+def _ordered_unique(symbols) -> list[str]:
+    """Uppercase, blanks dropped, first occurrence wins, order preserved."""
+    seen, out = set(), []
+    for raw in symbols or []:
+        sym = (raw or "").strip().upper()
+        if sym and sym not in seen:
+            seen.add(sym)
+            out.append(sym)
+    return out
+
+
+def select_news_symbols(
+    holdings, watchlist, market, cap: int = NEWS_MAX_SYMBOLS
+) -> tuple[list[str], list[str]]:
+    """
+    Split the symbol budget into (yours, market_only).
+
+    Priority is holdings, then watchlist, then the index — so when the cap
+    binds it costs the user EGX30 names they never asked about rather than
+    their own positions. A symbol you own is removed from the market half so
+    it is fetched once and rendered in one place.
+    """
+    yours = _ordered_unique(list(holdings or []) + list(watchlist or []))[:cap]
+    mine = set(yours)
+    remaining = max(0, cap - len(yours))
+    market_only = [s for s in _ordered_unique(market) if s not in mine][:remaining]
+    return yours, market_only
