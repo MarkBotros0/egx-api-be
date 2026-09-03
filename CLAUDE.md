@@ -157,7 +157,16 @@ the prices gives), summed cost/value/P&L, and `pnl_pct` off total cost. The
 technical half — score, RSI, zones, key levels, P/E — is carried straight from
 the first priced lot: one symbol means one price fetch and one scoring pass, so
 every lot already agrees. A single-lot position renders exactly as it always
-has; the `N lots` pill is what says the price above it is an average.
+has.
+
+**The symbol line carries no badges.** It briefly held an `N lots` pill and a
+`+X div` one; both were removed 2026-09-03 as title clutter, and neither took a
+fact with it — the price already reads **`42.40 avg`** when more than one
+purchase is behind it, the date line already reads **"First bought …"**, and
+the dividend total and the purchases themselves are in the expanded detail.
+Two pills were a second spelling, not a second fact. (`RealizedSection` keeps
+its own `N lots` pill, which is a different job: it explains why one line in
+the ledger covers 300 shares.)
 
 **Annualized return is NOT aggregated.** The lots have different holding
 periods, and averaging returns over different windows describes neither — the
@@ -1686,7 +1695,7 @@ Components in `src/app/components/`:
 **Portfolio views:**
 - `PortfolioSummary` — Totals + avg composite score tile + sector allocation pie/stacked bar
 - `RiskDashboard` — Sharpe/Sortino/MaxDD/VaR/Current DD grid
-- `HoldingsTable` — Full table desktop (Score column with gauge + signal), cards mobile (gauge in card header + expanded detail). **Rows are POSITIONS, from `lib/positions.ts::groupHoldings`** — one per symbol, keyed by symbol; the purchases behind an average appear as `LotList` inside the expanded row, which is also where per-lot Edit/Delete live once there is more than one. Error rows use `colSpan={10}` plus a dedicated Actions cell, coordinated against the expanded detail row's `colSpan={12}` — both must total the table's 12 columns, and a mismatch between the two is a bug this project has already shipped once. The lot list goes INSIDE the existing expanded cell, so it adds no column. Dividends render as a per-symbol `DividendPill` next to the symbol, not as a new column, for the same reason. `onSell` takes a **symbol** (the page resolves the lots), `onAddDividend` opens `AddDividendForm`.
+- `HoldingsTable` — Full table desktop (Score column with gauge + signal), cards mobile (gauge in card header + expanded detail). **Rows are POSITIONS, from `lib/positions.ts::groupHoldings`** — one per symbol, keyed by symbol; the purchases behind an average appear as `LotList` inside the expanded row, which is also where per-lot Edit/Delete live once there is more than one. Error rows use `colSpan={10}` plus a dedicated Actions cell, coordinated against the expanded detail row's `colSpan={12}` — both must total the table's 12 columns, and a mismatch between the two is a bug this project has already shipped once. The lot list goes INSIDE the existing expanded cell, so it adds no column. The symbol cell carries no badges (see *Portfolio*); the dividend total lives in the expanded detail, which also keeps it out of the colSpan arithmetic. `onSell` takes a **symbol** (the page resolves the lots), `onAddDividend` opens `AddDividendForm`.
 - `MacroCard` — EGX30/USD-EGP/CBE rate indicator row
 - `AdvicePanel` — Signals rendered with severity styles + learn links
 - `AddHoldingForm` — Full-screen modal on mobile, inline on desktop
