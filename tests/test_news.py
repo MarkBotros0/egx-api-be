@@ -336,3 +336,45 @@ def test_coverage_reports_symbols_the_cap_dropped():
     now = datetime(2026, 9, 3, tzinfo=timezone.utc)
     feed = build_feed({}, yours=["COMI"], now=now, dropped=["ZZZZ"])
     assert feed["coverage"]["symbols_over_cap"] == ["ZZZZ"]
+
+
+import ast
+import pathlib
+
+
+def test_news_route_is_registered_and_requires_auth():
+    """
+    The app is closed and default-deny. /api/news is user-scoped — it reads the
+    caller's holdings — so it could not be public even if policy allowed it.
+    """
+    from app.core.auth import PUBLIC_ENDPOINTS
+    from app.main import app
+
+    paths = {r.path for r in app.routes}
+    assert "/api/news" in paths, "router not wired into main.py"
+    assert not any(p == "/api/news" for _, p in PUBLIC_ENDPOINTS)
+
+
+def test_the_router_never_calls_load_tickers():
+    """
+    tickers._load_tickers() merges a live 10s TradingView POST on a cold
+    container. index_membership exists precisely so this path does not.
+    """
+    src = pathlib.Path("app/routers/news.py").read_text(encoding="utf-8")
+    assert "_load_tickers" not in src
+    assert "symbols_in_index" in src
+
+
+def test_no_sql_in_the_news_router_has_an_unescaped_percent():
+    """
+    _DB.execute always passes a params tuple, so psycopg parses every query for
+    placeholders and a lone % raises. This bug silently defaulted every
+    composite weight in the app for weeks; see CLAUDE.md.
+    """
+    tree = ast.parse(pathlib.Path("app/routers/news.py").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            sql = node.value
+            if "SELECT" in sql.upper():
+                stripped = sql.replace("%s", "").replace("%%", "")
+                assert "%" not in stripped, f"unescaped % in SQL: {sql!r}"
