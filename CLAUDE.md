@@ -1666,7 +1666,7 @@ Components in `src/app/components/`:
   why/how blocks, worked example, mark-as-read toggle.
 
 **UI helpers:**
-- `Navbar`, `BottomTabBar` — mobile bottom nav, desktop top nav. Both append a "Users" entry when `isAdmin`. **The two no longer carry the same destinations:** Compare left the mobile pill for a button in the dashboard header (see *Dashboard*) and stayed in the desktop top nav, which has room for it. So the pill is Dashboard / Portfolio / Learn, four with Users — the old "drop the tab min-width at 5 tabs" rule is gone with the fifth tab.
+- `Navbar`, `BottomTabBar` — mobile bottom nav, desktop top nav. **Neither carries a "Users" destination any more.** Administering accounts is not a place in the app, it is an account action, so it renders as a button beside Log out at the right-hand end of `Navbar` — icon-only on mobile where it pairs with the log-out icon, icon + label at `md:`, the same shape the dashboard's Compare button uses. It is **36px tall, not the project's usual 44px target**, deliberately: the nav row is 61px and `--top-nav-clearance` IS that number, so a taller control here silently pushes every sticky element on every page down out of alignment. **The two navs no longer carry the same destinations:** Compare left the mobile pill for a button in the dashboard header (see *Dashboard*) and stayed in the desktop top nav, which has room for it. So the pill is Dashboard / Portfolio / Learn **for everyone, admin or not** — it holds the places every user has, and its tab count no longer changes with a role. On `/admin` it shows no highlight at all (`activeIndex` is -1, so the travelling span is not rendered), which is correct for a page it does not contain.
 - `AuthProvider` — token + user in localStorage, an `egx.auth.present` cookie for middleware, `useAuth()` → `{user, isAuthenticated, isAdmin, login, logout}`. Re-reads the role from `/api/auth/me` on every load, so a role change lands on next refresh.
 - `LearnTooltip` — dashed-underline hover tooltip used everywhere for inline education
 - `LoadingSkeleton` — Card/Chart/Table skeletons
@@ -1745,9 +1745,8 @@ becomes active, so the motion is not purely horizontal. Both honour
 `motion-reduce`.
 
 Its geometry is **measured, never computed from the tab count** — the tabs are
-`flex-1` inside a fluid pill, so their width depends on the screen, and the
-admin tab appears and disappears with the role. Three things about that
-measurement are load-bearing, and each was a bug first:
+`flex-1` inside a fluid pill, so their width depends on the screen. Three
+things about that measurement are load-bearing, and each was a bug first:
 
 - **Query the anchors, not `rail.children`.** The highlight is itself a child,
   so indexing `children` shifts every tab by one the moment it mounts.
