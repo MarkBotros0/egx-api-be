@@ -9,12 +9,15 @@ docs/superpowers/specs/2026-09-03-news-tab-design.md.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 
 from app.core.index_membership import symbols_in_index
 from app.core.news_fetch import (
     NEWS_ITEM_FIELDS,
+    build_feed,
     dedupe_stories,
+    fetch_many,
     is_recent,
     normalize_item,
     select_news_symbols,
@@ -197,3 +200,109 @@ def test_holdings_alone_overflow_cap():
     assert yours == ["A", "B"], "cap limits yours, so C does not fit"
     assert market == [], "no budget for market"
     assert dropped == ["C"], "C is reported as dropped, not silently lost"
+
+
+def _raw(story_id, symbol, days_ago, now):
+    ts = int((now - timedelta(days=days_ago)).timestamp())
+    return {
+        "id": story_id,
+        "title": f"Story {story_id}",
+        "provider": "reuters",
+        "published": ts,
+        "storyPath": f"/news/{story_id}/",
+        "relatedSymbols": [{"symbol": f"EGX:{symbol}"}],
+    }
+
+
+def test_fetch_many_uses_the_injected_fetcher_and_keys_by_symbol():
+    calls = []
+
+    def fake(symbol, timeout=None):
+        calls.append(symbol)
+        return [{"id": symbol}]
+
+    out = fetch_many(["COMI", "ETEL"], fetcher=fake)
+    assert out == {"COMI": [{"id": "COMI"}], "ETEL": [{"id": "ETEL"}]}
+    assert sorted(calls) == ["COMI", "ETEL"]
+
+
+def test_a_symbol_that_raises_yields_an_empty_list_not_an_exception():
+    """
+    One dead symbol must not take the whole feed down. Same posture as
+    /api/macro degrading to nulls rather than 500ing.
+    """
+    def fake(symbol, timeout=None):
+        if symbol == "BAD":
+            raise RuntimeError("upstream said no")
+        return [{"id": symbol}]
+
+    out = fetch_many(["COMI", "BAD"], fetcher=fake)
+    assert out["COMI"] == [{"id": "COMI"}]
+    assert out["BAD"] == []
+
+
+def test_the_deadline_returns_partial_results_rather_than_hanging():
+    """
+    The source is fast, but an unbounded fan-out is exactly how the dashboard
+    broke. Stopping early is safe because nothing is persisted.
+    """
+    def slow(symbol, timeout=None):
+        time.sleep(0.4)
+        return [{"id": symbol}]
+
+    started = time.monotonic()
+    out = fetch_many([f"S{i}" for i in range(40)], deadline_seconds=0.5,
+                     workers=2, fetcher=slow)
+    elapsed = time.monotonic() - started
+    assert elapsed < 3.0, f"deadline not honoured, took {elapsed:.1f}s"
+    assert len(out) < 40, "some symbols should have been cut short"
+
+
+def test_build_feed_splits_your_stocks_from_market_and_drops_stale():
+    now = datetime(2026, 9, 3, tzinfo=timezone.utc)
+    fetched = {
+        "COMI": [_raw("fresh-comi", "COMI", 3, now),
+                 _raw("stale-comi", "COMI", 275, now)],
+        "ABUK": [_raw("fresh-abuk", "ABUK", 5, now)],
+    }
+    feed = build_feed(fetched, yours=["COMI"], now=now)
+
+    assert [i["id"] for i in feed["your_stocks"]] == ["fresh-comi"]
+    assert [i["id"] for i in feed["market"]] == ["fresh-abuk"]
+    assert all("stale" not in i["id"] for i in feed["your_stocks"] + feed["market"])
+
+
+def test_coverage_counts_your_stocks_only_never_the_index():
+    """
+    A 'no news' count against EGX30 names the user never asked about would
+    read as the app failing rather than as an absence of news.
+    """
+    now = datetime(2026, 9, 3, tzinfo=timezone.utc)
+    fetched = {
+        "COMI": [_raw("a", "COMI", 3, now)],
+        "ESRS": [],
+        "ACGC": [_raw("old", "ACGC", 275, now)],
+        "ABUK": [_raw("b", "ABUK", 1, now)],   # market symbol
+    }
+    cov = build_feed(fetched, yours=["COMI", "ESRS", "ACGC"], now=now)["coverage"]
+
+    assert cov["symbols_requested"] == 3
+    assert cov["symbols_with_news"] == 1
+    assert cov["symbols_without_news"] == ["ACGC", "ESRS"]
+    assert cov["window_days"] == 30
+    assert "ABUK" not in cov["symbols_without_news"]
+
+
+def test_a_story_touching_a_held_symbol_is_yours_even_when_fetched_via_market():
+    """
+    'Sodic Signs Medium-Term Facility With CIB' comes back from EGX:OCDI too.
+    If you hold COMI it belongs in your section, once.
+    """
+    now = datetime(2026, 9, 3, tzinfo=timezone.utc)
+    story = _raw("shared", "OCDI", 2, now)
+    story["relatedSymbols"] = [{"symbol": "EGX:OCDI"}, {"symbol": "EGX:COMI"}]
+    feed = build_feed({"OCDI": [story]}, yours=["COMI"], now=now)
+
+    assert [i["id"] for i in feed["your_stocks"]] == ["shared"]
+    assert feed["market"] == []
+    assert feed["your_stocks"][0]["symbols"] == ["COMI", "OCDI"]

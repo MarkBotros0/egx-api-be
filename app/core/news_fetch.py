@@ -26,10 +26,27 @@ TWO TRAPS, both measured, both easy to fall into again:
 
 from __future__ import annotations
 
+import json
+import time
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 
-from app.core.constants import NEWS_MAX_SYMBOLS, NEWS_RECENCY_DAYS
+from app.core.constants import (
+    NEWS_DEADLINE_SECONDS,
+    NEWS_FETCH_WORKERS,
+    NEWS_MAX_ITEMS_PER_SYMBOL,
+    NEWS_MAX_SYMBOLS,
+    NEWS_RECENCY_DAYS,
+    NEWS_REQUEST_TIMEOUT_SECONDS,
+)
+from app.core.tradingview import HEADERS
+
+NEWS_URL = (
+    "https://news-headlines.tradingview.com/v2/headlines"
+    "?client=web&lang=en&symbol=EGX%3A{symbol}"
+)
 
 # The whole of a NewsItem. Deliberately excludes every body-ish field the
 # upstream offers — see test_normalize_never_carries_article_body.
@@ -174,3 +191,110 @@ def select_news_symbols(
     remaining = max(0, cap - len(yours))
     market_only = [s for s in _ordered_unique(market) if s not in mine][:remaining]
     return yours, market_only, dropped
+
+
+def fetch_symbol_news(
+    symbol: str, timeout: float = NEWS_REQUEST_TIMEOUT_SECONDS
+) -> list[dict]:
+    """One GET for one symbol. Returns the raw `items` array. Raises on error."""
+    req = urllib.request.Request(
+        NEWS_URL.format(symbol=symbol.upper()),
+        headers={**HEADERS, "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read())
+    return payload.get("items") or []
+
+
+def fetch_many(
+    symbols: list[str],
+    deadline_seconds: float = NEWS_DEADLINE_SECONDS,
+    workers: int = NEWS_FETCH_WORKERS,
+    fetcher: Optional[Callable] = None,
+) -> dict[str, list[dict]]:
+    """
+    Fan out over `symbols`, returning {symbol: raw items} for whatever finished.
+
+    A symbol that raises yields [] rather than taking the feed down. The
+    deadline abandons stragglers — safe here precisely because nothing is
+    persisted, so there is no half-written state to reconcile.
+
+    `fetcher` is the test seam, the same shape as refresh_pe_data(db, rows=None).
+    """
+    fetch = fetcher or fetch_symbol_news
+    out: dict[str, list[dict]] = {}
+    if not symbols:
+        return out
+
+    deadline = time.monotonic() + deadline_seconds
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futures = {pool.submit(fetch, s): s for s in symbols}
+        for future in as_completed(futures, timeout=max(0.01, deadline_seconds)):
+            symbol = futures[future]
+            try:
+                out[symbol] = future.result(timeout=0) or []
+            except Exception:
+                out[symbol] = []
+            if time.monotonic() >= deadline:
+                break
+    except Exception:
+        # as_completed raises TimeoutError when the deadline expires with
+        # futures outstanding. Whatever landed is the answer.
+        pass
+    finally:
+        # wait=False + cancel_futures: the context-manager form would block on
+        # shutdown and silently blow through the deadline we just enforced.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    return out
+
+
+def build_feed(fetched: dict, yours: list[str], now: datetime, dropped=()) -> dict:
+    """
+    Raw per-symbol items -> {your_stocks, market, coverage}.
+
+    `dropped` is the user's own symbols the symbol cap excluded (third element
+    of select_news_symbols). Reported as coverage.symbols_over_cap so a
+    dropped holding is visible rather than silently absent.
+
+    A story is YOURS if any symbol it is tagged with is one you hold or watch,
+    however it was fetched — a story reached via EGX:OCDI that also names COMI
+    belongs in your section when you hold COMI, and in only one section.
+
+    `coverage` describes YOUR symbols only. The index half is not counted: the
+    user did not ask for those names and a "no news" tally against them would
+    read as the app failing rather than as an absence of news.
+    """
+    mine = {s.upper() for s in yours}
+
+    shaped = []
+    with_news = set()
+    for symbol, raw_items in (fetched or {}).items():
+        kept = 0
+        for raw in raw_items or []:
+            item = normalize_item(raw, symbol)
+            if item is None or not is_recent(item, now):
+                continue
+            shaped.append(item)
+            kept += 1
+            if kept >= NEWS_MAX_ITEMS_PER_SYMBOL:
+                break
+        if kept and symbol.upper() in mine:
+            with_news.add(symbol.upper())
+
+    stories = dedupe_stories(shaped)
+    your_stories = [i for i in stories if mine & set(i["symbols"])]
+    market_stories = [i for i in stories if not (mine & set(i["symbols"]))]
+
+    return {
+        "your_stocks": your_stories,
+        "market": market_stories,
+        "coverage": {
+            "symbols_requested": len(mine),
+            "symbols_with_news": len(with_news),
+            "symbols_without_news": sorted(mine - with_news),
+            "window_days": NEWS_RECENCY_DAYS,
+            "symbols_over_cap": sorted(s.upper() for s in dropped),
+        },
+    }
