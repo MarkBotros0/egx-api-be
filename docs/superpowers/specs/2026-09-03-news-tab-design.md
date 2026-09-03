@@ -168,6 +168,17 @@ Authorization: Bearer <token>
 }
 ```
 
+**A symbol "has news" if any story in the feed is TAGGED with it — never "if
+its own query returned something".** The two differ, and the difference makes
+the response contradict itself. A held symbol whose own query comes back empty
+can still be tagged in a story fetched via a market symbol — the canonical
+OCDI + COMI "Sodic / CIB" case — and that story does appear in `your_stocks`.
+Deriving coverage from the fetch key instead would list that symbol under
+`symbols_without_news` while its story sits visibly on screen. Coverage is
+therefore computed from the DEDUPED stories, after tag merging. (Found by
+review 2026-09-03. The per-symbol item counter still enforces
+`NEWS_MAX_ITEMS_PER_SYMBOL`; it simply no longer decides coverage.)
+
 ```jsonc
 NewsItem = {
   "id":           "tag:reuters.com,2026:newsml_FWN44P224:0",
