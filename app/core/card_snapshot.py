@@ -175,6 +175,39 @@ def to_card(row: dict, weights: dict, macro: Optional[dict]) -> dict:
     return card
 
 
+def attach_risk_bands(rows: list, cards: list) -> None:
+    """
+    Stamp each card with its cross-sectional risk band, in place.
+
+    The band is the Calm..Wild volatility grade `GET /api/risk` computes, and it
+    is produced HERE by the very same `grade_universe` — spelled once so a card's
+    risk dot and that stock's detail-page `RiskGradeCard` cannot disagree, the
+    same guarantee `blend_categories` gives the score. Two spellings of the
+    ranking would drift silently, which is the failure this whole read model is
+    arranged to avoid.
+
+    Ranking is CROSS-SECTIONAL — a percentile against the rest of the market —
+    so it lives in the orchestrator here rather than in per-row `to_card`, which
+    sees one symbol at a time. It rides the rows `read_rows` already returned:
+    `sigma_63_ann_pct` and `tradeable` are all `grade_universe` needs, so this
+    costs one numpy sort and no fetch.
+
+    An untradeable or unrankable symbol gets `risk_band = None`: a rank it has
+    not earned would be a fiction, the same refusal `/api/risk` makes for a stock
+    nobody can enter or exit. The frontend shows no dot for a null band.
+    """
+    from app.core.risk_grade import grade_universe
+
+    graded = {
+        r["symbol"]: r
+        for r in grade_universe([r for r in rows if r.get("tradeable")])
+    }
+    for card in cards:
+        g = graded.get(card["symbol"])
+        card["risk_band"] = (g or {}).get("band")
+        card["risk_band_label"] = (g or {}).get("band_label")
+
+
 def upsert_snapshot(db, symbol: str, now: str, stats: Optional[dict],
                     tradeable: bool, ok: bool,
                     card: Optional[dict] = None) -> None:

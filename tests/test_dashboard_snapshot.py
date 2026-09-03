@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.core.card_snapshot import (  # noqa: E402
     CATEGORY_COLUMNS,
     SPARKLINE_BARS,
+    attach_risk_bands,
     to_card,
 )
 from app.core.composite import (  # noqa: E402
@@ -246,6 +247,63 @@ def test_a_corrupt_sparkline_degrades_to_empty():
     """The grid must paint even if one row's JSON is unparseable."""
     assert to_card(_row(sparkline_json="not json"), DEFAULT_WEIGHTS, None)["sparkline"] == []
     assert to_card(_row(sparkline_json=None), DEFAULT_WEIGHTS, None)["sparkline"] == []
+
+
+def test_dashboard_grades_tradeable_and_leaves_thin_ungraded():
+    """
+    Every tradeable card gets a Calm..Wild band; a thinly-traded one gets none.
+
+    The dot on a card must mean exactly what the risk grade on that stock's
+    detail page means, so the band is stamped through the SAME grade_universe
+    /api/risk uses. And a stock nobody can enter or exit earns no rank — a
+    percentile against names that trade would be a fiction — so its band is
+    null and the frontend draws no dot.
+    """
+    rows = [
+        _row(symbol=f"S{i}", sigma_63_ann_pct=sig, tradeable=True)
+        for i, sig in enumerate([20.0, 30.0, 40.0, 50.0, 60.0, 70.0])
+    ]
+    # Untradeable, and deliberately the CALMEST sigma of all — it would rank top
+    # if it were graded, which is exactly why we must not grade it.
+    rows.append(_row(symbol="THIN", sigma_63_ann_pct=5.0, tradeable=False))
+
+    cards = [to_card(r, DEFAULT_WEIGHTS, None) for r in rows]
+    attach_risk_bands(rows, cards)
+    by = {c["symbol"]: c for c in cards}
+
+    assert by["S0"]["risk_band"] == "calm"
+    assert by["S5"]["risk_band"] == "wild"
+    assert all(by[f"S{i}"]["risk_band_label"] for i in range(6))
+
+    assert by["THIN"]["risk_band"] is None
+    assert by["THIN"]["risk_band_label"] is None
+
+
+def test_dashboard_band_and_risk_endpoint_share_one_ranker():
+    """
+    The dashboard must not re-implement the ranking — it must call the one
+    grade_universe /api/risk calls, or the two surfaces drift the way a card and
+    its detail page were once measured drifting (66 "Buy" vs 45 "Hold"). Checked
+    by source, like the cache-key and weighting guards in this file.
+    """
+    snap = open(
+        os.path.join(os.path.dirname(__file__), "..", "app", "core",
+                     "card_snapshot.py"),
+        encoding="utf-8",
+    ).read()
+    assert "grade_universe" in snap, (
+        "attach_risk_bands no longer goes through grade_universe — the "
+        "dashboard band can now disagree with /api/risk"
+    )
+
+    dash = open(
+        os.path.join(os.path.dirname(__file__), "..", "app", "routers",
+                     "dashboard.py"),
+        encoding="utf-8",
+    ).read()
+    assert "attach_risk_bands" in dash, (
+        "the dashboard no longer stamps risk bands onto its cards"
+    )
 
 
 def test_the_card_carries_its_own_freshness():

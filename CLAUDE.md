@@ -135,6 +135,7 @@ public/                         # Static assets, PWA manifest
 - Each `StockCard` has a **30-day sparkline mini chart** colored by trend (gain/loss)
 - Price data per card is **lazy-loaded on scroll** (avoids hitting the API for off-screen cards)
 - `StockCard` accepts optional `compositeScore`/`compositeSignal` props — renders a mini `CompositeGauge` badge when provided
+- `StockCard` also shows a small **risk-grade dot** (Calm..Wild) under the score — the SAME grade `/api/risk` and `RiskGradeCard` show, stamped onto the dashboard rows by `card_snapshot.attach_risk_bands` via the one `grade_universe`, so a card's dot and that stock's detail page cannot disagree. Colour is the shared cool→hot ramp in `lib/riskBands.ts`, **never gain/loss** — a risk band is intensity, not direction. Shown only for a symbol tradeable enough to earn a band; thin/no-feed names get none. Independent of the composite-score toggle (a different axis: how much it moves, not its condition).
 - Watchlist sidebar panel (uses `useWatchlist()` hook)
 
 ### Stock Detail (`src/app/stock/[symbol]/page.tsx`)

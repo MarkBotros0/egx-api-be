@@ -25,7 +25,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import CurrentUser, get_current_user
-from app.core.card_snapshot import read_rows, to_card
+from app.core.card_snapshot import attach_risk_bands, read_rows, to_card
 from app.core.composite import get_weights_from_db
 from app.core.db import get_db
 from app.core.macro_fetch import fetch_macro
@@ -77,6 +77,10 @@ def get_dashboard(user: CurrentUser = Depends(get_current_user)):
         macro = None
 
     cards = [to_card(row, weights, macro) for row in rows]
+    # The per-stock risk band is a cross-sectional rank over the whole universe,
+    # so it is stamped here in the orchestrator through the SAME grade_universe
+    # GET /api/risk uses — a card's dot and its detail page cannot disagree.
+    attach_risk_bands(rows, cards)
     cards.sort(key=lambda c: c["symbol"])
 
     measured = [r["measured_at"] for r in rows if r.get("measured_at")]
