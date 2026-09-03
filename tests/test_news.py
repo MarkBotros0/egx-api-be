@@ -17,6 +17,7 @@ from app.core.news_fetch import (
     NEWS_ITEM_FIELDS,
     build_feed,
     dedupe_stories,
+    feed_status,
     fetch_many,
     is_recent,
     normalize_item,
@@ -336,6 +337,47 @@ def test_coverage_reports_symbols_the_cap_dropped():
     now = datetime(2026, 9, 3, tzinfo=timezone.utc)
     feed = build_feed({}, yours=["COMI"], now=now, dropped=["ZZZZ"])
     assert feed["coverage"]["symbols_over_cap"] == ["ZZZZ"]
+
+
+def test_feed_status_is_unavailable_when_every_symbol_yielded_nothing():
+    """
+    Every requested symbol raised or returned []. `fetch_many` stores a raise
+    as [], so every symbol is still a KEY in the dict -- the empty-dict check
+    alone would call this "ok".
+    """
+    assert feed_status({"COMI": [], "ABUK": []}, ["COMI", "ABUK"]) == "unavailable"
+
+
+def test_feed_status_is_unavailable_on_a_total_hang():
+    """The deadline abandoned every future before any key was written."""
+    assert feed_status({}, ["COMI", "ABUK"]) == "unavailable"
+
+
+def test_feed_status_is_ok_when_every_requested_symbol_is_present_and_some_have_items():
+    fetched = {"COMI": [{"id": "a"}], "ABUK": []}
+    assert feed_status(fetched, ["COMI", "ABUK"]) == "ok"
+
+
+def test_feed_status_is_partial_when_the_deadline_dropped_some_symbols():
+    """Fewer keys than requested, but at least one symbol yielded items."""
+    fetched = {"COMI": [{"id": "a"}]}
+    assert feed_status(fetched, ["COMI", "ABUK"]) == "partial"
+
+
+def test_feed_status_does_not_cache_a_fast_failing_outage_as_ok():
+    """
+    The regression this exists to catch: an outage that fails FAST (403,
+    connection refused, a changed payload) resolves every requested symbol to
+    a present key with []. `not fetched` is False here (the dict is non-empty),
+    so the old `if not fetched: unavailable` branch fell through and called
+    this "ok" -- caching an all-empty feed for the full 15-minute TTL and
+    hiding a recovered upstream from every caller with this symbol set until
+    the TTL expired. Every requested symbol must be a key for this to be the
+    right regression case.
+    """
+    requested = ["COMI", "ABUK", "SWDY"]
+    fetched = {s: [] for s in requested}
+    assert feed_status(fetched, requested) == "unavailable"
 
 
 import ast

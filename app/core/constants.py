@@ -200,7 +200,7 @@ HISTORICAL_DEFAULT_LOOKBACK_DAYS = 365     # Default window for /historical when
 # === News feed ===
 
 # A story older than this is not news. Chosen from measurement, not taste:
-# across a 24-character sample the newest story was 0 days old for ETEL and
+# across a 24-symbol sample the newest story was 0 days old for ETEL and
 # 275 days old for ACGC. A 7-day window empties the feed for most holdings;
 # 90 days lets that 275-day-old item render as news.
 NEWS_RECENCY_DAYS = 30

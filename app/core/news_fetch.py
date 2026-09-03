@@ -312,3 +312,29 @@ def build_feed(fetched: dict, yours: list[str], now: datetime, dropped=()) -> di
             "symbols_over_cap": sorted(s.upper() for s in dropped),
         },
     }
+
+
+def feed_status(fetched: dict, requested: list[str]) -> str:
+    """
+    Classify a fan-out result: "unavailable" | "partial" | "ok".
+
+    "unavailable" means NOTHING was retrieved from anyone — every value is
+    empty. This is the outage signal, and the router must NOT cache it, so
+    a recovered upstream is retried on the very next call rather than held
+    for the full TTL. A symbol that RAISED is stored as [] by fetch_many, so
+    `not fetched` (an empty dict) only catches a total hang; the real test
+    is whether any symbol yielded items.
+
+    "partial" means the deadline abandoned some symbols before they even
+    became keys — fewer keys than were requested.
+
+    Note "unavailable" is measured on the RAW fetched items (pre-recency),
+    so a merely quiet news day is still "ok": EGX30's ~30 symbols return
+    stories spanning a year, far more than the 30-day window keeps, so the
+    raw values are all-empty only on a genuine fetch failure.
+    """
+    if not any(fetched.values()):
+        return "unavailable"
+    if len(fetched) < len(requested):
+        return "partial"
+    return "ok"

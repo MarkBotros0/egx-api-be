@@ -16,7 +16,7 @@ from app.core.constants import DEFAULT_CACHE_TTL_SECONDS
 from app.core.db import get_db
 from app.core.holdings import fetch_open_holdings
 from app.core.index_membership import symbols_in_index
-from app.core.news_fetch import build_feed, fetch_many, select_news_symbols
+from app.core.news_fetch import build_feed, feed_status, fetch_many, select_news_symbols
 
 router = APIRouter()
 
@@ -60,13 +60,7 @@ def get_news(user: CurrentUser = Depends(get_current_user)):
 
     feed = build_feed(fetched, yours=yours, now=now, dropped=dropped)
     feed["fetched_at"] = now.isoformat().replace("+00:00", "Z")
-
-    if not fetched:
-        feed["status"] = "unavailable"
-    elif len(fetched) < len(requested):
-        feed["status"] = "partial"
-    else:
-        feed["status"] = "ok"
+    feed["status"] = feed_status(fetched, requested)
 
     # An unavailable feed is a transient upstream problem, not a fact worth
     # holding for fifteen minutes — the same reasoning behind
