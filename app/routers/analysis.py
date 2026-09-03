@@ -149,6 +149,12 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict,
             "change": change,
             "change_pct": change_pct,
             "sparkline": sparkline,
+            # WHICH BAR this price is, same field the snapshot stores. The card
+            # shows a date in every state, so an upgraded card must be able to
+            # say which session it upgraded TO — otherwise refreshing replaced
+            # a dated figure with an undated one and the reader lost the very
+            # fact they were checking.
+            "last_bar_date": str(df.index[-1])[:10],
         }
 
     except Exception as e:
