@@ -1057,6 +1057,15 @@ reintroduce the divergence measured once at **66 "Buy" on the card against 45
   `COMPOSITE_BATCH_CONCURRENCY = 2` — bounded so the requests land on one warm
   container instead of a dozen cold ones. **A card that fails to upgrade keeps
   its snapshot value and can never fall back to `--`.**
+- **When the EGX is shut, the age stamp reads "Market closed", not a climbing
+  "...ago".** A price cannot get newer than the last close while the market is
+  closed (the Fri/Sat weekend, or any time outside 10:00-14:30 Cairo), so a
+  growing age reads as staleness that isn't real — over a weekend it would climb
+  past "30h ago" on a number that is exactly as fresh as it can be. `isEgxOpen`
+  in `page.tsx` is the Cairo-aware, DST-safe gate (via `Intl`), read off the
+  same ticking clock as the age it replaces so every card flips together. A
+  closed-market bar also always shows "close", even for today's session once
+  the 14:30 bell has rung.
 - **Sorting by score exists only because of this.** While cards were fetched a
   page at a time, off-screen stocks had no score, so the control was
   structurally impossible.
