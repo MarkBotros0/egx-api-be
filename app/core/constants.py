@@ -221,3 +221,12 @@ NEWS_REQUEST_TIMEOUT_SECONDS = 6.0
 # raw payload across 22 symbols measured 419 KB; this is what keeps the
 # response small enough for a phone on a mobile connection.
 NEWS_MAX_ITEMS_PER_SYMBOL = 10
+
+
+# === Dividend history / calendar ===
+
+# Per-symbol dividend history comes from Yahoo on demand (core/dividend_history).
+# Dividends move a few times a year at most, so the cached answer can sit far
+# longer than a price — no reason to re-fetch a stable list every 15 minutes.
+DIVIDEND_HISTORY_TTL_SECONDS = 6 * 3600     # 6h
+DIVIDEND_HISTORY_TIMEOUT_SECONDS = 6.0      # one Yahoo GET; generous for a cold serverless container

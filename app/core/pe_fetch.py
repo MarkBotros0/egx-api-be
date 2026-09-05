@@ -62,6 +62,13 @@ TV_COLUMNS = [
                                           #        liquidity primitive; the app
                                           #        currently proxies it with
                                           #        close * share volume
+    # The stock's MOST RECENT cash coupon — the one dated dividend fact the
+    # scanner carries (it has no history array for dividends, unlike *_fy_h).
+    # ~34% coverage, which IS the dividend-payer population, not a gap. Feeds
+    # the dashboard "recently paid" sort and the /api/dividend_calendar view;
+    # per-stock HISTORY comes from Yahoo (core/dividend_history) instead.
+    "dividend_ex_date_recent",            # unix ts of the last ex-date
+    "dividend_amount_recent",             # EGP/share, gross, of that coupon
     #
     # DELIBERATELY NOT REQUESTED, coverage measured on 296 EGX rows:
     #   return_on_equity            25%  — too thin to score against a median
@@ -94,6 +101,17 @@ MIN_EXPECTED_ROWS = 100
 # ---------------------------------------------------------------------------
 # Fetch + normalize
 # ---------------------------------------------------------------------------
+
+def _ts_to_iso_date(value) -> Optional[str]:
+    """Unix ts (the scanner's date format) -> 'YYYY-MM-DD', or None. Stored as
+    TEXT so the read path sorts and compares it as a plain ISO date."""
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(float(value)), timezone.utc).strftime("%Y-%m-%d")
+    except (TypeError, ValueError, OSError):
+        return None
+
 
 def _clean_float(value, maximum: Optional[float] = None) -> Optional[float]:
     """Coerce a scanner cell to float. Non-numeric or out-of-range -> None."""
@@ -149,6 +167,8 @@ def fetch_fundamentals_rows() -> list:
             "shares_outstanding": _clean_float(d[9]),
             "beta_1y": _clean_float(d[10]),
             "value_traded_egp": _clean_float(d[11]),
+            "dividend_ex_date_recent": _ts_to_iso_date(d[12]),
+            "dividend_amount_recent": _clean_float(d[13]),
         })
     return out
 
@@ -204,23 +224,28 @@ def refresh_pe_data(db, rows: Optional[list] = None) -> dict:
             INSERT INTO pe_data
                 (symbol, company_name, pe_ratio, dividend_yield, loss_making,
                  market_cap, shares_outstanding, beta_1y, value_traded_egp,
+                 dividend_ex_date_recent, dividend_amount_recent,
                  updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (symbol) DO UPDATE SET
-                company_name       = EXCLUDED.company_name,
-                pe_ratio           = EXCLUDED.pe_ratio,
-                dividend_yield     = EXCLUDED.dividend_yield,
-                loss_making        = EXCLUDED.loss_making,
-                market_cap         = EXCLUDED.market_cap,
-                shares_outstanding = EXCLUDED.shares_outstanding,
-                beta_1y            = EXCLUDED.beta_1y,
-                value_traded_egp   = EXCLUDED.value_traded_egp,
-                updated_at         = EXCLUDED.updated_at
+                company_name            = EXCLUDED.company_name,
+                pe_ratio                = EXCLUDED.pe_ratio,
+                dividend_yield          = EXCLUDED.dividend_yield,
+                loss_making             = EXCLUDED.loss_making,
+                market_cap              = EXCLUDED.market_cap,
+                shares_outstanding      = EXCLUDED.shares_outstanding,
+                beta_1y                 = EXCLUDED.beta_1y,
+                value_traded_egp        = EXCLUDED.value_traded_egp,
+                dividend_ex_date_recent = EXCLUDED.dividend_ex_date_recent,
+                dividend_amount_recent  = EXCLUDED.dividend_amount_recent,
+                updated_at              = EXCLUDED.updated_at
             """,
             (row["symbol"], row.get("company_name"), row.get("pe_ratio"),
              row.get("dividend_yield"), row.get("loss_making"),
              row.get("market_cap"), row.get("shares_outstanding"),
-             row.get("beta_1y"), row.get("value_traded_egp"), now),
+             row.get("beta_1y"), row.get("value_traded_egp"),
+             row.get("dividend_ex_date_recent"), row.get("dividend_amount_recent"),
+             now),
         )
         written += 1
 
@@ -319,7 +344,8 @@ def _append_fundamentals_history(db, rows: list, now: str) -> int:
 def get_pe_for_symbol(db, symbol: str) -> Optional[dict]:
     """Read-side helper. Returns the last stored fundamentals row, or None."""
     row = db.execute(
-        "SELECT company_name, pe_ratio, dividend_yield, loss_making, updated_at "
+        "SELECT company_name, pe_ratio, dividend_yield, loss_making, updated_at, "
+        "dividend_ex_date_recent, dividend_amount_recent "
         "FROM pe_data WHERE symbol = %s",
         (symbol.upper(),),
     ).fetchone()
@@ -331,6 +357,8 @@ def get_pe_for_symbol(db, symbol: str) -> Optional[dict]:
         "dividend_yield": row[2],
         "loss_making": row[3],
         "fetched_at": row[4],
+        "dividend_ex_date_recent": row[5],
+        "dividend_amount_recent": row[6],
     }
 
 
@@ -354,7 +382,8 @@ def get_pe_for_symbols(db, symbols: list) -> dict:
     wanted = [s.upper() for s in symbols]
     rows = db.execute(
         "SELECT symbol, company_name, pe_ratio, dividend_yield, loss_making, "
-        "updated_at FROM pe_data WHERE symbol = ANY(%s)",
+        "updated_at, dividend_ex_date_recent, dividend_amount_recent "
+        "FROM pe_data WHERE symbol = ANY(%s)",
         (wanted,),
     ).fetchall()
     return {
@@ -364,9 +393,35 @@ def get_pe_for_symbols(db, symbols: list) -> dict:
             "dividend_yield": r[3],
             "loss_making": r[4],
             "fetched_at": r[5],
+            "dividend_ex_date_recent": r[6],
+            "dividend_amount_recent": r[7],
         }
         for r in rows
     }
+
+
+def get_dividend_payers(db) -> list[dict]:
+    """
+    Every stock with a known last ex-date, for the dividend calendar. Sourced
+    from pe_data (NOT the risk snapshot), so it covers every payer regardless
+    of price-feed health. Newest ex-date first.
+    """
+    rows = db.execute(
+        "SELECT symbol, company_name, dividend_yield, dividend_ex_date_recent, "
+        "dividend_amount_recent FROM pe_data "
+        "WHERE dividend_ex_date_recent IS NOT NULL "
+        "ORDER BY dividend_ex_date_recent DESC, symbol ASC"
+    ).fetchall()
+    return [
+        {
+            "symbol": r[0],
+            "name": r[1],
+            "dividend_yield": r[2],
+            "ex_date": r[3],
+            "amount": r[4],
+        }
+        for r in rows
+    ]
 
 
 def get_fundamentals_at(db, symbol: str, as_of: str) -> Optional[dict]:

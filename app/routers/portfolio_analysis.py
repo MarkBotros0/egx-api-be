@@ -515,6 +515,12 @@ def _analyze(holdings, user_id: str = None):
                 "days_held": days_held,
                 "dividends_collected": dividends_by_symbol.get(symbol.upper(), 0.0),
                 "dividends_symbol_shared": _symbol_counts.get(symbol.upper(), 0) > 1,
+                # The MARKET's last declared coupon (from pe_data), distinct from
+                # `dividends_collected` which is the user's own recorded payouts.
+                # A heads-up that a dividend happened — often the prompt to record
+                # it. Null when pe_data has no ex-date for the symbol.
+                "last_dividend_ex_date": pe_info_h.get("dividend_ex_date_recent") if pe_info_h else None,
+                "last_dividend_amount": pe_info_h.get("dividend_amount_recent") if pe_info_h else None,
                 # None until MIN_DAYS_FOR_ANNUALIZATION — see _annualized_return.
                 "annualized_return": round(ann_return, 2) if ann_return is not None else None,
                 # `is not None` throughout: a genuinely flat/suspended stock has
