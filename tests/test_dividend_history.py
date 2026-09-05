@@ -117,6 +117,39 @@ def test_cadence_of_empty_history_is_null_shaped_not_a_crash():
     assert c["count"] == 0
 
 
+class _FakeCursor:
+    def __init__(self, rows):
+        self._rows = rows
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeDB:
+    """Minimal db stub — the read helpers are just row -> dict transforms."""
+    def __init__(self, rows):
+        self._rows = rows
+    def execute(self, sql, params=None):
+        return _FakeCursor(self._rows)
+
+
+def test_read_dividends_maps_rows_to_dated_amounts():
+    from app.core.dividend_history import read_dividends
+    db = _FakeDB([("2026-04-07", 6.0), ("2025-04-24", 0.5)])
+    out = read_dividends(db, "comi")
+    assert out == [
+        {"ex_date": "2026-04-07", "amount": 6.0, "year": 2026},
+        {"ex_date": "2025-04-24", "amount": 0.5, "year": 2025},
+    ]
+
+
+def test_read_calendar_maps_and_sorts_newest_first():
+    from app.core.dividend_history import read_calendar
+    db = _FakeDB([("ABUK", "2026-04-20", 2.3), ("COMI", "2026-04-07", 6.0)])
+    out = read_calendar(db)
+    assert [d["symbol"] for d in out] == ["ABUK", "COMI"]  # 04-20 newer than 04-07
+    assert out[0] == {"symbol": "ABUK", "ex_date": "2026-04-20", "amount": 2.3}
+
+
 def test_both_dividend_routes_are_registered_and_behind_the_gate():
     """
     The app is closed, default-deny. Neither dividend route is public — they

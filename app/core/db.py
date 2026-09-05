@@ -280,6 +280,26 @@ def init_db(db: _DB) -> None:
     db.execute("ALTER TABLE pe_data ADD COLUMN IF NOT EXISTS loss_making BOOLEAN")
     db.execute("CREATE INDEX IF NOT EXISTS idx_pe_data_updated ON pe_data(updated_at)")
 
+    # Persisted dividend history — one row per (symbol, ex-date). Append-only and
+    # idempotent: the PRIMARY KEY makes a re-seen coupon a no-op, so the nightly
+    # refresh can blindly upsert the scanner's latest coupon and only NEW ones
+    # land. Seeded deep (all years) from Yahoo by scripts/backfill_dividends.py;
+    # the per-symbol history card and the /dividends calendar read from here.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS dividend_events (
+            symbol TEXT NOT NULL,
+            ex_date TEXT NOT NULL,
+            amount DOUBLE PRECISION,
+            source TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (symbol, ex_date)
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dividend_events_exdate "
+        "ON dividend_events(ex_date DESC)"
+    )
+
     # Append-only change log of the PRICE-INDEPENDENT fundamentals.
     #
     # `pe_data` is a current-value read model: every refresh overwrites it, so

@@ -1,16 +1,21 @@
 """
 GET /api/dividend_history?symbol=XXX — one stock's dated, multi-year dividend
-history (from Yahoo, on demand), plus a cadence estimate.
+history (from the `dividend_events` table, self-healing from Yahoo) + a cadence
+estimate.
 
-GET /api/dividend_calendar — every EGX dividend payer's most-recent coupon
-(from pe_data), for the all-stocks calendar view.
+GET /api/dividend_calendar — every payer's most-recent coupon (from the table),
+for the all-stocks calendar view.
 
-Named `dividend_history` to avoid the existing POST/DELETE /api/dividends
-ledger routes. Both are behind the auth gate (NOT in PUBLIC_ENDPOINTS); the app
-is closed and tests/test_auth_gate.py verifies it by enumeration.
+Named `dividend_history` to avoid the existing POST/DELETE /api/dividends ledger
+routes. Both behind the auth gate (NOT in PUBLIC_ENDPOINTS); tests/test_auth_gate
+verifies by enumeration.
 
-Neither ever 500s on an upstream hiccup — an empty payload with a status, the
-same degrade-don't-break posture as /api/macro and /api/news.
+THE STORE. Dividends are persisted in `dividend_events`, seeded deep from Yahoo
+(scripts/backfill_dividends) and appended to nightly by the refresh (the scanner
+coupon it already fetches). Reads come from the table. When the table has nothing
+for a symbol yet, the history endpoint fetches Yahoo on demand AND upserts what it
+got — so the store fills in as stocks are viewed, without waiting on the backfill.
+Neither route ever 500s on an upstream hiccup.
 """
 
 from datetime import datetime, timezone
@@ -21,7 +26,13 @@ from app.core import cache
 from app.core.auth import CurrentUser, get_current_user
 from app.core.constants import DIVIDEND_HISTORY_TTL_SECONDS
 from app.core.db import get_db
-from app.core.dividend_history import fetch_dividends, summarize_cadence
+from app.core.dividend_history import (
+    fetch_dividends,
+    read_calendar,
+    read_dividends,
+    summarize_cadence,
+    upsert_dividends,
+)
 from app.core.pe_fetch import get_dividend_payers
 
 router = APIRouter()
@@ -41,18 +52,32 @@ def get_dividend_history(
     if hit is not None:
         return hit
 
+    db = get_db()
     try:
-        dividends = fetch_dividends(sym)
+        dividends = read_dividends(db, sym)
     except Exception:
-        # Yahoo is a public web endpoint that can hiccup; a dividend card that
-        # can't load must not take the page down. Not cached — the failure is
-        # transient and we want the next visit to retry.
-        return {
-            "symbol": sym,
-            "dividends": [],
-            "cadence": summarize_cadence([]),
-            "status": "unavailable",
-        }
+        dividends = []
+
+    # Table empty for this symbol — fetch Yahoo once, store what we got, and
+    # serve it. This is how the store fills in ahead of the backfill script.
+    if not dividends:
+        try:
+            fetched = fetch_dividends(sym)
+        except Exception:
+            fetched = None
+        if fetched is None:
+            return {
+                "symbol": sym,
+                "dividends": [],
+                "cadence": summarize_cadence([]),
+                "status": "unavailable",
+            }
+        if fetched:
+            try:
+                upsert_dividends(db, sym, fetched, source="yahoo")
+            except Exception:
+                pass
+        dividends = fetched
 
     payload = {
         "symbol": sym,
@@ -72,10 +97,35 @@ def get_dividend_calendar(user: CurrentUser = Depends(get_current_user)):
         return hit
 
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    db = get_db()
+
+    # Prefer the persisted table (deep, seeded from Yahoo). Before it is seeded,
+    # fall back to pe_data's latest-coupon-per-symbol so the calendar still paints.
+    stocks = []
     try:
-        stocks = get_dividend_payers(get_db())
+        events = read_calendar(db)
     except Exception:
-        return {"stocks": [], "count": 0, "as_of": now, "status": "unavailable"}
+        events = []
+
+    if events:
+        try:
+            payers = {p["symbol"]: p for p in get_dividend_payers(db)}
+        except Exception:
+            payers = {}
+        for e in events:
+            p = payers.get(e["symbol"], {})
+            stocks.append({
+                "symbol": e["symbol"],
+                "name": p.get("name"),
+                "dividend_yield": p.get("dividend_yield"),
+                "ex_date": e["ex_date"],
+                "amount": e["amount"],
+            })
+    else:
+        try:
+            stocks = get_dividend_payers(db)
+        except Exception:
+            return {"stocks": [], "count": 0, "as_of": now, "status": "unavailable"}
 
     payload = {"stocks": stocks, "count": len(stocks), "as_of": now, "status": "ok"}
     cache.set(key, payload, ttl=DIVIDEND_HISTORY_TTL_SECONDS)
