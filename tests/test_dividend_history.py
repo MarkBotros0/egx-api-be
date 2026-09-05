@@ -115,3 +115,20 @@ def test_cadence_of_empty_history_is_null_shaped_not_a_crash():
     assert c["typical_month_name"] is None
     assert c["payments_per_year"] is None
     assert c["count"] == 0
+
+
+def test_both_dividend_routes_are_registered_and_behind_the_gate():
+    """
+    The app is closed, default-deny. Neither dividend route is public — they
+    read the caller's context (history is user-scoped by auth; the calendar is
+    still a signed-in-only surface). tests/test_auth_gate.py enforces this over
+    the whole route table; this is the local canary.
+    """
+    from app.core.auth import PUBLIC_ENDPOINTS
+    from app.main import app
+
+    paths = {r.path for r in app.routes}
+    assert "/api/dividend_history" in paths
+    assert "/api/dividend_calendar" in paths
+    for _, p in PUBLIC_ENDPOINTS:
+        assert p not in ("/api/dividend_history", "/api/dividend_calendar")

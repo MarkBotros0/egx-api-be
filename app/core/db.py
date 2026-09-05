@@ -420,6 +420,12 @@ def init_db(db: _DB) -> None:
         ("shares_outstanding", "DOUBLE PRECISION"),
         ("beta_1y", "DOUBLE PRECISION"),
         ("value_traded_egp", "DOUBLE PRECISION"),
+        # The last cash coupon per stock, from the nightly scanner. TEXT ISO
+        # date so the read path sorts/compares it plainly. Feeds the dashboard
+        # "recently paid" sort, /api/dividend_calendar, and the portfolio
+        # "last market dividend" line. ~34% coverage = the payer population.
+        ("dividend_ex_date_recent", "TEXT"),
+        ("dividend_amount_recent", "DOUBLE PRECISION"),
     ):
         db.execute(
             f"ALTER TABLE pe_data ADD COLUMN IF NOT EXISTS {column} {coltype}"
