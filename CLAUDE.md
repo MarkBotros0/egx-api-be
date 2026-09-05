@@ -65,7 +65,7 @@ egx-api-be/                     # Python FastAPI backend
       levels.py                 # Key levels (nearest support/resistance) + entry/exit zone computation
       macro_fetch.py            # Macro data fetch helper (EGX30, USD/EGP, CBE rate)
       news_fetch.py             # TradingView news: fetch, normalise, dedupe, 30-day window
-      dividend_history.py       # Yahoo dividend history: parse, cadence estimate (on-demand, no table)
+      dividend_history.py       # Yahoo dividend history: parse, cadence, + dividend_events table upsert/read
       pe_fetch.py               # Fundamentals feed (P/E, dividend yield, loss-making, last ex-date) via TradingView scanner
       tradingview.py            # Shared TradingView scanner client (URL/headers), also used by tickers.py
       index_membership.py       # Static EGX30/70/100/NILEX lookup — no network, for the scoring hot path
@@ -108,7 +108,7 @@ egx-api-fe/                     # Next.js frontend
     stock/[symbol]/page.tsx     # Stock detail
     portfolio/page.tsx          # Portfolio tracker
     compare/page.tsx            # Multi-stock comparison
-    dividends/page.tsx          # Dividend calendar — month-grouped agenda of every payer's last coupon
+    dividends/page.tsx          # Dividend calendar — month GRID with year/month selectors, day -> payers list
     learn/page.tsx              # Educational content (has id anchors for learn_concept deep links)
     components/                 # React components
     lib/
@@ -730,26 +730,36 @@ Named `dividend_history` to avoid the existing `POST/DELETE /api/dividends`
 LEDGER routes — those record the USER's own payouts; these describe the MARKET.
 
 **`GET /api/dividend_history?symbol=XXX`** — one stock's dated, multi-year
-dividend history plus a cadence estimate. Fetched **on demand from Yahoo, no
-table**: `query1.finance.yahoo.com/v8/finance/chart/<SYM>.CA?events=div`. It is
-the ONLY keyless source of DATED history — the scanner carries just the latest
-coupon, `fundamentals_annual.dps` has amounts but no ex-dates, and egx.com.eg is
-bot-blocked. Verified: COMI 21 dividends to 2010, newest 6.00 on 7 Apr 2026
-matching EGX's filing. Cached 6h (`DIVIDEND_HISTORY_TTL_SECONDS`); a Yahoo
-hiccup returns `{dividends: [], status: "unavailable"}`, never a 500 — the
-degrade-don't-break posture of `/api/macro`. `core/dividend_history.py`:
-`parse_dividends` + `summarize_cadence` are pure (tested without network);
-`fetch_dividends` is the thin GET.
+dividend history plus a cadence estimate. **Persisted in the `dividend_events`
+table** (PK `(symbol, ex_date)`), which is:
+- **seeded deep from Yahoo** by `scripts/backfill_dividends.py` (all years —
+  `query1.finance.yahoo.com/v8/finance/chart/<SYM>.CA?events=div`, the ONLY
+  keyless source of DATED history — the scanner carries just the latest coupon,
+  `fundamentals_annual.dps` has amounts but no ex-dates, egx.com.eg is bot-blocked);
+- **grown forward for free by the nightly refresh** — `refresh_pe_data` appends
+  the scanner's one latest coupon per symbol (`_append_dividend_events`), and the
+  PK makes it idempotent so only a NEW (symbol, ex_date) lands. No extra fetch.
+
+The endpoint **reads the table and self-heals**: on a table miss for a symbol it
+fetches Yahoo once, upserts, and serves — so the store fills in as stocks are
+viewed, ahead of the backfill. Verified: COMI 21 dividends to 2010, newest 6.00
+on 7 Apr 2026 matching EGX's filing. Cached 6h
+(`DIVIDEND_HISTORY_TTL_SECONDS`); a Yahoo hiccup on a cold symbol returns
+`{dividends: [], status: "unavailable"}`, never a 500. `core/dividend_history.py`:
+`parse_dividends` + `summarize_cadence` + `read_dividends`/`read_calendar` mapping
+are pure (tested without network); `fetch_dividends` is the thin Yahoo GET,
+`upsert_dividends` the idempotent write.
 
 **`cadence` is descriptive of the PAST only.** `typical_month` is the mode of
 past ex-dates, `payments_per_year` the modal count — never a forward promise.
 There is no machine-readable EGX forward calendar, and the whole feature says so
 wherever it estimates a "next" date.
 
-**`GET /api/dividend_calendar`** — every payer's most-recent coupon
-(`get_dividend_payers` reads `pe_data` directly, so it covers every payer
-regardless of price-feed health), newest ex-date first, for the `/dividends`
-calendar view.
+**`GET /api/dividend_calendar`** — every payer's most-recent coupon for the
+`/dividends` calendar view (a month GRID with year/month selectors; tapping a
+day filters the list beneath to that day). Reads the `dividend_events` table
+(`read_calendar`, latest-per-symbol), falling back to `pe_data`'s
+`get_dividend_payers` before the table is seeded so it always paints.
 
 **`pe_data` gained `dividend_ex_date_recent` (TEXT ISO) + `dividend_amount_recent`.**
 The scanner's one dated coupon per stock, added to `TV_COLUMNS` via the
@@ -761,7 +771,10 @@ calendar, and the portfolio line below.
 **Consumers:**
 - **Stock page** — `DividendHistoryCard` self-fetches `/api/dividend_history`
   (RiskGradeCard pattern, off `AnalysisResponse` so a slow Yahoo call can't hold
-  up the page). Dated list + estimated-next line. Links to `/learn#dividend_dates`.
+  up the page). Dated list **paginated through ALL years** (Show more / Show less,
+  `PAGE`=8) + estimated-next line. Links to `/learn#dividend_dates`. The stock
+  page header also shows the **company name beside the ticker** (from
+  `pe.company_name`, dropped when it just echoes the symbol).
 - **Dashboard** — `/api/dashboard` joins `pe_data` (`dividend_yield` +
   `dividend_ex_date_recent`) so the grid has a **"Pays a dividend"** filter
   (`dividend_yield > 0`; 0 means pays nothing, real) and a **"Recently paid"**
@@ -2110,6 +2123,16 @@ pe_data    (symbol PK, company_name, pe_ratio, dividend_yield, loss_making,
                          --   the dashboard "Recently paid" sort, /api/dividend_calendar,
                          --   and the portfolio "last market dividend" line. Per-stock
                          --   HISTORY is Yahoo (core/dividend_history), not here.
+```
+
+```sql
+dividend_events (symbol, ex_date, amount, source, created_at,
+                 PRIMARY KEY (symbol, ex_date))
+                 -- Persisted dividend history, append-only and idempotent by PK.
+                 -- Seeded deep from Yahoo (scripts/backfill_dividends), grown
+                 -- forward nightly by refresh_pe_data appending the scanner's
+                 -- latest coupon. Read by /api/dividend_history (self-heals from
+                 -- Yahoo on a miss) and /api/dividend_calendar (latest per symbol).
 ```
 
 ```sql
