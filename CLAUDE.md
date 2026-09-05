@@ -65,7 +65,8 @@ egx-api-be/                     # Python FastAPI backend
       levels.py                 # Key levels (nearest support/resistance) + entry/exit zone computation
       macro_fetch.py            # Macro data fetch helper (EGX30, USD/EGP, CBE rate)
       news_fetch.py             # TradingView news: fetch, normalise, dedupe, 30-day window
-      pe_fetch.py               # Fundamentals feed (P/E, dividend yield, loss-making) via TradingView scanner
+      dividend_history.py       # Yahoo dividend history: parse, cadence estimate (on-demand, no table)
+      pe_fetch.py               # Fundamentals feed (P/E, dividend yield, loss-making, last ex-date) via TradingView scanner
       tradingview.py            # Shared TradingView scanner client (URL/headers), also used by tickers.py
       index_membership.py       # Static EGX30/70/100/NILEX lookup — no network, for the scoring hot path
       regime.py                 # Market-condition reading: bands + the evidence behind them
@@ -95,6 +96,7 @@ egx-api-be/                     # Python FastAPI backend
       settings.py               # GET/PUT /api/settings  (weights live here too, section=weights)
       macro.py                  # GET /api/macro
       news.py                   # GET /api/news (on-demand, no table)
+      dividend_history.py       # GET /api/dividend_history (Yahoo) ; /api/dividend_calendar (pe_data)
       watchlist.py              # GET/POST/DELETE /api/watchlist
       auth.py                   # POST /api/auth/login ; GET /api/auth/me
       users.py                  # Admin-only user management (/api/users)
@@ -106,6 +108,7 @@ egx-api-fe/                     # Next.js frontend
     stock/[symbol]/page.tsx     # Stock detail
     portfolio/page.tsx          # Portfolio tracker
     compare/page.tsx            # Multi-stock comparison
+    dividends/page.tsx          # Dividend calendar — month-grouped agenda of every payer's last coupon
     learn/page.tsx              # Educational content (has id anchors for learn_concept deep links)
     components/                 # React components
     lib/
@@ -719,6 +722,58 @@ computed — tinting one green would claim a reading the app has not made.
 Coverage is genuinely thin for small caps: of 24 sampled symbols, 2 had no news
 at all (ESRS, EKHO) and several nothing inside 30 days (QNBE 56d, ACGC 275d).
 The feature must read as honest when empty, not broken.
+
+### GET /api/dividend_history, GET /api/dividend_calendar
+
+Two dividend surfaces, both behind the auth gate (NOT in `PUBLIC_ENDPOINTS`).
+Named `dividend_history` to avoid the existing `POST/DELETE /api/dividends`
+LEDGER routes — those record the USER's own payouts; these describe the MARKET.
+
+**`GET /api/dividend_history?symbol=XXX`** — one stock's dated, multi-year
+dividend history plus a cadence estimate. Fetched **on demand from Yahoo, no
+table**: `query1.finance.yahoo.com/v8/finance/chart/<SYM>.CA?events=div`. It is
+the ONLY keyless source of DATED history — the scanner carries just the latest
+coupon, `fundamentals_annual.dps` has amounts but no ex-dates, and egx.com.eg is
+bot-blocked. Verified: COMI 21 dividends to 2010, newest 6.00 on 7 Apr 2026
+matching EGX's filing. Cached 6h (`DIVIDEND_HISTORY_TTL_SECONDS`); a Yahoo
+hiccup returns `{dividends: [], status: "unavailable"}`, never a 500 — the
+degrade-don't-break posture of `/api/macro`. `core/dividend_history.py`:
+`parse_dividends` + `summarize_cadence` are pure (tested without network);
+`fetch_dividends` is the thin GET.
+
+**`cadence` is descriptive of the PAST only.** `typical_month` is the mode of
+past ex-dates, `payments_per_year` the modal count — never a forward promise.
+There is no machine-readable EGX forward calendar, and the whole feature says so
+wherever it estimates a "next" date.
+
+**`GET /api/dividend_calendar`** — every payer's most-recent coupon
+(`get_dividend_payers` reads `pe_data` directly, so it covers every payer
+regardless of price-feed health), newest ex-date first, for the `/dividends`
+calendar view.
+
+**`pe_data` gained `dividend_ex_date_recent` (TEXT ISO) + `dividend_amount_recent`.**
+The scanner's one dated coupon per stock, added to `TV_COLUMNS` via the
+documented append pattern. ~34% coverage — which IS the dividend-payer
+population, not a gap (contrast `earnings_release_next_date` at 10%, rejected as
+a forward field that should cover everyone). Feeds the dashboard join, the
+calendar, and the portfolio line below.
+
+**Consumers:**
+- **Stock page** — `DividendHistoryCard` self-fetches `/api/dividend_history`
+  (RiskGradeCard pattern, off `AnalysisResponse` so a slow Yahoo call can't hold
+  up the page). Dated list + estimated-next line. Links to `/learn#dividend_dates`.
+- **Dashboard** — `/api/dashboard` joins `pe_data` (`dividend_yield` +
+  `dividend_ex_date_recent`) so the grid has a **"Pays a dividend"** filter
+  (`dividend_yield > 0`; 0 means pays nothing, real) and a **"Recently paid"**
+  sort (newest ex-date first, non-payers sink). A `📅 Dividends` button in the
+  header (Compare-button shape) opens `/dividends`.
+- **Portfolio** — `portfolio_analysis` attaches `last_dividend_ex_date`/`_amount`
+  per holding (off the `pe_info_h` it already fetches); `HoldingsTable`'s
+  expanded row shows "Last market dividend", distinct from the user's recorded
+  `dividends_collected`.
+
+**No `gain`/`loss` colour on any dividend surface** — an amount and a yield
+carry no direction, and a dividend paid is not a "loss".
 
 ### GET /api/settings, PUT /api/settings
 
@@ -2041,7 +2096,8 @@ settings  (key, value)   -- pre-seeded: currency, risk_free_rate,
 watchlist (symbol, added_at)                                     -- user's watched tickers
 macro_data (key, value, previous_value, change_pct, updated_at)  -- 1-hour cache
 pe_data    (symbol PK, company_name, pe_ratio, dividend_yield, loss_making,
-            updated_at)
+            market_cap, shares_outstanding, beta_1y, value_traded_egp,
+            dividend_ex_date_recent, dividend_amount_recent, updated_at)
                          -- Nightly refresh from the TradingView scanner via
                          -- core/pe_fetch.py. `symbol` is the exact ticker from
                          -- the feed — no name matching involved.
@@ -2049,6 +2105,11 @@ pe_data    (symbol PK, company_name, pe_ratio, dividend_yield, loss_making,
                          -- dividend_yield 0  -> REAL: pays nothing. Only NULL is unknown.
                          -- loss_making       -> from diluted EPS; the feed never
                          --                      reports a negative P/E.
+                         -- dividend_ex_date_recent -> TEXT ISO of the last coupon's
+                         --   ex-date (~34% coverage = the payer population). Feeds
+                         --   the dashboard "Recently paid" sort, /api/dividend_calendar,
+                         --   and the portfolio "last market dividend" line. Per-stock
+                         --   HISTORY is Yahoo (core/dividend_history), not here.
 ```
 
 ```sql
