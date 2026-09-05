@@ -250,6 +250,7 @@ def refresh_pe_data(db, rows: Optional[list] = None) -> dict:
         written += 1
 
     appended = _append_fundamentals_history(db, rows, now)
+    dividends_appended = _append_dividend_events(db, rows)
 
     _write_setting(db, "pe_last_successful_fetch", now)
     _write_setting(db, "pe_last_attempt_status", "ok")
@@ -260,7 +261,34 @@ def refresh_pe_data(db, rows: Optional[list] = None) -> dict:
         "total_rows": len(rows),
         "skipped_empty": skipped,
         "history_rows_appended": appended,
+        "dividend_events_appended": dividends_appended,
     }
+
+
+def _append_dividend_events(db, rows: list) -> int:
+    """
+    Append the scanner's ONE latest coupon per symbol into `dividend_events`.
+    The table's PRIMARY KEY makes this idempotent — only a NEW (symbol, ex_date)
+    lands — so the refresh grows the store forward for free, no extra fetch.
+    Deep back-history is seeded separately from Yahoo (backfill_dividends).
+    Swallowed like the fundamentals log: the current-value feed must not go
+    down with an archive only two read models consult.
+    """
+    from app.core.dividend_history import upsert_dividends
+    total = 0
+    for row in rows:
+        ex = row.get("dividend_ex_date_recent")
+        if not ex:
+            continue
+        try:
+            total += upsert_dividends(
+                db, row["symbol"],
+                [{"ex_date": ex, "amount": row.get("dividend_amount_recent")}],
+                source="scanner",
+            )
+        except Exception:
+            continue
+    return total
 
 
 def _latest_history(db) -> dict:

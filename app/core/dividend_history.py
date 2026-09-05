@@ -138,3 +138,61 @@ def fetch_dividends(
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = json.loads(resp.read())
     return parse_dividends(payload)
+
+
+# ---------------------------------------------------------------------------
+# Persisted table (dividend_events) — the store the refresh appends to
+# ---------------------------------------------------------------------------
+
+def upsert_dividends(db, symbol: str, dividends: list[dict], source: str) -> int:
+    """
+    Append coupons to `dividend_events`, one row per (symbol, ex_date).
+    Idempotent by PRIMARY KEY — a re-seen coupon is a no-op — so the nightly
+    refresh can hand its latest coupon straight in and only NEW dates land.
+    Returns how many rows were actually inserted.
+    """
+    if not dividends:
+        return 0
+    sym = (symbol or "").strip().upper()
+    now = datetime.now(timezone.utc).isoformat()
+    inserted = 0
+    for d in dividends:
+        ex_date = d.get("ex_date")
+        if not ex_date:
+            continue
+        cur = db.execute(
+            "INSERT INTO dividend_events (symbol, ex_date, amount, source, created_at) "
+            "VALUES (%s, %s, %s, %s, %s) "
+            "ON CONFLICT (symbol, ex_date) DO NOTHING",
+            (sym, ex_date, d.get("amount"), source, now),
+        )
+        # psycopg exposes rowcount; a DO NOTHING that hit the conflict is 0.
+        inserted += getattr(cur, "rowcount", 0) or 0
+    return inserted
+
+
+def read_dividends(db, symbol: str) -> list[dict]:
+    """Every stored coupon for one symbol, newest ex-date first."""
+    rows = db.execute(
+        "SELECT ex_date, amount FROM dividend_events WHERE symbol = %s "
+        "ORDER BY ex_date DESC",
+        ((symbol or "").strip().upper(),),
+    ).fetchall()
+    return [
+        {"ex_date": r[0], "amount": r[1], "year": int(r[0][:4])}
+        for r in rows if r[0]
+    ]
+
+
+def read_calendar(db) -> list[dict]:
+    """
+    Latest coupon per symbol from the table, newest ex-date first — the
+    /dividend_calendar read model. One row per symbol via DISTINCT ON.
+    """
+    rows = db.execute(
+        "SELECT DISTINCT ON (symbol) symbol, ex_date, amount "
+        "FROM dividend_events ORDER BY symbol, ex_date DESC"
+    ).fetchall()
+    out = [{"symbol": r[0], "ex_date": r[1], "amount": r[2]} for r in rows if r[1]]
+    out.sort(key=lambda d: d["ex_date"], reverse=True)
+    return out
