@@ -21,6 +21,7 @@ from app.core.fundamentals_annual import (
     MIN_EXPECTED_SYMBOLS,
     MIN_FISCAL_YEAR,
     REPORTING_LAG_DAYS,
+    WRITE_BATCH,
     fetch_annual_rows,
     first_usable_date,
     get_annual_asof,
@@ -179,22 +180,77 @@ def test_a_truncated_response_is_refused_without_writing():
     assert str(MIN_EXPECTED_SYMBOLS) in result["error"]
 
 
+class _CountingDB:
+    """Records every statement so a test can count ROUND TRIPS, not just rows."""
+
+    def __init__(self):
+        self.statements = []
+
+    def execute(self, sql, params=None, *_a, **_k):
+        self.statements.append((sql, params))
+        return self
+
+    @property
+    def writes(self):
+        return len(self.statements)
+
+
 def test_a_full_response_writes_every_record():
-    class _DB:
-        def __init__(self):
-            self.writes = 0
-
-        def execute(self, *_a, **_k):
-            self.writes += 1
-            return self
-
-    db = _DB()
+    db = _CountingDB()
     rows = fetch_annual_rows(
         [_row(f"S{i:03d}", [2024, 2023]) for i in range(MIN_EXPECTED_SYMBOLS + 5)]
     )
     result = refresh_annual_fundamentals(db, rows)
     assert result["success"] is True
-    assert result["written"] == len(rows) == db.writes
+    assert result["written"] == len(rows)
+
+
+def test_the_archive_is_written_in_BATCHES_not_one_row_at_a_time():
+    """
+    The live archive is ~2,555 records and this runs inside a request with a
+    30-second ceiling. One statement per row is the shape that cost the FX
+    backfill two of its three attempts — it either crawls or the pooler cuts it
+    off partway. Reverting to a per-row loop must fail here, not in production
+    at 4am.
+    """
+    db = _CountingDB()
+    rows = fetch_annual_rows(
+        [_row(f"S{i:03d}", [2024, 2023]) for i in range(MIN_EXPECTED_SYMBOLS + 5)]
+    )
+    result = refresh_annual_fundamentals(db, rows)
+
+    assert result["written"] == len(rows), "every record must still be written"
+    expected_batches = (len(rows) + WRITE_BATCH - 1) // WRITE_BATCH
+    assert db.writes == expected_batches, (
+        f"{len(rows)} rows took {db.writes} round trips; batched at "
+        f"{WRITE_BATCH} it should take {expected_batches}"
+    )
+    assert db.writes < len(rows) / 10, "this is not meaningfully batched"
+
+
+def test_a_repeated_symbol_year_cannot_abort_its_batch():
+    """
+    Postgres refuses an ON CONFLICT DO UPDATE that touches the same row twice in
+    one statement, so a feed repeating a (symbol, fiscal_year) would take the
+    whole batch down with it — a failure per-row upserts never had to care
+    about. Same lesson as macro_series.upsert_many.
+    """
+    db = _CountingDB()
+    rows = fetch_annual_rows(
+        [_row(f"S{i:03d}", [2024, 2023]) for i in range(MIN_EXPECTED_SYMBOLS + 5)]
+    )
+    duplicated = rows + rows[:5]          # five records arrive twice
+    result = refresh_annual_fundamentals(db, duplicated)
+
+    assert result["success"] is True
+    assert result["written"] == len(rows), "duplicates must collapse, not double"
+
+    keys = []
+    for sql, params in db.statements:
+        # 11 columns per record, positionally: symbol, fiscal_year, ...
+        for i in range(0, len(params), 11):
+            keys.append((params[i], params[i + 1]))
+    assert len(keys) == len(set(keys)), "a (symbol, fiscal_year) repeated in one batch"
 
 
 @pytest.mark.parametrize("year", [2012, 2018, 2024])
