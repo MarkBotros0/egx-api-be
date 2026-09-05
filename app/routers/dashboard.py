@@ -29,6 +29,7 @@ from app.core.card_snapshot import attach_risk_bands, read_rows, to_card
 from app.core.composite import get_weights_from_db
 from app.core.db import get_db
 from app.core.macro_fetch import fetch_macro
+from app.core.pe_fetch import get_pe_for_symbols
 
 router = APIRouter()
 
@@ -81,6 +82,21 @@ def get_dashboard(user: CurrentUser = Depends(get_current_user)):
     # so it is stamped here in the orchestrator through the SAME grade_universe
     # GET /api/risk uses — a card's dot and its detail page cannot disagree.
     attach_risk_bands(rows, cards)
+
+    # Dividend fields joined from pe_data (one batch query) for the "Pays a
+    # dividend" filter and the "Recently paid" sort. dividend_yield 0 means
+    # "pays nothing" (real); ex-date null means no coupon on record. A symbol
+    # pe_data has never seen is simply absent from the map — the card then
+    # carries nulls and sinks in the sort, same as any unmeasured value.
+    try:
+        pe = get_pe_for_symbols(db, [c["symbol"] for c in cards])
+    except Exception:
+        pe = {}
+    for c in cards:
+        info = pe.get(c["symbol"], {})
+        c["dividend_yield"] = info.get("dividend_yield")
+        c["dividend_ex_date_recent"] = info.get("dividend_ex_date_recent")
+
     cards.sort(key=lambda c: c["symbol"])
 
     measured = [r["measured_at"] for r in rows if r.get("measured_at")]
