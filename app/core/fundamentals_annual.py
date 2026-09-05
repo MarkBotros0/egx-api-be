@@ -85,6 +85,10 @@ MIN_FISCAL_YEAR = 2012
 # screen distinguishes the two.
 MIN_EXPECTED_SYMBOLS = 150
 
+# Rows per multi-row INSERT. See `_upsert_batch` for why this is batched at all,
+# and why the number is 250 rather than "all of them".
+WRITE_BATCH = 250
+
 
 def first_usable_date(fiscal_year: int) -> str:
     """
@@ -174,34 +178,82 @@ def refresh_annual_fundamentals(db, rows: Optional[list] = None) -> dict:
                           f"(expected >= {MIN_EXPECTED_SYMBOLS}) — refusing a "
                           f"partial write")}
 
-    written = 0
+    # Deduplicate on the PRIMARY KEY before batching, keeping the last value.
+    # Postgres refuses an "ON CONFLICT DO UPDATE" that would touch the same row
+    # twice in one statement, so a feed repeating a (symbol, fiscal_year) would
+    # abort a whole batch — a failure per-row upserts never had to care about.
+    # Same lesson as macro_series.upsert_many.
+    deduped: dict = {}
     for r in rows:
-        db.execute(
-            """
-            INSERT INTO fundamentals_annual
-                (symbol, fiscal_year, eps_diluted, dps, net_income, revenue,
-                 total_assets, gross_profit, total_debt, first_usable_date,
-                 updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (symbol, fiscal_year) DO UPDATE SET
-                eps_diluted       = EXCLUDED.eps_diluted,
-                dps               = EXCLUDED.dps,
-                net_income        = EXCLUDED.net_income,
-                revenue           = EXCLUDED.revenue,
-                total_assets      = EXCLUDED.total_assets,
-                gross_profit      = EXCLUDED.gross_profit,
-                total_debt        = EXCLUDED.total_debt,
-                first_usable_date = EXCLUDED.first_usable_date,
-                updated_at        = EXCLUDED.updated_at
-            """,
-            (r["symbol"], r["fiscal_year"], r["eps_diluted"], r["dps"],
-             r["net_income"], r["revenue"], r["total_assets"],
-             r["gross_profit"], r["total_debt"], r["first_usable_date"], now),
-        )
-        written += 1
+        deduped[(r["symbol"], r["fiscal_year"])] = r
+    unique = list(deduped.values())
+
+    written = 0
+    for start in range(0, len(unique), WRITE_BATCH):
+        written += _upsert_batch(db, unique[start:start + WRITE_BATCH], now)
 
     return {"success": True, "written": written, "symbols": len(symbols),
-            "years": len({r["fiscal_year"] for r in rows})}
+            "years": len({r["fiscal_year"] for r in unique}),
+            "batches": (len(unique) + WRITE_BATCH - 1) // WRITE_BATCH}
+
+
+def _upsert_batch(db, batch: list, now: str) -> int:
+    """
+    One multi-row INSERT for up to WRITE_BATCH records.
+
+    WHY THIS IS NOT A LOOP OF SINGLE-ROW UPSERTS. It was, and the live archive
+    is ~2,555 records, so the nightly refresh issued ~2,555 sequential round
+    trips to Neon from inside a request with a 30-second ceiling — on top of the
+    ~130 `refresh_pe_data` already makes. That is the exact shape that cost the
+    FX backfill two of its three attempts: one statement per row over a pooled
+    connection either crawls or gets cut off partway, and a bare per-row write
+    leaves no way to tell a finished run from a truncated one.
+
+    Batched, the same archive lands in ~11 round trips.
+
+    Deliberately NO wall-clock deadline here, unlike the risk-snapshot cron.
+    That job measures independent symbols and stopping early costs nothing
+    because selection is stalest-first. This one writes a coherent archive, and
+    `refresh_annual_fundamentals` already refuses to write at all rather than
+    write part of the universe — a deadline that truncated the write would
+    reintroduce precisely the half-written state that guard exists to prevent.
+    Batching removes the need for one.
+    """
+    if not batch:
+        return 0
+
+    row_sql = "(" + ", ".join(["%s"] * 11) + ")"
+    values_sql = ", ".join([row_sql] * len(batch))
+
+    params: list = []
+    for r in batch:
+        params.extend([
+            r["symbol"], r["fiscal_year"], r["eps_diluted"], r["dps"],
+            r["net_income"], r["revenue"], r["total_assets"],
+            r["gross_profit"], r["total_debt"], r["first_usable_date"], now,
+        ])
+
+    db.execute(
+        f"""
+        INSERT INTO fundamentals_annual
+            (symbol, fiscal_year, eps_diluted, dps, net_income, revenue,
+             total_assets, gross_profit, total_debt, first_usable_date,
+             updated_at)
+        VALUES {values_sql}
+        ON CONFLICT (symbol, fiscal_year) DO UPDATE SET
+            eps_diluted       = EXCLUDED.eps_diluted,
+            dps               = EXCLUDED.dps,
+            net_income        = EXCLUDED.net_income,
+            revenue           = EXCLUDED.revenue,
+            total_assets      = EXCLUDED.total_assets,
+            gross_profit      = EXCLUDED.gross_profit,
+            total_debt        = EXCLUDED.total_debt,
+            first_usable_date = EXCLUDED.first_usable_date,
+            updated_at        = EXCLUDED.updated_at
+        """,
+        tuple(params),
+    )
+    return len(batch)
 
 
 def get_annual_asof(db, as_of: str) -> dict:

@@ -1710,6 +1710,42 @@ container, putting every dashboard card behind a ticker-list fetch. Unknown
 symbols return `None`, which `liquidity_score` maps to the EGX100 floors (the
 behaviour every symbol had before membership was plumbed through).
 
+#### `data/egx_tickers.json` is hand-maintained and is DRIFTING — verify before trusting it
+
+Nine entries carried a **wrong company name, a wrong sector, or both**, fixed
+2026-09-05 against the live scanner's `description` + `industry`. They were not
+obscure: `MASR` was filed as *"Banque Misr" / Banking* and is **Madinet Masr**, a
+real-estate developer; `EXPA` and `SAUD` were filed as non-banks and are both
+banks; `ECAP` was filed as a financial and makes **ceramics**; `CLHO` carried
+another company's name entirely; `BINV` and `BTFH` shared one name, so the file
+had a literal duplicate. Sector drives the dashboard's sector filter, so these
+were wrong on screen.
+
+Corrections stayed inside the file's own 10-value sector vocabulary — do not
+introduce a new sector value casually, the filter pills enumerate them.
+
+**Three known problems remain, all deliberately NOT fixed because each needs a
+decision rather than a correction:**
+
+- **`index` membership is badly drifted.** Measured against the scanner's own
+  `indexes` column: 13 symbols the file calls EGX30 are not in the feed's EGX30,
+  **6 real EGX30 constituents are absent from the file entirely** (EFID, EMFD,
+  ORHD, RMDA, VLMR, VLMRA), and 8 more sit under the wrong index. The feed only
+  knows **EGX 30** — it reports `indexes: None` for 265 of 296 symbols — so
+  there is no machine-readable source for EGX70 / EGX100 / NILEX, and `index`
+  sets the liquidity floors. Reconstituting it means choosing a source, not
+  editing a label.
+- **`QNBE` is missing entirely** — Qatar National Bank Alahli, ~126bn EGP and
+  top-8 by market cap. Adding it requires an `index` value that cannot be
+  verified (the feed does not list it in EGX30, plausibly on free float, since
+  QNB Group holds the overwhelming majority). Guessing would feed the liquidity
+  band a fabricated input.
+- **78 of the 166 file symbols do not resolve in the live scanner at all**,
+  including `EKHO`/`EKHOA`, `GLCM` and the 6-character `EIPICO` (EIPICO trades
+  as `PHAR`, which the file also lists separately). Some are genuinely delisted
+  or renamed; `EKHO` quotes in USD and may simply fall outside the scanner's
+  EGX filter. Removing 78 dashboard rows is a behaviour change, not a fix.
+
 ### When to split "Valuation" into its own category
 
 `score_quality` now carries 3 technical inputs and 3 fundamental ones. Sub-bands
@@ -1784,6 +1820,28 @@ is the Sharpe hurdle, the Sortino hurdle, the whole input to `score_risk_adjuste
 `beat_t_bill_count` — too high, and the app understates every Sharpe ratio and
 fails trades that genuinely beat cash. `init_db` upgrades rows still holding the
 stale 25 and ONLY those, so a deliberate admin value survives.
+
+**The TEACHING layer kept the stale 25 for three more days**, and that is the
+part worth remembering: fixing the constant did not fix the app. Six places in
+`learn/curriculum.tsx` still told the reader T-bills pay 25% — including one
+whose arithmetic was derived from it (*"gained 10% … you're 15% behind"*) — while
+`StatsPanel` correctly interpolated `T_BILL_RATE_PCT`. Fixed 2026-09-05 by
+interpolating the constant everywhere, the derived figure included
+(`${T_BILL_RATE_PCT - 10}%`).
+
+**Rule: a curriculum string that states a number the app computes MUST
+interpolate the constant**, never restate it — the same rule already written down
+for the Learn *widgets* ("widgets import their formula, never restate it"),
+which the prose had simply never been held to. Note two `25%` occurrences in that
+file are unrelated (a drawdown-recovery example, a position-concentration limit)
+and must stay literal, so this is not a blind find-and-replace.
+
+The same pass removed an **absolute valuation claim** from the `pe_ratio`
+concept — *"Under 8 is genuinely cheap for this market"* — which asserts exactly
+what `score_quality`'s own reason string is careful not to (it says *"Cheap
+versus the EGX median of ~12"*). With the policy rate near 19% a low P/E does not
+by itself mean the stock beats cash; the bands are a RELATIVE ranking and the
+words now say so.
 
 Caveat to repeat wherever it matters: this is the POLICY rate, not a 91-day
 T-bill auction yield. There is no free machine-readable Egyptian T-bill series
@@ -1948,6 +2006,17 @@ was worse than Learn's: a hardcoded `top-[56px]`, 5px short of the real 61px
 under the nav exactly the way the admin FAB once sat under the bottom one.
 
 Measured: nav bottom edge 61px, sticky top after scrolling 61px, clears.
+
+**A THIRD consumer had the identical bug and was missed both times** — the
+stock detail page's mobile sticky header (`stock/[symbol]/page.tsx`) carried the
+same hardcoded `top-[56px]` with no safe-area term, on the route every dashboard
+card links to. Fixed 2026-09-05. The lesson is that finding two instances of
+this is not evidence you have found them all: **grep `sticky` across
+`src/app` and check every offset**, which is how the third was caught. The sweep
+is now clean — the only other sticky offsets are `LearnClient`'s desktop sidebar
+(`top-24`) and the dashboard's desktop watchlist rail (`lg:top-[72px]`), both
+`md:`/`lg:`-gated and both larger than 61px, so they clear the nav by
+construction.
 
 ### The bottom nav is a floating pill, not a bar
 
@@ -2242,6 +2311,30 @@ the truncated-response refusal.
 Note the current fiscal year is thin by construction (2025 → 100 symbols) because
 companies have not all reported; `first_usable_date` handles that without a
 special case.
+
+**The archive is written in BATCHES — `_upsert_batch` at `WRITE_BATCH` (250),
+never a per-row loop.** `refresh_annual_fundamentals` did exactly that loop until
+2026-09-05: the live archive is ~2,555 records, so the nightly refresh issued
+~2,555 sequential Neon round trips from inside a request with a 30-second
+ceiling, on top of the ~130 `refresh_pe_data` already makes. That is the same
+shape that cost the FX backfill two of its three attempts (see *macro_series*) —
+one statement per row over a pooled connection either crawls or gets cut off
+partway. Batched it is ~11 round trips.
+`tests/test_fundamentals_annual.py::test_the_archive_is_written_in_BATCHES_not_one_row_at_a_time`
+counts round trips and fails if the loop returns.
+
+Two properties of that write are load-bearing:
+- **Dedupe on the PK before batching.** Postgres refuses an `ON CONFLICT DO
+  UPDATE` that would touch the same row twice in one statement, so a feed
+  repeating a `(symbol, fiscal_year)` aborts the whole batch — a failure per-row
+  upserts never had to care about. Same lesson as `macro_series.upsert_many`.
+- **There is deliberately NO wall-clock deadline here**, unlike
+  `/api/cron/risk_snapshot`. That job measures independent symbols and stopping
+  early is free because selection is stalest-first. This one writes a coherent
+  archive, and the `MIN_EXPECTED_SYMBOLS` guard already refuses to write at all
+  rather than write part of the universe — a deadline that truncated the write
+  would reintroduce exactly the half-written state that guard exists to prevent.
+  Batching removes the need for one.
 
 ### fundamentals_history — the point-in-time record
 
