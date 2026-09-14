@@ -38,6 +38,7 @@ from app.core.composite import (
 from app.core.extras_builder import build_composite_extras
 from app.core.index_membership import get_index_membership
 from app.core.levels import compute_key_levels, compute_entry_exit
+from app.core.trendlines import compute_trendlines
 from app.core.macro_fetch import fetch_macro, read_risk_free_rate
 from app.core.card_snapshot import upsert_snapshot
 from app.core.pe_fetch import get_pe_for_symbol, get_pe_for_symbols
@@ -595,6 +596,17 @@ def get_analysis(
         sr = support_resistance(df["high"], df["low"], df["close"])
         fib = fibonacci_levels(df["high"], df["low"])
 
+        # The diagonal through the last three pivot lows / highs, drawn on the
+        # price chart beside the horizontal S/R above. Fitted on the FULL frame
+        # (same pivots as `sr`) and reported aligned to the displayed bars.
+        # Presentation only: never a scoring input, never a signal — a wrong
+        # line is worse than none, so a side is None unless the pivots line up
+        # and price has respected it (core/trendlines.py).
+        try:
+            trendlines = compute_trendlines(df["high"], df["low"], df["close"], n_out=actual_bars)
+        except Exception:
+            trendlines = {"support": None, "resistance": None}
+
         sma_50_full = sma(df["close"], 50)
         sma_200_full = sma(df["close"], 200)
         all_dates = [str(idx)[:10] for idx in df.index]
@@ -668,6 +680,7 @@ def get_analysis(
             "bb_squeeze": bb_squeeze,
             "key_levels": key_levels,
             "entry_exit": entry_exit,
+            "trendlines": trendlines,
             "pe": pe_info,
             "forecast": forecast,
         }

@@ -107,6 +107,22 @@ BB_SQUEEZE_LOOKBACK_BARS = 130             # Comparison window for "is BB width 
 BB_SQUEEZE_RATIO = 0.7                     # Width below 70% of recent average = squeeze
 
 
+# === Trendlines (core/trendlines.py) ===
+#
+# The diagonal through the last few pivot lows / highs on the stock chart.
+# The governing rule is NO LINE BEATS A WRONG LINE: a side is drawn only when
+# its pivots line up in one direction AND price has respected the line since
+# the first of them. Everything below is a gate on that, not a tuning knob.
+
+PIVOT_WINDOW_BARS = 20                     # Bars either side a pivot must dominate. indicators.py imports nothing
+                                           # from app, so find_pivots / support_resistance RESTATE this as their
+                                           # default; tests/test_trendlines.py pins the three equal.
+TRENDLINE_PIVOTS = 3                       # How many of the newest pivots define the line
+TRENDLINE_MIN_STEP_PCT = 0.5               # Each pivot must move this much past the last — equal lows are a HORIZONTAL level
+TRENDLINE_TOLERANCE_PCT = 1.0              # A close this far through the line counts as a violation
+TRENDLINE_MAX_VIOLATION_SHARE = 0.05       # More than this share of closes through the line = not respected = not drawn
+
+
 # === Default settings (DB seeds + fallbacks) ===
 
 # The CBE overnight deposit rate, which is the app's stand-in for a risk-free
