@@ -63,6 +63,7 @@ egx-api-be/                     # Python FastAPI backend
       composite.py              # Composite score engine (8 categories, macro modulation)
       indicators.py             # All technical indicators (pandas/numpy only)
       levels.py                 # Key levels (nearest support/resistance) + entry/exit zone computation
+      trendlines.py             # Diagonal through the last 3 pivot lows/highs, drawn only when clean (see *Trendlines*)
       macro_fetch.py            # Macro data fetch helper (EGX30, USD/EGP, CBE rate)
       news_fetch.py             # TradingView news: fetch, normalise, dedupe, 30-day window
       dividend_history.py       # Yahoo dividend history: parse, cadence, + dividend_events table upsert/read
@@ -243,7 +244,7 @@ A guided **learning path**, redesigned 2026-09-02 from the flat list of
 Plus `src/app/components/learn/`: `visuals.tsx` (the SVG diagram library),
 `widgets.tsx` (the five calculators), `LiveChart.tsx`, `ConceptCard.tsx`.
 
-**69 concepts in 9 ordered modules.** (`TOTAL_CONCEPTS` is derived from
+**70 concepts in 9 ordered modules.** (`TOTAL_CONCEPTS` is derived from
 `ALL_CONCEPTS.length`, so the code cannot drift from itself — but this
 sentence can, and had: it read 68 while the page served 69. Do not restate
 the count anywhere it could go stale; read the constant.) Order teaches, rather than grouping by
@@ -390,6 +391,70 @@ Response shape (see `AnalysisResponse` in types.ts):
 
 - **`forecast`** — `{expected_move, outcome_band}`. See *Forecast calibration*
   below. Both are drift-free RANGES; neither carries a direction.
+
+- **`trendlines`** — `{support, resistance}`, the diagonal through the last
+  three pivot lows / highs, drawn on the price chart. See *Trendlines* below.
+
+### Trendlines — the diagonal through the pivots, and when NOT to draw it
+
+`core/trendlines.py::compute_trendlines` fits the line a chartist draws by
+hand: through the last `TRENDLINE_PIVOTS` (3) pivot lows for the **support
+trendline** and pivot highs for the **resistance trendline**, extended to the
+last bar. In an uptrend that is the higher-lows line and the higher-highs
+line; in a downtrend the lower-highs and lower-lows lines.
+
+**The pivots are the SAME pivots `support_resistance` uses.** The scan was
+extracted into `indicators.find_pivots(high, low, window)`, which keeps the
+bar index; `support_resistance` reads it for the horizontal levels (price
+only) and the trendline fit reads it for the diagonals (price AND when). One
+scan, so the two surfaces cannot disagree about where price turned.
+
+**No line beats a wrong line — the user chose this over "always draw a
+best fit".** A side is `None` unless all three hold:
+
+1. Its newest 3 pivots are strictly monotonic, each at least
+   `TRENDLINE_MIN_STEP_PCT` (0.5%) past the last. Equal lows are a HORIZONTAL
+   level, which the chart already draws; a "trendline" through them would be
+   the same line drawn twice.
+2. The least-squares line is **shifted to TOUCH the pivots** — on or under
+   every low, on or over every high. A fit run through the middle of three
+   lows puts a "support" above the very lows it claims.
+3. Price has respected it: from the first anchor to today, no more than
+   `TRENDLINE_MAX_VIOLATION_SHARE` (5%) of closes cross the line by more than
+   `TRENDLINE_TOLERANCE_PCT` (1%). A choppy stock fails this and gets nothing.
+
+Measured on the cached panel (241 symbols, 400 bars): a support line on
+**32%**, a resistance line on **21%**, both on 8%, neither on **55%**. That
+silence is the feature working, not failing — the chart caption says which.
+
+Computed on the FULL 400-bar frame like S/R, so the anchors do not move when
+the user changes the 60/100/200/500 selector; `values` is aligned to the
+displayed bars (`null` before the first anchor), and a line whose anchors
+scrolled off the left edge is still drawn across the whole window. Each side
+carries `anchors: [{date, price}]`, `direction` and `slope_pct_per_bar`.
+
+**Presentation only.** It is not built into `extras`, feeds no category and
+raises no signal, so it cannot disturb *One Score Per Stock* — and it must
+never: a trendline is a directional call the backtest gives the score no
+right to make.
+`tests/test_trendlines.py::test_trendlines_are_presentation_only_and_never_a_scoring_input`
+greps `composite.py`, `extras_builder.py` and `portfolio_analysis.py` for it.
+
+**Frontend.** A `Trendlines` pill in the overlay row, **on by default** (the
+user asked to see it), neutral-coloured because the lines themselves are
+support-green and resistance-red — the same convention the horizontal S/R
+lines use. `PriceChart` draws each side as a `type="linear"` dashed `Line`
+(a monotone spline would bow a straight line between the anchors it rests
+on) with **dots only at the anchor bars**, so the reader can see WHY the line
+is where it is. A side is rendered only when the backend drew it, so an
+undrawn stock adds no `--` rows to the tooltip. The caption under the chart
+names what was drawn — or says *"No trendline: the last 3 pivots do not line
+up, or price has not respected the line"*, so an empty chart reads as a
+decision, not an omission — and links `/learn#trendlines`.
+
+**Known limit, stated in the tooltip:** the shared pivot scan needs
+`PIVOT_WINDOW_BARS` (20) bars AFTER a bar, so the newest anchor is always at
+least a month old and a trend that started three weeks ago has no line yet.
 
 ### Forecast calibration — the app used to advertise coverage it did not deliver
 
@@ -1527,7 +1592,7 @@ All implemented from first principles — **no external TA libraries**. Each fun
 
 **Basic:** `sma`, `ema`, `rsi`, `macd`, `bollinger_bands`, `daily_returns`, `volatility`, `cumulative_returns`
 
-**Advanced:** `atr`, `obv`, `stochastic`, `support_resistance`, `fibonacci_levels`, `ma_crossovers`, `compute_beta`
+**Advanced:** `atr`, `obv`, `stochastic`, `find_pivots` (the ONE pivot scan — `support_resistance` and `core/trendlines.py` both read it), `support_resistance`, `fibonacci_levels`, `ma_crossovers`, `compute_beta`
 
 **Composite engine inputs:**
 - `adx(high, low, close, period=14)` → `(adx_series, plus_di, minus_di)` — trend strength via Wilder's smoothing
@@ -1904,7 +1969,7 @@ Each signal has a `learn_concept` key that links to a Learn page anchor (`id` at
 Components in `src/app/components/`:
 
 **Charts:**
-- `PriceChart` — Recharts ComposedChart with SMA/EMA/Bollinger overlays, support/resistance/fibonacci ReferenceLines
+- `PriceChart` — Recharts ComposedChart with SMA/EMA/Bollinger overlays, support/resistance/fibonacci ReferenceLines, and the two dashed trendlines with anchor dots (see *Trendlines*)
 - `VolumeChart` — BarChart colored by up/down
 - `IndicatorPanel` — Tabbed panel with RSI, MACD, Stochastic, OBV subcharts
 - `CompareChart` — Multi-series normalized comparison

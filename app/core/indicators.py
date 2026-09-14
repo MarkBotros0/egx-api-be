@@ -595,6 +595,38 @@ def multi_timeframe_alignment(daily_close: pd.Series,
 # Support & Resistance Levels
 # ---------------------------------------------------------------------------
 
+def find_pivots(high: pd.Series, low: pd.Series, window: int = 20):
+    """
+    Pivot points — the bars that are the extreme of the `window` bars either
+    side of them. A pivot low is where a decline turned; a pivot high where a
+    rally did.
+
+    This is the ONE pivot scan. `support_resistance` reads it for the
+    horizontal levels (where the price alone matters) and the trendline fit
+    reads it for the diagonal ones (where WHEN the turn happened matters just
+    as much), so the two can never disagree about where price turned.
+
+    Known limit, by construction: a bar needs `window` bars AFTER it to
+    qualify, so the newest pivot is always at least `window` bars old and a
+    turn inside the last month cannot be detected yet.
+
+    Returns: {"lows":  [(bar_index, price), ...],
+              "highs": [(bar_index, price), ...]}   — in bar order.
+    """
+    lows = []
+    highs = []
+    low_vals = low.values
+    high_vals = high.values
+
+    for i in range(window, len(low_vals) - window):
+        if low_vals[i] == np.min(low_vals[i - window:i + window + 1]):
+            lows.append((i, float(low_vals[i])))
+        if high_vals[i] == np.max(high_vals[i - window:i + window + 1]):
+            highs.append((i, float(high_vals[i])))
+
+    return {"lows": lows, "highs": highs}
+
+
 def support_resistance(high: pd.Series, low: pd.Series, close: pd.Series,
                        window: int = 20):
     """
@@ -606,20 +638,11 @@ def support_resistance(high: pd.Series, low: pd.Series, close: pd.Series,
     Returns: {"supports": [{"price": float, "strength": int}, ...],
               "resistances": [{"price": float, "strength": int}, ...]}
     """
-    supports = []
-    resistances = []
-    low_vals = low.values
-    high_vals = high.values
-
-    for i in range(window, len(close) - window):
-        if low_vals[i] == np.min(low_vals[i - window:i + window + 1]):
-            supports.append(float(low_vals[i]))
-        if high_vals[i] == np.max(high_vals[i - window:i + window + 1]):
-            resistances.append(float(high_vals[i]))
+    pivots = find_pivots(high, low, window)
 
     return {
-        "supports": _cluster_levels(supports),
-        "resistances": _cluster_levels(resistances),
+        "supports": _cluster_levels([p for _, p in pivots["lows"]]),
+        "resistances": _cluster_levels([p for _, p in pivots["highs"]]),
     }
 
 
