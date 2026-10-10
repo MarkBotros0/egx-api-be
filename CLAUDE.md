@@ -121,6 +121,16 @@ egx-api-fe/                     # Next.js frontend
 public/                         # Static assets, PWA manifest
 ```
 
+### `lib/` is shared with the mobile app — keep it platform-neutral
+
+`egx-api-mobile` (sibling repo, Expo) copies `src/app/lib/{api,apiConfig,auth,constants,positions,riskBands,theme,types}.ts`
+verbatim via its `npm run sync:shared`, and its verification fails when the copy drifts.
+So nothing in `lib/` may touch `window`, `document`, `localStorage`, `next/*` or import a
+component. The API client reads its base URL, token and 401 handler from
+`lib/apiConfig.ts`; the web registers them in `AuthProvider.tsx`
+(`configureApi(...)`), the mobile app from its secure token store. After changing
+any of these files, run `npm run sync:shared` in `egx-api-mobile` and commit there too.
+
 **Important file-naming note:** core backend modules are `composite.py`, `db.py`, `indicators.py`, `macro_fetch.py` — no leading underscore. Older CLAUDE.md referenced `_composite.py` / `_db.py` etc.; those names no longer exist.
 
 **Weights endpoint:** weights are NOT a separate `weights.py`. They are served via `GET/PUT /api/settings?section=weights` in `app/routers/settings.py`.
