@@ -519,7 +519,8 @@ def init_db(db: _DB) -> None:
     # --- Score alerts (mobile push) -----------------------------------------
     # A device token belongs to whoever registered it last: a shared phone
     # re-binds rather than duplicating. No FK to users, matching the rest of
-    # this schema (users are deleted through the admin API, which cleans up).
+    # this schema: DELETE /api/users/{id} removes this user's push_devices,
+    # alert_preferences and alert_log rows in the same transaction.
     db.execute("""
         CREATE TABLE IF NOT EXISTS push_devices (
             token TEXT PRIMARY KEY,

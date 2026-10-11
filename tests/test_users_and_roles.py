@@ -266,7 +266,8 @@ def test_deleting_a_user_removes_everything_they_own(monkeypatch):
     m.delete_user("u2", admin=ADMIN)
 
     deleted_from = [sql for sql, _ in db.tx_log]
-    for table in ("portfolio_sales", "portfolio", "watchlist", "user_settings", "users"):
+    for table in ("portfolio_sales", "portfolio", "watchlist", "user_settings",
+                  "push_devices", "alert_preferences", "alert_log", "users"):
         assert any(f"DELETE FROM {table} " in s for s in deleted_from), (
             f"deleting a user left {table} rows behind — nothing cascades, "
             "there is no FK to users"
@@ -298,7 +299,7 @@ def test_user_deletion_is_one_transaction(monkeypatch):
         ("COUNT(*)", [(2,)]),
     ]))
     m.delete_user("u2", admin=ADMIN)
-    assert len(db.tx_log) == 6, "every delete must run inside transaction()"
+    assert len(db.tx_log) == 9, "every delete must run inside transaction()"
 
 
 # ---------------------------------------------------------------------------

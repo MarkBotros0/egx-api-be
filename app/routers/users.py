@@ -252,6 +252,10 @@ def delete_user(user_id: str, admin: CurrentUser = Depends(require_admin)):
             tx.execute("DELETE FROM portfolio WHERE user_id = %s", (user_id,))
             tx.execute("DELETE FROM watchlist WHERE user_id = %s", (user_id,))
             tx.execute("DELETE FROM user_settings WHERE user_id = %s", (user_id,))
+            # Score alerts: their devices, preferences and queued/sent pushes.
+            tx.execute("DELETE FROM push_devices WHERE user_id = %s", (user_id,))
+            tx.execute("DELETE FROM alert_preferences WHERE user_id = %s", (user_id,))
+            tx.execute("DELETE FROM alert_log WHERE user_id = %s", (user_id,))
             tx.execute("DELETE FROM users WHERE id = %s", (user_id,))
 
         return {"deleted": user_id, "username": target["username"]}
