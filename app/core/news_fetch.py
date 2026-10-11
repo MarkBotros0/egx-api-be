@@ -42,6 +42,7 @@ from app.core.constants import (
     NEWS_FETCH_WORKERS,
     NEWS_MAX_ITEMS_PER_SYMBOL,
     NEWS_MAX_SYMBOLS,
+    NEWS_MAX_UNTAGGED_ITEMS,
     NEWS_RECENCY_DAYS,
     NEWS_REQUEST_TIMEOUT_SECONDS,
 )
@@ -259,7 +260,9 @@ def fetch_many(
     return out
 
 
-def build_feed(fetched: dict, yours: list[str], now: datetime, dropped=()) -> dict:
+def build_feed(
+    fetched: dict, yours: list[str], now: datetime, dropped=(), extra=()
+) -> dict:
     """
     Raw per-symbol items -> {your_stocks, market, coverage}.
 
@@ -270,6 +273,13 @@ def build_feed(fetched: dict, yours: list[str], now: datetime, dropped=()) -> di
     A story is YOURS if any symbol it is tagged with is one you hold or watch,
     however it was fetched — a story reached via EGX:OCDI that also names COMI
     belongs in your section when you hold COMI, and in only one section.
+
+    `extra` is stories from a second source, already shaped (today: Arab
+    Finance, see core/arabfinance.py). They carry their own symbol tags, from
+    the headline rather than the wire, and pass the same recency window. One
+    with no tag is kept only when the source marks it `market_news`, and those
+    are capped at NEWS_MAX_UNTAGGED_ITEMS so a quiet week for your stocks is
+    not buried under every sector headline the source published.
 
     `coverage` describes YOUR symbols only. The index half is not counted: the
     user did not ask for those names and a "no news" tally against them would
@@ -288,6 +298,16 @@ def build_feed(fetched: dict, yours: list[str], now: datetime, dropped=()) -> di
             kept += 1
             if kept >= NEWS_MAX_ITEMS_PER_SYMBOL:
                 break
+
+    untagged = 0
+    for story in sorted(extra or (), key=lambda i: i.get("published_at") or "", reverse=True):
+        if not is_recent(story, now) or not story.get("market_news"):
+            continue
+        if not story.get("symbols"):
+            if untagged >= NEWS_MAX_UNTAGGED_ITEMS:
+                continue
+            untagged += 1
+        shaped.append({k: story[k] for k in NEWS_ITEM_FIELDS})
 
     stories = dedupe_stories(shaped)
     your_stories = [i for i in stories if mine & set(i["symbols"])]
@@ -314,13 +334,14 @@ def build_feed(fetched: dict, yours: list[str], now: datetime, dropped=()) -> di
     }
 
 
-def feed_status(fetched: dict, requested: list[str]) -> str:
+def feed_status(fetched: dict, requested: list[str], extra_count: int = 0) -> str:
     """
     Classify a fan-out result: "unavailable" | "partial" | "ok".
 
     "unavailable" means NOTHING was retrieved from anyone — every value is
-    empty. This is the outage signal, and the router must NOT cache it, so
-    a recovered upstream is retried on the very next call rather than held
+    empty AND the second source (`extra_count` stories) returned nothing. This
+    is the outage signal, and the router must NOT cache it, so a recovered
+    upstream is retried on the very next call rather than held
     for the full TTL. A symbol that RAISED is stored as [] by fetch_many, so
     `not fetched` (an empty dict) only catches a total hang; the real test
     is whether any symbol yielded items.
@@ -333,7 +354,7 @@ def feed_status(fetched: dict, requested: list[str]) -> str:
     stories spanning a year, far more than the 30-day window keeps, so the
     raw values are all-empty only on a genuine fetch failure.
     """
-    if not any(fetched.values()):
+    if not any(fetched.values()) and not extra_count:
         return "unavailable"
     if len(fetched) < len(requested):
         return "partial"

@@ -1,4 +1,4 @@
-# EGX Analytics — Project Guide for Claude
+# Borsa Compass (formerly EGX Analytics) — Project Guide for Claude
 
 This file orients future Claude sessions to the codebase. Read it first before exploring.
 
@@ -65,7 +65,9 @@ egx-api-be/                     # Python FastAPI backend
       levels.py                 # Key levels (nearest support/resistance) + entry/exit zone computation
       trendlines.py             # Diagonal through the last 3 pivot lows/highs, drawn only when clean (see *Trendlines*)
       macro_fetch.py            # Macro data fetch helper (EGX30, USD/EGP, CBE rate)
-      news_fetch.py             # TradingView news: fetch, normalise, dedupe, 30-day window
+      news_fetch.py             # TradingView news: fetch, normalise, dedupe, 30-day window; merges a second source
+      arabfinance.py            # Arab Finance English RSS (10 sector feeds) -> news items, tagged by headline
+      news_tagging.py           # Headline -> EGX symbols, from egx_tickers.json names + a short alias list
       dividend_history.py       # Yahoo dividend history: parse, cadence, + dividend_events table upsert/read
       pe_fetch.py               # Fundamentals feed (P/E, dividend yield, loss-making, last ex-date) via TradingView scanner
       tradingview.py            # Shared TradingView scanner client (URL/headers), also used by tickers.py
@@ -762,7 +764,8 @@ Returns `{ egx30, usd_egp, interest_rate }`. 1-hour cache in `macro_data` table.
 Stories for the caller's holdings and watchlist, with EGX30 market news below.
 **Fetched on demand — no table, no cron, nothing persisted.**
 
-**The source is TradingView's news endpoint**, not the exchange.
+**The main source is TradingView's news endpoint**, not the exchange (the
+second, Arab Finance, is described below).
 `news-headlines.tradingview.com/v2/headlines?symbol=EGX:<SYM>` returns
 Reuters/Zawya/LSE stories with `relatedSymbols`, so a story maps onto holdings.
 egx.com.eg is unreachable from a server: it serves an F5 bot-challenge shell
@@ -820,6 +823,36 @@ computed — tinting one green would claim a reading the app has not made.
 Coverage is genuinely thin for small caps: of 24 sampled symbols, 2 had no news
 at all (ESRS, EKHO) and several nothing inside 30 days (QNBE 56d, ACGC 275d).
 The feature must read as honest when empty, not broken.
+
+#### The second source: Arab Finance (added 2026-10-11)
+
+TradingView carries Reuters/Zawya/LSE only, so Egyptian outlets were missing.
+**Arab Finance publishes ten free English RSS feeds**, one per sector
+(`arabfinance.com/en/rss/rssbycat/1..10`), ~50 headlines each. Measured: all
+ten in 0.63s, 495 unique stories. `core/arabfinance.py` fetches them **in
+parallel with the TradingView fan-out under the same deadline**, so it adds no
+wall-clock time, and either source failing leaves the other standing
+(`feed_status` is "unavailable" only when BOTH returned nothing).
+
+- **Its stories carry no stock tags**, so `core/news_tagging.py` reads the
+  headline for company names: whole words only, an alias two ticker rows
+  share names neither, the longest match wins (CIB Holdings is CICH, not also
+  COMI), and single ordinary words are never aliases ("Eastern Company" does
+  not shrink to "Eastern"). `MANUAL_ALIASES` holds the names the press uses
+  that the ticker file does not (CIB, Fawry, EFG Hermes, TMG, SODIC…). Live:
+  40 of 495 headlines tag a listed company.
+- **Untagged stories count only from the Macroeconomy feed**, capped at
+  `NEWS_MAX_UNTAGGED_ITEMS` (15) — otherwise the market half drowns in
+  tourism and education copy. Tagging inherits the ticker file's drift.
+- The date is `a10:updated` (Cairo offset), parsed to UTC; a row without an
+  offset is dropped rather than guessed. Parsed with **`defusedxml`** — it is a
+  third party's XML. Same six-field rule: headline, provider (`arab-finance`),
+  date, our own https link, symbols — never the description.
+
+**Al Borsa News (English, alborsanews.com) is NOT reachable**: Cloudflare
+managed challenge, every scripted request including the feed is a 403. Do not
+try to get around it. The Arabic paper (alborsaanews.com/feed) is open but
+Arabic, general business news, and untagged — not added.
 
 ### GET /api/dividend_history, GET /api/dividend_calendar
 

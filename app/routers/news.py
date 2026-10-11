@@ -1,16 +1,19 @@
 """
 GET /api/news — recent stories for the caller's holdings and watchlist, with
-EGX30 market news below.
+market news below. Two sources: TradingView's wires (Reuters, Zawya, LSE),
+tagged by the wire, and Arab Finance, tagged by headline.
 
 Fetched on demand, nothing persisted. See core/news_fetch.py for why this is
 not a snapshot table and why it cannot be done in the browser.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
 
 from app.core import cache
+from app.core.arabfinance import fetch_stories as fetch_arabfinance
 from app.core.auth import CurrentUser, get_current_user
 from app.core.constants import DEFAULT_CACHE_TTL_SECONDS
 from app.core.db import get_db
@@ -56,11 +59,20 @@ def get_news(user: CurrentUser = Depends(get_current_user)):
         return hit
 
     requested = yours + market
-    fetched = fetch_many(requested)
+    # The two sources run side by side under the same deadline, so adding
+    # Arab Finance costs no wall-clock time. Either one failing leaves the
+    # other's stories standing.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        af_future = pool.submit(fetch_arabfinance)
+        fetched = fetch_many(requested)
+        try:
+            af_stories, _ = af_future.result()
+        except Exception:
+            af_stories = []
 
-    feed = build_feed(fetched, yours=yours, now=now, dropped=dropped)
+    feed = build_feed(fetched, yours=yours, now=now, dropped=dropped, extra=af_stories)
     feed["fetched_at"] = now.isoformat().replace("+00:00", "Z")
-    feed["status"] = feed_status(fetched, requested)
+    feed["status"] = feed_status(fetched, requested, extra_count=len(af_stories))
 
     # An unavailable feed is a transient upstream problem, not a fact worth
     # holding for fifteen minutes — the same reasoning behind

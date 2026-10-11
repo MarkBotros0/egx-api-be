@@ -238,6 +238,11 @@ NEWS_REQUEST_TIMEOUT_SECONDS = 6.0
 # response small enough for a phone on a mobile connection.
 NEWS_MAX_ITEMS_PER_SYMBOL = 10
 
+# Arab Finance stories that name no listed company (Macroeconomy feed only),
+# newest first. Its ten feeds carry ~500 headlines; without a cap the market
+# half would be mostly general-economy copy.
+NEWS_MAX_UNTAGGED_ITEMS = 15
+
 
 # === Dividend history / calendar ===
 
