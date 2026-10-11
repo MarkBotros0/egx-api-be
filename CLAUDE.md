@@ -111,6 +111,7 @@ egx-api-fe/                     # Next.js frontend
     compare/page.tsx            # Multi-stock comparison
     dividends/page.tsx          # Dividend calendar — month GRID with year/month selectors, day -> payers list
     learn/page.tsx              # Educational content (has id anchors for learn_concept deep links)
+                                # — content is DATA in lib/curriculum.ts, shared with egx-api-mobile
     components/                 # React components
     lib/
       api.ts                    # Typed fetch wrappers
@@ -245,14 +246,36 @@ that says it is summing them.
 ### Learn (`src/app/learn/`)
 
 A guided **learning path**, redesigned 2026-09-02 from the flat list of
-`<details>` sections it used to be. Three files:
+`<details>` sections it used to be. Two route files:
 
 - `page.tsx` — a thin server component; owns the page `<title>` only
 - `LearnClient.tsx` — the shell: hero, search, module nav, progress, hash router
-- `curriculum.tsx` — **all content as data**, so the shell stays about layout
 
 Plus `src/app/components/learn/`: `visuals.tsx` (the SVG diagram library),
-`widgets.tsx` (the five calculators), `LiveChart.tsx`, `ConceptCard.tsx`.
+`widgets.tsx` (the five calculators), `LiveChart.tsx`, `ConceptCard.tsx`, and
+`LearnVisual.tsx` (renders one `VisualSpec` with those components).
+
+#### The content is DATA, shared with the mobile app
+
+Since 2026-10 the curriculum lives in `src/app/lib/`, because the React Native
+app (`../egx-api-mobile`) renders the same content from verbatim copies
+(`npm run sync:shared` there; its `check:shared` fails on any drift):
+
+- `lib/curriculum.ts` — `CURRICULUM`, `ALL_CONCEPTS`, `TOTAL_CONCEPTS`. Every
+  diagram is a `VisualSpec` OBJECT (`{ kind: "MiniChart", series, … }`), never
+  JSX — the native app cannot import a `.tsx` file.
+- `lib/learn.ts` — `Concept`/`Module` types, `conceptKey`, `normalizeSearch`,
+  `searchConcepts`, `LEVEL_LABEL`, the progress storage key.
+- `lib/learnVisuals.ts` — palette `V`, every diagram's prop shape, the
+  `VisualSpec` union, `walk`/`smaOf`/`extent`/`toPath`.
+- `lib/learnWidgets.ts` — the calculators' formulas and verdict copy.
+- `lib/learnLive.ts` — which COMI series each `LiveChart` variant draws.
+
+These must stay platform-neutral (no JSX, `window`, `document`, React). A new
+diagram type is a new `VisualSpec` member plus a case in BOTH renderers
+(`components/learn/LearnVisual.tsx` here, `src/features/learn/LearnVisual.tsx`
+in the mobile app). To change content: edit `lib/curriculum.ts`, commit, then
+run `npm run sync:shared` in `egx-api-mobile` and commit there.
 
 **70 concepts in 9 ordered modules.** (`TOTAL_CONCEPTS` is derived from
 `ALL_CONCEPTS.length`, so the code cannot drift from itself — but this
@@ -1972,7 +1995,7 @@ go neutral at `low`. `tests/test_fixes.py` fails the build on a bare
 
 New signal types added with the 8-category engine have their `learn_concept` anchors wired into the Learn page: `risk_adjusted_return`, `relative_strength`, `mfi`, `adx`, `liquidity`, `multi_timeframe`, `cash_underperformer`. Entry/exit zone signals use `entry_exit_zones`.
 
-Each signal has a `learn_concept` key that links to a Learn page anchor (`id` attribute on a Concept card in `egx-api-fe/src/app/learn/page.tsx`). Deep links take the form `/learn#<concept>`.
+Each signal has a `learn_concept` key that links to a Learn page anchor (`id` of a Concept in `egx-api-fe/src/app/lib/curriculum.ts`). Deep links take the form `/learn#<concept>`.
 
 ## Frontend Components
 
@@ -2028,7 +2051,8 @@ Components in `src/app/components/`:
   `ConeChart`, `LedgerRows`, plus `walk()`/`smaOf()` for seeded illustrative
   series. No charting dependency — `/learn` loads no Recharts.
 - `widgets.tsx` — `RsiPlayground`, `StopLossCalculator`, `PositionSizer`,
-  `TBillRace`, `ScoreBandExplorer`. Each imports its formula from
+  `TBillRace`, `ScoreBandExplorer`. Formulas and verdict copy live in
+  `lib/learnWidgets.ts` (shared with mobile), which imports each rule from
   `lib/constants.ts` rather than restating it.
 - `LiveChart.tsx` — real COMI data in a concept card. One shared fetch, lazy via
   `IntersectionObserver`, silently falls back to the caller's static SVG.
@@ -2471,7 +2495,7 @@ Connection singleton in `_db.py` with lazy init. `get_db()` returns the ready co
 3. Extend `AnalysisIndicators` interface in `src/app/lib/types.ts`
 4. Add to `priceChartData`/`indicatorData` useMemo in stock detail page
 5. Add chart rendering in `IndicatorPanel.tsx` or `PriceChart.tsx`
-6. Add a Concept card to `src/app/learn/page.tsx`
+6. Add a Concept to `src/app/lib/curriculum.ts`, then `npm run sync:shared` in `egx-api-mobile`
 
 **Adding a new signal type:**
 1. Add rule in `_analyze()` method in `portfolio_analysis.py`
