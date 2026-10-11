@@ -137,6 +137,9 @@ def _redeem(store, token: str, purposes: set, now: datetime) -> tuple:
 
 def verify_email(store, *, token: str, now: datetime) -> Account:
     account, pending_hash, pending_name = _redeem(store, token, {PURPOSE_VERIFY}, now)
+    if account.email_verified:
+        # A leftover sign-up link must never overwrite credentials set since.
+        return account
     fields = {"email_verified": True}
     if pending_hash is not None:
         fields["password_hash"] = pending_hash
@@ -153,6 +156,8 @@ def set_password(store, *, token: str, password: str, now: datetime) -> Account:
     # ends every session issued before now (the old password's holders).
     store.update(account.id, password_hash=hash_password(password), email_verified=True,
                  sessions_valid_after=iso(now))
+    # No sign-up link carrying pending credentials may outlive a password being set.
+    store.delete_tokens(account.id, PURPOSE_VERIFY)
     return store.by_id(account.id)
 
 

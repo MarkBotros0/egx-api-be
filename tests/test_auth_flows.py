@@ -146,6 +146,30 @@ def test_resignup_of_a_disabled_unverified_account_sends_nothing_and_changes_not
     assert (dict(store.tokens), store.by_email("mark@gmail.com")) == before
 
 
+def test_leftover_signup_link_cannot_overwrite_a_password_set_later(store, mailer):
+    flows.signup(store, mailer, name="Evil", email="v@x.com", password="attacker-pass", now=NOW)
+    link = mailer.last_link()
+    flows.forgot_password(store, mailer, email="v@x.com", now=LATER)
+    flows.set_password(store, token=mailer.last_link(), password="victim-secret", now=LATER)
+    with pytest.raises(HTTPException) as e:
+        flows.verify_email(store, token=link, now=LATER)
+    assert e.value.detail == "invalid_or_expired_link"
+    assert flows.login(store, email="v@x.com", password="victim-secret")
+    with pytest.raises(HTTPException) as e:
+        flows.login(store, email="v@x.com", password="attacker-pass")
+    assert e.value.status_code == 401
+
+
+def test_verify_email_on_an_already_verified_account_changes_nothing(store):
+    a = store.create(email="v@x.com", name="Vic", password_hash=hash_password("victim-secret"),
+                     email_verified=True, now=NOW)
+    token = store.issue_token(a.id, "verify", NOW, pending_password_hash=hash_password("attacker-pass"),
+                              pending_name="Evil")
+    acc = flows.verify_email(store, token=token, now=NOW)
+    assert acc.id == a.id and acc.name == "Vic"
+    assert acc.password_hash == a.password_hash
+
+
 def test_resend_carries_the_original_pending_password(store, mailer):
     _signup(store, mailer)
     flows.resend_verification(store, mailer, email="mark@gmail.com", now=LATER)
