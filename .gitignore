@@ -17,3 +17,5 @@ build/
 # Misc
 .DS_Store
 scripts/.cache/
+.worktrees/
+.superpowers/
