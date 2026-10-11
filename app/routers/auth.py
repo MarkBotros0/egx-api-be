@@ -1,56 +1,97 @@
 """
-Authentication endpoints.
+Authentication endpoints. Logic lives in core/auth_flows.py; this file only
+adapts HTTP to it.
 
-POST /api/auth/login  — exchange username + password for a JWT
-GET  /api/auth/me     — return the user identified by the current token
-
-There is no registration endpoint by design — users are seeded from the
-`AUTH_USERS` env var at startup (see `app.core.auth.seed_users_from_env`).
+Public (no token — listed in core/auth.PUBLIC_ENDPOINTS):
+  POST /api/auth/signup               {name, email, password}  -> check_email
+  POST /api/auth/resend-verification  {email}                  -> check_email
+  POST /api/auth/verify-email         {token}                  -> session
+  POST /api/auth/login                {email, password}        -> session
+  POST /api/auth/forgot-password      {email}                  -> check_email
+  POST /api/auth/set-password         {token, password}        -> session
+Signed in:
+  GET  /api/auth/me                                            -> user
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime, timezone
+from typing import Optional
+
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.core.auth import (
-    ROLE_USER,
-    CurrentUser,
-    create_access_token,
-    get_current_user,
-    verify_password,
-)
+from app.core import auth_flows as flows
+from app.core.accounts import AccountStore
+from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
+from app.core.email import Mailer, get_mailer
 
 router = APIRouter()
 
 
-class LoginRequest(BaseModel):
-    username: str
+def get_store() -> AccountStore:
+    """FastAPI dependency. Overridden in tests with MemoryAccountStore."""
+    return AccountStore(get_db())
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class SignupRequest(BaseModel):
+    name: Optional[str] = ""
+    email: str
     password: str
 
 
+class EmailRequest(BaseModel):
+    email: str
+
+
+class TokenRequest(BaseModel):
+    token: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class SetPasswordRequest(BaseModel):
+    token: str
+    password: str
+
+
+@router.post("/api/auth/signup")
+def signup(body: SignupRequest, store=Depends(get_store), mailer: Mailer = Depends(get_mailer)):
+    return flows.signup(store, mailer, name=body.name or "", email=body.email,
+                        password=body.password, now=_now())
+
+
+@router.post("/api/auth/resend-verification")
+def resend_verification(body: EmailRequest, store=Depends(get_store), mailer: Mailer = Depends(get_mailer)):
+    return flows.resend_verification(store, mailer, email=body.email, now=_now())
+
+
+@router.post("/api/auth/verify-email")
+def verify_email(body: TokenRequest, store=Depends(get_store)):
+    return flows.session(flows.verify_email(store, token=body.token, now=_now()))
+
+
 @router.post("/api/auth/login")
-def login(body: LoginRequest):
-    username = body.username.lower().strip()
-    db = get_db()
-    row = db.execute(
-        "SELECT id, username, password_hash, role, is_active FROM users WHERE username = %s",
-        (username,),
-    ).fetchone()
-    if not row or not verify_password(body.password, row[2]):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
+def login(body: LoginRequest, store=Depends(get_store)):
+    return flows.session(flows.login(store, email=body.email, password=body.password))
 
-    if not row[4]:
-        raise HTTPException(status_code=403, detail="This account has been disabled.")
 
-    user_id, user_name, role = row[0], row[1], row[3] or ROLE_USER
-    token = create_access_token(user_id)
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {"id": user_id, "username": user_name, "role": role},
-    }
+@router.post("/api/auth/forgot-password")
+def forgot_password(body: EmailRequest, store=Depends(get_store), mailer: Mailer = Depends(get_mailer)):
+    return flows.forgot_password(store, mailer, email=body.email, now=_now())
+
+
+@router.post("/api/auth/set-password")
+def set_password(body: SetPasswordRequest, store=Depends(get_store)):
+    return flows.session(flows.set_password(store, token=body.token, password=body.password, now=_now()))
 
 
 @router.get("/api/auth/me")
 def me(user: CurrentUser = Depends(get_current_user)):
-    return {"id": user.id, "username": user.username, "role": user.role}
+    return {"id": user.id, "email": user.email, "name": user.name, "role": user.role}

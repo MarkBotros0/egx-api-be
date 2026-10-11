@@ -33,7 +33,7 @@ from app.core.auth import (
 # The allowlist itself
 # ---------------------------------------------------------------------------
 
-def test_only_login_and_the_crons_are_public():
+def test_only_the_ways_in_and_the_crons_are_public():
     """
     Adding an entry here means opening a hole in the app. It should take a
     deliberate edit and a failing test, never a quiet import.
@@ -45,6 +45,11 @@ def test_only_login_and_the_crons_are_public():
     """
     assert PUBLIC_ENDPOINTS == frozenset({
         ("POST", "/api/auth/login"),
+        ("POST", "/api/auth/signup"),
+        ("POST", "/api/auth/resend-verification"),
+        ("POST", "/api/auth/verify-email"),
+        ("POST", "/api/auth/forgot-password"),
+        ("POST", "/api/auth/set-password"),
         ("POST", "/api/pe/refresh"),
         ("POST", "/api/cron/risk_snapshot"),
     })

@@ -177,7 +177,14 @@ def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
 # internet since the day it shipped" — which is what nine of these endpoints
 # were doing before this gate existed.
 PUBLIC_ENDPOINTS = frozenset({
-    ("POST", "/api/auth/login"),      # the way in
+    # The ways in. None of them returns data without a valid credential or
+    # emailed link; the email-taking ones always answer "check_email".
+    ("POST", "/api/auth/login"),
+    ("POST", "/api/auth/signup"),
+    ("POST", "/api/auth/resend-verification"),
+    ("POST", "/api/auth/verify-email"),
+    ("POST", "/api/auth/forgot-password"),
+    ("POST", "/api/auth/set-password"),
     ("POST", "/api/pe/refresh"),      # scheduled; guarded by PE_REFRESH_SECRET
     ("POST", "/api/cron/risk_snapshot"),  # scheduled; guarded by CRON_SECRET
 })
