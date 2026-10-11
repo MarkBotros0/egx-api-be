@@ -93,24 +93,42 @@ def _get_pool() -> ConnectionPool:
 
 
 def init_db(db: _DB) -> None:
+    # Email accounts (2026-10-12). A database that still has the old
+    # username-based table keeps it — CREATE IF NOT EXISTS skips — and
+    # seed_users_from_env refuses to run until
+    # scripts/reset_users_for_email_auth.py has replaced it.
+    #
+    # `role` is NOT settable through any API: it is stamped from the
+    # AUTH_ADMINS env var at boot (core/auth.seed_users_from_env).
     db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            password_hash TEXT,
+            email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+            google_sub TEXT UNIQUE,
+            apple_sub TEXT UNIQUE,
+            apple_refresh_token TEXT,
+            role TEXT NOT NULL DEFAULT 'user',
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            last_email_at TEXT,
             created_at TEXT NOT NULL
         )
     """)
-    # Additive and idempotent, matching the rest of init_db — there is no
-    # migration framework, so new columns land on the next cold start.
-    #
-    # `role` is NOT settable through the admin API: it is stamped from the
-    # AUTH_ADMINS env var at boot (see core/auth.seed_users_from_env), which
-    # makes privilege escalation through /api/users structurally impossible
-    # and keeps admin status declared in one auditable place that survives a
-    # DB reset.
-    db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'")
-    db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE")
+    # Emailed links (verify / reset / invite). Only the SHA-256 of the raw
+    # token is stored — see core/accounts.py.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS auth_tokens (
+            token_hash TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id, purpose)")
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS portfolio (
