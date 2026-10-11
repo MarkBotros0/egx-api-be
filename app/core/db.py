@@ -562,9 +562,10 @@ def init_db(db: _DB) -> None:
         )
     """)
 
-    # One row per (user, stock, session, direction). The UNIQUE constraint is
-    # the duplicate guard of last resort: two overlapping cron calls cannot
-    # both queue the same push.
+    # One row per (user, stock, session, direction). The UNIQUE constraint
+    # dedupes the QUEUE: two overlapping cron calls cannot both queue the same
+    # push. Sending it twice is prevented separately, by the delivery claim
+    # in core/expo_push.py.
     db.execute("""
         CREATE TABLE IF NOT EXISTS alert_log (
             id TEXT PRIMARY KEY,
@@ -581,6 +582,9 @@ def init_db(db: _DB) -> None:
             UNIQUE (user_id, symbol, session_date, direction)
         )
     """)
+    # Delivery claim: a row is moved to 'sending' (stamped here) by the call
+    # that will push it, so an overlapping call cannot send it too.
+    db.execute("ALTER TABLE alert_log ADD COLUMN IF NOT EXISTS claimed_at TEXT")
     db.execute("CREATE INDEX IF NOT EXISTS idx_alert_log_status ON alert_log(status)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_alert_log_user_session ON alert_log(user_id, session_date)")
 

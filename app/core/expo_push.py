@@ -6,13 +6,23 @@ Runs inside the scoring cron's time budget, so every failure is soft: a row
 that could not be sent stays pending for the next call, and gives up after
 ALERT_MAX_ATTEMPTS. Receipts are not polled; DeviceNotRegistered on the ticket
 already catches the common dead-token case.
+
+DELIVERY CLAIM. Overlapping cron calls (two scheduled jobs on the same minute,
+a manual trigger) would otherwise both read the same pending rows and push
+them twice. Rows are CLAIMED first — one UPDATE ... FOR UPDATE SKIP LOCKED that
+moves them to 'sending' — so a concurrent call claims nothing it does not own.
+Results are written per Expo batch, which narrows the window in which a killed
+call has sent a batch but not recorded it; a row left in 'sending' by such a
+call is reclaimed after CLAIM_STALE_SECONDS.
 """
 
 from __future__ import annotations
 
 import json
+import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Optional
 
 from app.core.constants import (
     ALERT_CHANNEL_ID,
@@ -24,6 +34,10 @@ from app.core.constants import (
 from app.core.score_alerts import Signal, alert_copy, in_quiet_hours
 
 _PENDING_LIMIT = 200
+
+# A 'sending' row older than this belongs to a call that died mid-delivery
+# (Vercel kills at 30s, so two minutes is far past any live call).
+CLAIM_STALE_SECONDS = 120
 
 
 def send_expo(messages: list, timeout: float = EXPO_TIMEOUT_SECONDS) -> list:
@@ -37,18 +51,40 @@ def send_expo(messages: list, timeout: float = EXPO_TIMEOUT_SECONDS) -> list:
         return json.loads(resp.read().decode("utf-8")).get("data") or []
 
 
-def _bump(db, row_id: str, attempts: int) -> bool:
-    """attempts+1; True when the row is now failed for good."""
-    if attempts + 1 >= ALERT_MAX_ATTEMPTS:
-        db.execute("UPDATE alert_log SET status = 'failed', attempts = attempts + 1 "
-                   "WHERE id = %s", (row_id,))
-        return True
-    db.execute("UPDATE alert_log SET status = 'pending', attempts = attempts + 1 "
-               "WHERE id = %s", (row_id,))
-    return False
+def _mark(db, sql: str, ids: list, *params) -> None:
+    if ids:
+        db.execute(f"UPDATE alert_log SET {sql} WHERE id = ANY(%s)", params + (ids,))
 
 
-def deliver_pending(db, now_utc: datetime, sender=send_expo) -> dict:
+def _claim(db, now_utc: datetime) -> list:
+    now = now_utc.isoformat()
+    stale = (now_utc - timedelta(seconds=CLAIM_STALE_SECONDS)).isoformat()
+    db.execute(
+        "UPDATE alert_log SET status = CASE WHEN attempts >= %s THEN 'failed' "
+        "ELSE 'pending' END WHERE status = 'sending' AND claimed_at < %s",
+        (ALERT_MAX_ATTEMPTS, stale),
+    )
+    rows = db.execute(
+        "UPDATE alert_log SET status = 'sending', claimed_at = %s "
+        "WHERE id IN (SELECT id FROM alert_log WHERE status = 'pending' "
+        f"ORDER BY session_date DESC, created_at LIMIT {_PENDING_LIMIT} "
+        "FOR UPDATE SKIP LOCKED) "
+        "RETURNING id, user_id, symbol, session_date, direction, "
+        "score_before, score_after, attempts",
+        (now,),
+    ).fetchall()
+    # RETURNING has no order; newest session first (stable for the rest).
+    return sorted(rows, key=lambda r: r[3], reverse=True)
+
+
+def deliver_pending(db, now_utc: datetime, sender=send_expo,
+                    deadline: Optional[float] = None,
+                    clock=time.monotonic) -> dict:
+    """
+    Send this call's share of the queue. `deadline` is a `clock()` value
+    past which no new Expo batch starts; rows claimed but not started go
+    back to 'pending' without an attempt counted.
+    """
     result = {"sent": 0, "failed": 0, "expired": 0, "held": False}
     if in_quiet_hours(now_utc):
         result["held"] = True
@@ -63,11 +99,7 @@ def deliver_pending(db, now_utc: datetime, sender=send_expo) -> dict:
         ).fetchall()
         result["expired"] = len(expired)
 
-    rows = db.execute(
-        "SELECT id, user_id, symbol, session_date, direction, score_before, "
-        "score_after, attempts FROM alert_log "
-        f"WHERE status = 'pending' ORDER BY created_at LIMIT {_PENDING_LIMIT}"
-    ).fetchall()
+    rows = _claim(db, now_utc)
     if not rows:
         return result
 
@@ -78,28 +110,40 @@ def deliver_pending(db, now_utc: datetime, sender=send_expo) -> dict:
     ).fetchall():
         tokens.setdefault(user_id, []).append(token)
 
-    messages, owners = [], []          # owners[i] = (row, token) for messages[i]
+    # Batches of whole rows (a row's messages never straddle two batches), so
+    # each row's outcome is known when its batch returns.
+    batches: list = []                 # [(messages, owners)]; owners[i] = (row, token)
+    no_device = []
     for row in rows:
         row_id, user_id, symbol, session, direction, before, after, _ = row
         if not tokens.get(user_id):
-            db.execute("UPDATE alert_log SET status = 'failed' WHERE id = %s", (row_id,))
-            result["failed"] += 1
+            no_device.append(row_id)
             continue
         title, body = alert_copy(Signal(user_id, symbol, session, direction,
                                         before or 0.0, after or 0.0))
-        for token in tokens[user_id]:
-            messages.append({
-                "to": token, "title": title, "body": body,
-                "data": {"type": "score_alert", "symbol": symbol, "session": session},
-                "channelId": ALERT_CHANNEL_ID, "sound": None,
-            })
-            owners.append((row, token))
+        msgs = [{
+            "to": token, "title": title, "body": body,
+            "data": {"type": "score_alert", "symbol": symbol, "session": session},
+            "channelId": ALERT_CHANNEL_ID, "sound": None,
+        } for token in tokens[user_id]]
+        if not batches or len(batches[-1][0]) + len(msgs) > EXPO_BATCH_SIZE:
+            batches.append(([], []))
+        batches[-1][0].extend(msgs)
+        batches[-1][1].extend((row, t) for t in tokens[user_id])
 
-    outcome: dict = {}                 # row_id -> (row, any_ok)
+    _mark(db, "status = 'failed'", no_device)
+    result["failed"] += len(no_device)
+
     now = now_utc.isoformat()
-    for start in range(0, len(messages), EXPO_BATCH_SIZE):
-        chunk = messages[start:start + EXPO_BATCH_SIZE]
-        chunk_owners = owners[start:start + EXPO_BATCH_SIZE]
+    for index, (chunk, chunk_owners) in enumerate(batches):
+        if deadline is not None and clock() >= deadline:
+            unstarted = []
+            for _, owners in batches[index:]:
+                for row, _ in owners:
+                    if row[0] not in unstarted:
+                        unstarted.append(row[0])
+            _mark(db, "status = 'pending', claimed_at = NULL", unstarted)
+            break
         try:
             tickets = sender(chunk)
         except Exception as e:
@@ -111,6 +155,7 @@ def deliver_pending(db, now_utc: datetime, sender=send_expo) -> dict:
         if not isinstance(tickets, list):
             tickets = []
         tickets = (tickets[:len(chunk)] + [None] * len(chunk))[:len(chunk)]
+        outcome: dict = {}             # row_id -> (row, any_ok), insertion-ordered
         for (row, token), ticket in zip(chunk_owners, tickets):
             ok = isinstance(ticket, dict) and ticket.get("status") == "ok"
             details = ticket.get("details") if isinstance(ticket, dict) else None
@@ -119,11 +164,14 @@ def deliver_pending(db, now_utc: datetime, sender=send_expo) -> dict:
             prev = outcome.get(row[0], (row, False))
             outcome[row[0]] = (row, prev[1] or ok)
 
-    for row_id, (row, any_ok) in outcome.items():
-        if any_ok:
-            db.execute("UPDATE alert_log SET status = 'sent', sent_at = %s WHERE id = %s",
-                       (now, row_id))
-            result["sent"] += 1
-        elif _bump(db, row_id, row[7]):
-            result["failed"] += 1
+        sent = [rid for rid, (_, ok) in outcome.items() if ok]
+        retry = [rid for rid, (row, ok) in outcome.items()
+                 if not ok and row[7] + 1 < ALERT_MAX_ATTEMPTS]
+        give_up = [rid for rid, (row, ok) in outcome.items()
+                   if not ok and row[7] + 1 >= ALERT_MAX_ATTEMPTS]
+        _mark(db, "status = 'sent', sent_at = %s", sent, now)
+        _mark(db, "status = 'pending', attempts = attempts + 1, claimed_at = NULL", retry)
+        _mark(db, "status = 'failed', attempts = attempts + 1", give_up)
+        result["sent"] += len(sent)
+        result["failed"] += len(give_up)
     return result

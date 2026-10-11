@@ -22,6 +22,7 @@ def test_init_db_creates_the_four_alert_tables():
     for table in ("push_devices", "alert_preferences", "score_baseline", "alert_log"):
         assert f"CREATE TABLE IF NOT EXISTS {table}" in sql, table
     assert "UNIQUE (user_id, symbol, session_date, direction)" in sql
+    assert "ALTER TABLE alert_log ADD COLUMN IF NOT EXISTS claimed_at TEXT" in sql
     assert "PRIMARY KEY (symbol, session_date)" in sql
     for column in CATEGORY_COLUMNS:
         assert f"{column} DOUBLE PRECISION" in sql

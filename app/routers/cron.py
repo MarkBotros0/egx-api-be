@@ -120,18 +120,27 @@ def _require_secret(supplied: Optional[str]) -> None:
 # only if they START by this mark. Anything not sent stays pending.
 ALERTS_START_LIMIT_SECONDS = 22.0
 
+# No new Expo batch STARTS past this many seconds into the call; with
+# EXPO_TIMEOUT_SECONDS (3s) that still ends before Vercel's 30s. Rows claimed
+# but not started go back to pending for the next call.
+ALERTS_SEND_DEADLINE_SECONDS = 26.0
+
 
 def run_alerts(db, scored: dict, now_iso: str, elapsed: float,
-               deliver=deliver_pending) -> dict:
+               deliver=deliver_pending,
+               deadline: Optional[float] = None) -> dict:
+    """`deadline` is a time.monotonic() value; by default 26s after `elapsed` began."""
     out = {"queued": 0, "sent": 0, "skipped": None, "error": None}
     if elapsed > ALERTS_START_LIMIT_SECONDS:
         out["skipped"] = "deadline"
         return out
+    if deadline is None:
+        deadline = time.monotonic() - elapsed + ALERTS_SEND_DEADLINE_SECONDS
     try:
         macro = read_cached_macro(db) if scored else None
         out["queued"] = run_detection(db, scored, macro, now_iso)
         prune_baselines(db, now_iso[:10])
-        delivered = deliver(db, datetime.fromisoformat(now_iso))
+        delivered = deliver(db, datetime.fromisoformat(now_iso), deadline=deadline)
         out["sent"] = delivered.get("sent", 0)
         if delivered.get("held"):
             out["skipped"] = "quiet-hours"
@@ -291,6 +300,7 @@ def risk_snapshot(
     which is useful for a controlled manual sweep. It stores no state either.
     """
     _require_secret(x_cron_secret)
+    call_started = time.monotonic()
 
     from app.vendor.egxpy import get_OHLCV_data
 
@@ -452,7 +462,8 @@ def risk_snapshot(
         written += 1
 
     alerts = run_alerts(db, scored_for_alerts, now,
-                        time.monotonic() - started)
+                        time.monotonic() - started,
+                        deadline=call_started + ALERTS_SEND_DEADLINE_SECONDS)
 
     # How much of the universe is still carrying a measurement from before this
     # run started. This is the number to watch on the scheduler: it should fall

@@ -34,7 +34,7 @@ def test_quiet_hours_are_reported(monkeypatch):
     monkeypatch.setattr(cron, "run_detection", lambda *a, **k: 0)
     monkeypatch.setattr(cron, "prune_baselines", lambda *a, **k: None)
     out = cron.run_alerts(object(), {}, "2026-10-11T21:00:00+00:00", 5.0,
-                          deliver=lambda db, now: {"sent": 0, "held": True})
+                          deliver=lambda db, now, **kw: {"sent": 0, "held": True})
     assert out["skipped"] == "quiet-hours"
 
 
@@ -77,11 +77,33 @@ def test_run_alerts_happy_path(monkeypatch):
     monkeypatch.setattr(cron, "run_detection", lambda *a, **k: 2)
     monkeypatch.setattr(cron, "prune_baselines", lambda *a, **k: None)
 
-    def deliver(db, now):
+    def deliver(db, now, deadline=None):
         seen["now"] = now
+        seen["deadline"] = deadline
         return {"sent": 1, "held": False}
 
     out = cron.run_alerts(object(), {"COMI": {}}, "2026-10-11T09:00:00+00:00",
                           5.0, deliver=deliver)
     assert out == {"queued": 2, "sent": 1, "skipped": None, "error": None}
     assert isinstance(seen["now"], datetime) and seen["now"].tzinfo is not None
+    assert seen["deadline"] is not None
+
+
+def test_run_alerts_passes_a_send_deadline_of_26s_into_the_call(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cron, "read_cached_macro", lambda db: None)
+    monkeypatch.setattr(cron, "run_detection", lambda *a, **k: 0)
+    monkeypatch.setattr(cron, "prune_baselines", lambda *a, **k: None)
+    monkeypatch.setattr(cron.time, "monotonic", lambda: 1000.0)
+
+    def deliver(db, now, deadline=None):
+        seen["deadline"] = deadline
+        return {"sent": 0, "held": False}
+
+    cron.run_alerts(object(), {}, "2026-10-11T09:00:00+00:00", 5.0, deliver=deliver)
+    assert seen["deadline"] == 1000.0 - 5.0 + 26.0
+    cron.run_alerts(object(), {}, "2026-10-11T09:00:00+00:00", 5.0, deliver=deliver,
+                    deadline=1234.0)
+    assert seen["deadline"] == 1234.0
+    src = inspect.getsource(cron.risk_snapshot)
+    assert "deadline=call_started + ALERTS_SEND_DEADLINE_SECONDS" in src
