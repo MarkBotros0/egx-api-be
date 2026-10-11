@@ -66,6 +66,25 @@ def fetch_macro(db):
     return result
 
 
+def read_cached_macro(db):
+    """Latest cached macro regardless of age; never touches the network.
+
+    For callers on a tight time budget (the alert hook): a stale regime is
+    better than a fetch that can outlive the request. None when there is
+    nothing cached or the read fails.
+    """
+    try:
+        rows = db.execute(
+            "SELECT key, value, previous_value, change_pct, updated_at FROM macro_data"
+        ).fetchall()
+        cached = {r[0]: {"value": r[1], "previous_value": r[2], "change_pct": r[3], "updated_at": r[4]} for r in rows}
+        if not cached:
+            return None
+        return _format_cached(cached, db)
+    except Exception:
+        return None
+
+
 def _fetch_egx30():
     """Fetch EGX30 index data via egxpy."""
     try:

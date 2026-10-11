@@ -65,7 +65,7 @@ from app.core.expo_push import deliver_pending
 from app.core.extras_builder import build_composite_extras
 from app.core.index_membership import get_index_membership
 from app.core.indicators import compute_all
-from app.core.macro_fetch import fetch_macro, read_risk_free_rate
+from app.core.macro_fetch import read_cached_macro, read_risk_free_rate
 from app.core.pe_fetch import get_pe_for_symbols
 from app.core.risk_grade import is_tradeable, measure
 
@@ -128,7 +128,7 @@ def run_alerts(db, scored: dict, now_iso: str, elapsed: float,
         out["skipped"] = "deadline"
         return out
     try:
-        macro = fetch_macro(db) if scored else None
+        macro = read_cached_macro(db) if scored else None
         out["queued"] = run_detection(db, scored, macro, now_iso)
         prune_baselines(db, now_iso[:10])
         delivered = deliver(db, datetime.fromisoformat(now_iso))
@@ -457,13 +457,13 @@ def risk_snapshot(
         _upsert(symbol, stats, is_tradeable(close, volume), ok=True, card=card)
         written += 1
 
+    alerts = run_alerts(db, scored_for_alerts, now,
+                        time.monotonic() - started)
+
     # How much of the universe is still carrying a measurement from before this
     # run started. This is the number to watch on the scheduler: it should fall
     # to 0 within a pass and stay there. If it never reaches 0, some symbols are
     # failing every time and `failed` names them.
-    alerts = run_alerts(db, scored_for_alerts, now,
-                        time.monotonic() - started)
-
     after, after_failures = _snapshot_state(db)   # one query, not one per symbol
     stale_remaining = sum(1 for s in universe if (after.get(s) or "") < now)
     # Symbols the feed keeps refusing. Expected to be large on this market:
