@@ -1563,8 +1563,10 @@ Past that, alerts are skipped (`skipped: "deadline"`) and everything stays
   `(user_id, symbol, session_date, direction)` + `ON CONFLICT DO NOTHING` (and
   detection skips already-logged keys); SENDING is guarded by a delivery claim.
   `deliver_pending` first reclaims rows stuck in `sending` for over 2 min
-  (`claimed_at`; back to `pending`, or `failed` at the attempt limit), then
-  claims up to 200 `pending` rows newest session first with one
+  (`claimed_at`; the lost try counts as an attempt: back to `pending` with
+  `attempts + 1`, or `failed` once that reaches `ALERT_MAX_ATTEMPTS`) - BEFORE
+  the expiry step, so a reclaimed row from an older session expires in the same
+  call - then claims up to 200 `pending` rows newest session first with one
   `UPDATE ... SET status = 'sending' ... FOR UPDATE SKIP LOCKED RETURNING`, so a
   concurrent call claims nothing it does not own. Outcomes are written per Expo
   batch (`sent` / back to `pending` with `attempts + 1` / `failed`). No new batch

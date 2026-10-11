@@ -56,14 +56,22 @@ def _mark(db, sql: str, ids: list, *params) -> None:
         db.execute(f"UPDATE alert_log SET {sql} WHERE id = ANY(%s)", params + (ids,))
 
 
-def _claim(db, now_utc: datetime) -> list:
-    now = now_utc.isoformat()
+def _reclaim(db, now_utc: datetime) -> None:
+    """
+    Rows left in 'sending' by a call that died. The lost try counts as an
+    attempt, so a row that kills every call still ends at 'failed'.
+    """
     stale = (now_utc - timedelta(seconds=CLAIM_STALE_SECONDS)).isoformat()
     db.execute(
-        "UPDATE alert_log SET status = CASE WHEN attempts >= %s THEN 'failed' "
-        "ELSE 'pending' END WHERE status = 'sending' AND claimed_at < %s",
+        "UPDATE alert_log SET attempts = attempts + 1, "
+        "status = CASE WHEN attempts + 1 >= %s THEN 'failed' ELSE 'pending' END, "
+        "claimed_at = NULL WHERE status = 'sending' AND claimed_at < %s",
         (ALERT_MAX_ATTEMPTS, stale),
     )
+
+
+def _claim(db, now_utc: datetime) -> list:
+    now = now_utc.isoformat()
     rows = db.execute(
         "UPDATE alert_log SET status = 'sending', claimed_at = %s "
         "WHERE id IN (SELECT id FROM alert_log WHERE status = 'pending' "
@@ -89,6 +97,9 @@ def deliver_pending(db, now_utc: datetime, sender=send_expo,
     if in_quiet_hours(now_utc):
         result["held"] = True
         return result
+
+    # Before expiry, so a reclaimed row from an older session expires now.
+    _reclaim(db, now_utc)
 
     latest = (db.execute("SELECT MAX(last_bar_date) FROM risk_snapshot").fetchone() or [None])[0]
     if latest:

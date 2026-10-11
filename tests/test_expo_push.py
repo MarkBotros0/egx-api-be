@@ -183,18 +183,28 @@ def test_rows_are_claimed_with_skip_locked_newest_session_first():
     assert params == (DAY.isoformat(),)
 
 
-def test_stale_sending_rows_are_reclaimed_before_the_claim():
+def test_stale_sending_rows_are_reclaimed_before_expiry_and_the_claim():
+    """Reclaim first, so a reclaimed row from an older session expires this call."""
     db = _db([], [])
     deliver_pending(db, DAY, sender=lambda m: [])
     sqls = [s for s, _ in db.log]
     reclaim = next(i for i, s in enumerate(sqls) if "WHERE status = 'sending'" in s)
+    expire = next(i for i, s in enumerate(sqls) if "SET status = 'expired'" in s)
     claim = next(i for i, s in enumerate(sqls) if "SET status = 'sending'" in s)
-    assert reclaim < claim
+    assert reclaim < expire < claim
     sql, params = db.log[reclaim]
-    assert ("SET status = CASE WHEN attempts >= %s THEN 'failed' ELSE 'pending' END"
-            in sql)
     assert "claimed_at < %s" in sql
     assert params == (3, "2026-10-11T08:58:00+00:00")
+
+
+def test_reclaim_counts_the_lost_attempt_and_fails_at_the_limit():
+    db = _db([], [])
+    deliver_pending(db, DAY, sender=lambda m: [])
+    [(sql, _)] = [(s, p) for s, p in db.log if "WHERE status = 'sending'" in s]
+    assert "attempts = attempts + 1" in sql
+    assert ("status = CASE WHEN attempts + 1 >= %s THEN 'failed' ELSE 'pending' END"
+            in sql)
+    assert "claimed_at = NULL" in sql
 
 
 def test_a_second_overlapping_call_that_claims_nothing_sends_nothing():
