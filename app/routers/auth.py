@@ -43,7 +43,7 @@ def login(body: LoginRequest):
         raise HTTPException(status_code=403, detail="This account has been disabled.")
 
     user_id, user_name, role = row[0], row[1], row[3] or ROLE_USER
-    token = create_access_token(user_id, user_name)
+    token = create_access_token(user_id)
     return {
         "access_token": token,
         "token_type": "bearer",

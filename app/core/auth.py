@@ -37,7 +37,8 @@ GENERATED_PASSWORD_LENGTH = 16
 @dataclass
 class CurrentUser:
     id: str
-    username: str
+    email: str
+    name: str = ""
     role: str = ROLE_USER
     is_active: bool = True
 
@@ -78,18 +79,17 @@ def _require_secret() -> str:
     return AUTH_SECRET
 
 
-def create_access_token(user_id: str, username: str) -> str:
+def create_access_token(user_id: str) -> str:
     secret = _require_secret()
     now = datetime.now(tz=timezone.utc)
     payload = {
         "sub": user_id,
-        "username": username,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(days=TOKEN_LIFETIME_DAYS)).timestamp()),
     }
-    # Role and active-state are deliberately NOT claims. Tokens live 30 days,
-    # so a claim would mean disabling a user does nothing for a month — see
-    # get_current_user, which reads them from the row on every request.
+    # Role, email and active-state are deliberately NOT claims. Tokens live
+    # 30 days, so a claim would mean disabling a user does nothing for a
+    # month — see get_current_user, which reads them from the row every time.
     return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
 
 
@@ -108,13 +108,13 @@ def _load_user(user_id: str) -> Optional[CurrentUser]:
     from app.core.db import get_db
 
     row = get_db().execute(
-        "SELECT id, username, role, is_active FROM users WHERE id = %s",
+        "SELECT id, email, name, role, is_active FROM users WHERE id = %s",
         (user_id,),
     ).fetchone()
-    if not row or not row[3]:
+    if not row or not row[4]:
         return None
-    return CurrentUser(id=row[0], username=row[1], role=row[2] or ROLE_USER,
-                       is_active=bool(row[3]))
+    return CurrentUser(id=row[0], email=row[1], name=row[2] or "",
+                       role=row[3] or ROLE_USER, is_active=bool(row[4]))
 
 
 def get_current_user(authorization: Optional[str] = Header(None)) -> CurrentUser:
@@ -131,8 +131,7 @@ def get_current_user(authorization: Optional[str] = Header(None)) -> CurrentUser
     token = authorization.split(" ", 1)[1].strip()
     payload = _decode_token(token)
     user_id = payload.get("sub")
-    username = payload.get("username")
-    if not user_id or not username:
+    if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token payload")
 
     user = _load_user(user_id)
@@ -205,21 +204,18 @@ def authenticate_request(method: str, path: str, authorization: Optional[str]):
     return get_current_user(authorization)
 
 
-def _parse_admin_usernames() -> set:
+def _parse_admin_emails() -> set:
     raw = os.environ.get("AUTH_ADMINS", "").strip()
-    return {u.strip().lower() for u in raw.split(",") if u.strip()}
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 
 def seed_users_from_env(db) -> None:
-    """Create users from AUTH_USERS and stamp admin roles from AUTH_ADMINS.
+    """Create and promote the admins listed in AUTH_ADMINS (emails).
 
-    Format: `AUTH_USERS=alice:pw1,bob:pw2` — each entry `username:password`.
-            `AUTH_ADMINS=alice` — comma-separated usernames.
-
-    Passwords here are for BOOTSTRAP only. An existing user's password hash is
-    never touched: admins reset passwords through /api/users, and rewriting the
-    hash on every boot (as this used to do) would silently revert every reset
-    on the next cold start. To change a password, use the admin tab.
+    `AUTH_ADMINS=mark3essam@gmail.com` — comma-separated emails. A listed
+    email with no account gets one: verified, NO password (sign in with
+    Google, or use Forgot password). Nothing else is ever created here, and
+    no password ever lives in an env var.
 
     AUTH_ADMINS is authoritative for admin status and is re-applied on every
     boot, so it survives a DB reset and you cannot lock yourself out by
@@ -227,39 +223,30 @@ def seed_users_from_env(db) -> None:
     when AUTH_ADMINS is non-empty — a blank or unset var must never strip
     every admin and leave the app unmanageable.
     """
-    admins = _parse_admin_usernames()
-    raw = os.environ.get("AUTH_USERS", "").strip()
+    from app.core.accounts import AccountStore, iso
 
-    now = datetime.utcnow().isoformat() + "Z"
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if not entry or ":" not in entry:
-            continue
-        username, password = entry.split(":", 1)
-        username = username.strip().lower()
-        password = password.strip()
-        if not username or not password:
-            continue
+    admins = _parse_admin_emails()
+    if not admins:
+        return
+    if AccountStore(db).users_table_is_legacy():
+        print("[auth] users table predates email accounts — run "
+              "scripts/reset_users_for_email_auth.py; seeding skipped")
+        return
 
-        existing = db.execute(
-            "SELECT id FROM users WHERE username = %s", (username,)
-        ).fetchone()
-        if not existing:
-            db.execute(
-                "INSERT INTO users (id, username, password_hash, created_at, role, is_active) "
-                "VALUES (%s, %s, %s, %s, %s, TRUE)",
-                (str(uuid.uuid4()), username, hash_password(password), now,
-                 ROLE_ADMIN if username in admins else ROLE_USER),
-            )
-
-    if admins:
+    now = iso(datetime.now(timezone.utc))
+    for email in sorted(admins):
         db.execute(
-            "UPDATE users SET role = %s WHERE username = ANY(%s) AND role <> %s",
-            (ROLE_ADMIN, list(admins), ROLE_ADMIN),
+            "INSERT INTO users (id, email, name, password_hash, email_verified, role, "
+            "is_active, created_at) VALUES (%s, %s, '', NULL, TRUE, %s, TRUE, %s) "
+            "ON CONFLICT (email) DO NOTHING",
+            (str(uuid.uuid4()), email, ROLE_ADMIN, now),
         )
-        db.execute(
-            "UPDATE users SET role = %s WHERE NOT (username = ANY(%s)) AND role <> %s",
-            (ROLE_USER, list(admins), ROLE_USER),
-        )
-
+    db.execute(
+        "UPDATE users SET role = %s WHERE email = ANY(%s) AND role <> %s",
+        (ROLE_ADMIN, sorted(admins), ROLE_ADMIN),
+    )
+    db.execute(
+        "UPDATE users SET role = %s WHERE NOT (email = ANY(%s)) AND role <> %s",
+        (ROLE_USER, sorted(admins), ROLE_USER),
+    )
     db.commit()

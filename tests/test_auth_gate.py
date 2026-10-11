@@ -178,9 +178,9 @@ def test_a_missing_bearer_prefix_is_rejected():
 def test_a_valid_token_for_an_active_user_passes(monkeypatch):
     monkeypatch.setattr(
         auth_mod, "_load_user",
-        lambda uid: CurrentUser(id=uid, username="sara", role="user"),
+        lambda uid: CurrentUser(id=uid, email="sara@example.com", role="user"),
     )
-    token = create_access_token("user-1", "sara")
+    token = create_access_token("user-1")
     user = authenticate_request("GET", "/api/tickers", f"Bearer {token}")
     assert user.id == "user-1"
 
@@ -188,7 +188,7 @@ def test_a_valid_token_for_an_active_user_passes(monkeypatch):
 def test_a_valid_token_for_a_DISABLED_user_is_still_rejected(monkeypatch):
     """The gate must not be weaker than the per-route dependency it backs up."""
     monkeypatch.setattr(auth_mod, "_load_user", lambda uid: None)
-    token = create_access_token("user-1", "sara")
+    token = create_access_token("user-1")
     with pytest.raises(HTTPException) as e:
         authenticate_request("GET", "/api/tickers", f"Bearer {token}")
     assert e.value.status_code == 401

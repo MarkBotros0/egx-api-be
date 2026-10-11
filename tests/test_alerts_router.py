@@ -15,7 +15,7 @@ import app.routers.alerts as alerts_mod  # noqa: E402
 from app.core.auth import CurrentUser  # noqa: E402
 from alert_fakes import FakeDB  # noqa: E402
 
-ME = CurrentUser(id="u1", username="sara")
+ME = CurrentUser(id="u1", email="sara@example.com")
 
 
 @pytest.fixture
