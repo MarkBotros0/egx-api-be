@@ -50,6 +50,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query
 
+from app.core.alert_store import capture_baseline, prune_baselines, read_previous_rows, run_detection
 from app.core.cache import get as cache_get, make_key, set as cache_set
 from app.core.card_snapshot import SPARKLINE_BARS, upsert_snapshot
 from app.core.composite import CATEGORY_ORDER, score_categories
@@ -60,10 +61,11 @@ from app.core.constants import (
     INTERNAL_BARS_MIN,
 )
 from app.core.db import get_db
+from app.core.expo_push import deliver_pending
 from app.core.extras_builder import build_composite_extras
 from app.core.index_membership import get_index_membership
 from app.core.indicators import compute_all
-from app.core.macro_fetch import read_risk_free_rate
+from app.core.macro_fetch import fetch_macro, read_risk_free_rate
 from app.core.pe_fetch import get_pe_for_symbols
 from app.core.risk_grade import is_tradeable, measure
 
@@ -109,6 +111,33 @@ def _require_secret(supplied: Optional[str]) -> None:
     expected = os.environ.get("CRON_SECRET")
     if expected and supplied != expected:
         raise HTTPException(status_code=403, detail="Forbidden")
+
+
+# Alerts ride this call because the moment a score changes is the moment to
+# check it, and the new category scores are already in hand. They must never
+# cost the scoring: the loop ends by DEADLINE_SECONDS (20s) worst case, and
+# detection plus one Expo call (EXPO_TIMEOUT_SECONDS) fits before Vercel's 30s
+# only if they START by this mark. Anything not sent stays pending.
+ALERTS_START_LIMIT_SECONDS = 22.0
+
+
+def run_alerts(db, scored: dict, now_iso: str, elapsed: float,
+               deliver=deliver_pending) -> dict:
+    out = {"queued": 0, "sent": 0, "skipped": None, "error": None}
+    if elapsed > ALERTS_START_LIMIT_SECONDS:
+        out["skipped"] = "deadline"
+        return out
+    try:
+        macro = fetch_macro(db) if scored else None
+        out["queued"] = run_detection(db, scored, macro, now_iso)
+        prune_baselines(db, now_iso[:10])
+        delivered = deliver(db, datetime.fromisoformat(now_iso))
+        out["sent"] = delivered.get("sent", 0)
+        if delivered.get("held"):
+            out["skipped"] = "quiet-hours"
+    except Exception as e:   # alerts never fail the scoring call
+        out["error"] = type(e).__name__
+    return out
 
 
 # FAILURE_DEMOTION_THRESHOLD (at or above this many consecutive refusals a
@@ -297,6 +326,12 @@ def risk_snapshot(
 
     risk_free_rate_pct = read_risk_free_rate(db)
 
+    try:
+        previous_rows = read_previous_rows(db, slice_)
+    except Exception:
+        previous_rows = {}
+    scored_for_alerts: dict = {}
+
     def _upsert(symbol: str, stats: Optional[dict], tradeable: bool,
                 ok: bool, card: Optional[dict] = None) -> None:
         """
@@ -404,6 +439,14 @@ def risk_snapshot(
         # be risk-graded would leave it permanently blank on the grid.
         card = _score_card(symbol, df)
         if card is not None:
+            try:
+                capture_baseline(db, symbol, previous_rows.get(symbol), card, now)
+            except Exception:
+                pass
+            scored_for_alerts[symbol] = {
+                "session_date": card["last_bar_date"],
+                "categories": card["categories"],
+            }
             scored += 1
 
         if stats is None:
@@ -418,6 +461,9 @@ def risk_snapshot(
     # run started. This is the number to watch on the scheduler: it should fall
     # to 0 within a pass and stay there. If it never reaches 0, some symbols are
     # failing every time and `failed` names them.
+    alerts = run_alerts(db, scored_for_alerts, now,
+                        time.monotonic() - started)
+
     after, after_failures = _snapshot_state(db)   # one query, not one per symbol
     stale_remaining = sum(1 for s in universe if (after.get(s) or "") < now)
     # Symbols the feed keeps refusing. Expected to be large on this market:
@@ -443,6 +489,7 @@ def risk_snapshot(
         # serving older scores than it looks like it is.
         "scored": scored,
         "unscored": max(0, (written + skipped) - scored),
+        "alerts": alerts,
         # Named, not just counted: a symbol that fails every night is a feed
         # problem, and a bare count hides which one.
         "failed": failed,
