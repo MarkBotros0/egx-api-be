@@ -32,6 +32,26 @@ class EmailSendFailed(Exception):
     """SMTP refused or failed; routes turn this into 502."""
 
 
+class BackgroundMailer:
+    """Wraps a Mailer so send() returns at once and delivery runs after the
+    response. Used by routes that must answer in the same time whether or not
+    the address exists (forgot-password, resend-verification); a delivery
+    failure is logged, never raised, for the same reason."""
+
+    def __init__(self, inner, background):
+        self.inner = inner
+        self.background = background
+
+    def send(self, to, subject, text, html) -> None:
+        self.background.add_task(self._deliver, to, subject, text, html)
+
+    def _deliver(self, to, subject, text, html) -> None:
+        try:
+            self.inner.send(to, subject, text, html)
+        except EmailSendFailed as exc:
+            print(f"[email] background send failed: {exc}")
+
+
 class Mailer(Protocol):
     def send(self, to: str, subject: str, text: str, html: str) -> None: ...
 

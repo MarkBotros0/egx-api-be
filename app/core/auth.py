@@ -41,6 +41,7 @@ class CurrentUser:
     name: str = ""
     role: str = ROLE_USER
     is_active: bool = True
+    sessions_valid_after: Optional[str] = None
 
     @property
     def is_admin(self) -> bool:
@@ -108,13 +109,21 @@ def _load_user(user_id: str) -> Optional[CurrentUser]:
     from app.core.db import get_db
 
     row = get_db().execute(
-        "SELECT id, email, name, role, is_active FROM users WHERE id = %s",
+        "SELECT id, email, name, role, is_active, sessions_valid_after FROM users WHERE id = %s",
         (user_id,),
     ).fetchone()
     if not row or not row[4]:
         return None
     return CurrentUser(id=row[0], email=row[1], name=row[2] or "",
-                       role=row[3] or ROLE_USER, is_active=bool(row[4]))
+                       role=row[3] or ROLE_USER, is_active=bool(row[4]),
+                       sessions_valid_after=row[5])
+
+
+def _issued_since(payload: dict, valid_after_iso: str) -> bool:
+    """True unless the token's iat is strictly before `valid_after` (epoch seconds)."""
+    cutoff = int(datetime.strptime(valid_after_iso, "%Y-%m-%dT%H:%M:%SZ")
+                 .replace(tzinfo=timezone.utc).timestamp())
+    return int(payload.get("iat") or 0) >= cutoff
 
 
 def get_current_user(authorization: Optional[str] = Header(None)) -> CurrentUser:
@@ -139,6 +148,10 @@ def get_current_user(authorization: Optional[str] = Header(None)) -> CurrentUser
         # Same message for "deleted" and "disabled" — the distinction is not
         # the caller's business, and either way they must log in again.
         raise HTTPException(status_code=401, detail="Account is not active")
+    if user.sessions_valid_after and not _issued_since(payload, user.sessions_valid_after):
+        # A password was just set from an emailed link: sessions older than
+        # that are dead, so a takeover of an earlier password ends here.
+        raise HTTPException(status_code=401, detail="Session expired — sign in again")
     return user
 
 

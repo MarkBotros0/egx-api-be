@@ -106,12 +106,101 @@ def test_signup_for_a_verified_email_sends_already_registered_and_keeps_the_pass
     assert flows.login(store, email="v@x.com", password="original-pw")
 
 
-def test_signup_again_while_unverified_replaces_password_and_resends(store, mailer):
+def test_resignup_inside_the_cooldown_changes_nothing_so_the_victims_link_wins(store, mailer):
+    """Reviewer's takeover probe: attacker re-signs-up with their own password within 60 s."""
+    _signup(store, mailer)                                   # victim, "correct-horse"
+    victim_link = mailer.last_link()
+    flows.signup(store, mailer, name="Evil", email="mark@gmail.com",
+                 password="attacker-pass", now=NOW + timedelta(seconds=10))
+    assert len(mailer.sent) == 1
+    flows.verify_email(store, token=victim_link, now=NOW + timedelta(seconds=20))
+    assert flows.login(store, email="mark@gmail.com", password="correct-horse")
+    with pytest.raises(HTTPException) as e:
+        flows.login(store, email="mark@gmail.com", password="attacker-pass")
+    assert e.value.status_code == 401
+    assert store.by_email("mark@gmail.com").name == "Mark"
+
+
+def test_resignup_after_the_cooldown_invalidates_the_old_link_and_carries_the_new_password(store, mailer):
+    """Documented residual: after 60 s a re-signup replaces the pending credentials,
+    but only under a NEW link sent to the inbox, and the old link dies."""
     _signup(store, mailer)
+    old = mailer.last_link()
     flows.signup(store, mailer, name="New", email="mark@gmail.com", password="second-pass", now=LATER)
+    assert store.by_email("mark@gmail.com").password_hash is None     # account row untouched
+    with pytest.raises(HTTPException) as e:
+        flows.verify_email(store, token=old, now=LATER)
+    assert e.value.detail == "invalid_or_expired_link"
     flows.verify_email(store, token=mailer.last_link(), now=LATER)
     assert flows.login(store, email="mark@gmail.com", password="second-pass")
     assert store.by_email("mark@gmail.com").name == "New"
+
+
+def test_resignup_of_a_disabled_unverified_account_sends_nothing_and_changes_nothing(store, mailer):
+    _signup(store, mailer)
+    acc = store.by_email("mark@gmail.com")
+    store.update(acc.id, is_active=False)
+    before = (dict(store.tokens), store.by_email("mark@gmail.com"))
+    flows.signup(store, mailer, name="X", email="mark@gmail.com", password="whatever-pw", now=LATER)
+    assert len(mailer.sent) == 1
+    assert (dict(store.tokens), store.by_email("mark@gmail.com")) == before
+
+
+def test_resend_carries_the_original_pending_password(store, mailer):
+    _signup(store, mailer)
+    flows.resend_verification(store, mailer, email="mark@gmail.com", now=LATER)
+    assert len(mailer.sent) == 2
+    flows.verify_email(store, token=mailer.last_link(), now=LATER)
+    assert flows.login(store, email="mark@gmail.com", password="correct-horse")
+    assert store.by_email("mark@gmail.com").name == "Mark"
+
+
+def test_resend_with_no_live_verify_token_sends_nothing(store, mailer):
+    store.create(email="u@x.com", name="", password_hash=None, email_verified=False, now=NOW)
+    flows.resend_verification(store, mailer, email="u@x.com", now=LATER)
+    assert mailer.sent == []
+    _signup(store, mailer)
+    flows.resend_verification(store, mailer, email="mark@gmail.com", now=NOW + timedelta(hours=25))
+    assert len(mailer.sent) == 1          # the only link has expired: nothing to carry forward
+
+
+def test_login_before_verifying_distinguishes_right_and_wrong_pending_password(store, mailer):
+    _signup(store, mailer)
+    with pytest.raises(HTTPException) as e:
+        flows.login(store, email="mark@gmail.com", password="correct-horse", now=LATER)
+    assert e.value.status_code == 403 and e.value.detail == "email_not_verified"
+    with pytest.raises(HTTPException) as e:
+        flows.login(store, email="mark@gmail.com", password="attacker-pass", now=LATER)
+    assert e.value.status_code == 401 and e.value.detail == "Invalid email or password"
+
+
+def test_unknown_email_login_still_runs_a_password_check(store, monkeypatch):
+    calls = []
+    monkeypatch.setattr(flows, "verify_password", lambda p, h: calls.append(h) or False)
+    with pytest.raises(HTTPException):
+        flows.login(store, email="ghost@x.com", password="whatever-pw")
+    assert calls == [flows._DUMMY_HASH]
+
+
+def test_set_password_stamps_sessions_valid_after(store, mailer):
+    _signup(store, mailer)
+    flows.forgot_password(store, mailer, email="mark@gmail.com", now=LATER)
+    acc = flows.set_password(store, token=mailer.last_link(), password="brand-new-pw", now=LATER)
+    assert acc.sessions_valid_after == "2026-10-12T09:02:00Z"
+
+
+def test_tokens_issued_before_sessions_valid_after_are_rejected(monkeypatch):
+    from app.core import auth
+    cutoff = "2026-10-12T09:02:00Z"
+    ts = int(datetime(2026, 10, 12, 9, 2, tzinfo=timezone.utc).timestamp())
+    monkeypatch.setattr(auth, "_load_user", lambda uid: auth.CurrentUser(
+        id=uid, email="a@x.com", sessions_valid_after=cutoff))
+    monkeypatch.setattr(auth, "_decode_token", lambda t: {"sub": "u1", "iat": int(t)})
+    with pytest.raises(HTTPException) as e:
+        auth.get_current_user(f"Bearer {ts - 1}")
+    assert e.value.status_code == 401 and "Session expired" in e.value.detail
+    assert auth.get_current_user(f"Bearer {ts}").id == "u1"          # same second is fine
+    assert auth.get_current_user(f"Bearer {ts + 5}").id == "u1"
 
 
 def test_cooldown_sends_nothing_inside_60_seconds(store, mailer):

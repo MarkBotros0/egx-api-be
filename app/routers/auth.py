@@ -16,14 +16,14 @@ Signed in:
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel
 
 from app.core import auth_flows as flows
 from app.core.accounts import AccountStore
 from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
-from app.core.email import Mailer, get_mailer
+from app.core.email import BackgroundMailer, Mailer, get_mailer
 
 router = APIRouter()
 
@@ -68,8 +68,10 @@ def signup(body: SignupRequest, store=Depends(get_store), mailer: Mailer = Depen
 
 
 @router.post("/api/auth/resend-verification")
-def resend_verification(body: EmailRequest, store=Depends(get_store), mailer: Mailer = Depends(get_mailer)):
-    return flows.resend_verification(store, mailer, email=body.email, now=_now())
+def resend_verification(body: EmailRequest, background: BackgroundTasks, store=Depends(get_store),
+                        mailer: Mailer = Depends(get_mailer)):
+    # Delivery runs after the response so timing does not reveal whether the email exists.
+    return flows.resend_verification(store, BackgroundMailer(mailer, background), email=body.email, now=_now())
 
 
 @router.post("/api/auth/verify-email")
@@ -83,8 +85,9 @@ def login(body: LoginRequest, store=Depends(get_store)):
 
 
 @router.post("/api/auth/forgot-password")
-def forgot_password(body: EmailRequest, store=Depends(get_store), mailer: Mailer = Depends(get_mailer)):
-    return flows.forgot_password(store, mailer, email=body.email, now=_now())
+def forgot_password(body: EmailRequest, background: BackgroundTasks, store=Depends(get_store),
+                    mailer: Mailer = Depends(get_mailer)):
+    return flows.forgot_password(store, BackgroundMailer(mailer, background), email=body.email, now=_now())
 
 
 @router.post("/api/auth/set-password")

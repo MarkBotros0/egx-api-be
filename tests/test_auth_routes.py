@@ -66,3 +66,16 @@ def test_bad_link_is_400(ctx):
 def test_me_requires_a_token(ctx):
     client, _, _ = ctx
     assert client.get("/api/auth/me").status_code == 401
+
+
+def test_forgot_and_resend_answer_identically_for_known_and_unknown_emails(ctx):
+    client, store, mailer = ctx
+    client.post("/api/auth/signup", json={"name": "M", "email": "known@x.com", "password": "correct-horse"})
+    store.update(store.by_email("known@x.com").id, email_verified=True, last_email_at=None)
+    for path in ("/api/auth/forgot-password", "/api/auth/resend-verification"):
+        known = client.post(path, json={"email": "known@x.com"})
+        unknown = client.post(path, json={"email": "nobody@x.com"})
+        assert known.status_code == unknown.status_code == 200
+        assert known.content == unknown.content
+    # The reset email is delivered after the response, by the background task.
+    assert any("set-password" in m["text"] for m in mailer.sent)

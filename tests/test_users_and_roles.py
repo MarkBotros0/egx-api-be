@@ -140,7 +140,7 @@ def test_disabled_user_is_rejected_even_with_a_valid_token(monkeypatch):
     """
     import app.core.auth as auth_mod
 
-    db = FakeDB([("FROM users WHERE id", [("user-1", "sara@example.com", "Sara", ROLE_USER, False)])])
+    db = FakeDB([("FROM users WHERE id", [("user-1", "sara@example.com", "Sara", ROLE_USER, False, None)])])
     monkeypatch.setattr("app.core.db.get_db", lambda: db)
 
     assert auth_mod._load_user("user-1") is None
@@ -149,7 +149,7 @@ def test_disabled_user_is_rejected_even_with_a_valid_token(monkeypatch):
 def test_active_user_loads_with_their_current_role(monkeypatch):
     import app.core.auth as auth_mod
 
-    db = FakeDB([("FROM users WHERE id", [("admin-1", "mark@example.com", "Mark", ROLE_ADMIN, True)])])
+    db = FakeDB([("FROM users WHERE id", [("admin-1", "mark@example.com", "Mark", ROLE_ADMIN, True, None)])])
     monkeypatch.setattr("app.core.db.get_db", lambda: db)
 
     user = auth_mod._load_user("admin-1")

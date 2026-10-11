@@ -113,7 +113,8 @@ def init_db(db: _DB) -> None:
             role TEXT NOT NULL DEFAULT 'user',
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
             last_email_at TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            sessions_valid_after TEXT
         )
     """)
     # Emailed links (verify / reset / invite). Only the SHA-256 of the raw
@@ -125,9 +126,15 @@ def init_db(db: _DB) -> None:
             purpose TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             used_at TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            pending_password_hash TEXT,
+            pending_name TEXT
         )
     """)
+    # Additive, for databases created from earlier commits of this branch.
+    db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS sessions_valid_after TEXT")
+    db.execute("ALTER TABLE auth_tokens ADD COLUMN IF NOT EXISTS pending_password_hash TEXT")
+    db.execute("ALTER TABLE auth_tokens ADD COLUMN IF NOT EXISTS pending_name TEXT")
     db.execute("CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id, purpose)")
 
     db.execute("""

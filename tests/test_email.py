@@ -130,3 +130,22 @@ def test_html_escapes_names():
 def test_greeting_falls_back_when_name_is_empty():
     _, text, _ = verify_message("", "https://x/verify-email?token=t")
     assert text.startswith("Hi,")
+
+
+def test_background_mailer_defers_delivery_and_swallows_send_failures(capsys):
+    from fastapi import BackgroundTasks
+
+    from account_fakes import OutboxMailer
+    from app.core.email import BackgroundMailer
+
+    inner, tasks = OutboxMailer(), BackgroundTasks()
+    BackgroundMailer(inner, tasks).send("a@x.com", "s", "t", "h")
+    assert inner.sent == []                      # nothing until the tasks run
+    import asyncio
+    asyncio.run(tasks())
+    assert [m["to"] for m in inner.sent] == ["a@x.com"]
+
+    inner.fail, tasks = True, BackgroundTasks()
+    BackgroundMailer(inner, tasks).send("b@x.com", "s", "t", "h")
+    asyncio.run(tasks())                         # must not raise
+    assert "background send failed" in capsys.readouterr().out

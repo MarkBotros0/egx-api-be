@@ -100,6 +100,7 @@ class Account:
     is_active: bool
     last_email_at: Optional[str]
     created_at: str
+    sessions_valid_after: Optional[str] = None
 
     @property
     def methods(self) -> list:
@@ -119,11 +120,11 @@ def public_user(a: Account) -> dict:
 
 _COLUMNS = (
     "id, email, name, password_hash, email_verified, google_sub, apple_sub, "
-    "apple_refresh_token, role, is_active, last_email_at, created_at"
+    "apple_refresh_token, role, is_active, last_email_at, created_at, sessions_valid_after"
 )
 _UPDATABLE = {
     "name", "password_hash", "email_verified", "google_sub", "apple_sub",
-    "apple_refresh_token", "is_active", "last_email_at",
+    "apple_refresh_token", "is_active", "last_email_at", "sessions_valid_after",
 }
 
 
@@ -134,7 +135,7 @@ def _row(row) -> Optional[Account]:
         id=row[0], email=row[1], name=row[2] or "", password_hash=row[3],
         email_verified=bool(row[4]), google_sub=row[5], apple_sub=row[6],
         apple_refresh_token=row[7], role=row[8] or "user", is_active=bool(row[9]),
-        last_email_at=row[10], created_at=row[11],
+        last_email_at=row[10], created_at=row[11], sessions_valid_after=row[12],
     )
 
 
@@ -221,7 +222,11 @@ class AccountStore:
         )
         self.db.commit()
 
-    def issue_token(self, user_id: str, purpose: str, now: datetime) -> str:
+    def issue_token(self, user_id: str, purpose: str, now: datetime,
+                    pending_password_hash: Optional[str] = None,
+                    pending_name: Optional[str] = None) -> str:
+        """New link of `purpose`. A verify link may carry the password hash and
+        name the sign-up asked for; they apply only when THAT link is clicked."""
         raw = secrets.token_urlsafe(32)
         with self.db.transaction() as tx:
             tx.execute(
@@ -229,10 +234,11 @@ class AccountStore:
                 (user_id, purpose),
             )
             tx.execute(
-                "INSERT INTO auth_tokens (token_hash, user_id, purpose, expires_at, created_at) "
-                "VALUES (%s, %s, %s, %s, %s)",
+                "INSERT INTO auth_tokens (token_hash, user_id, purpose, expires_at, created_at, "
+                "pending_password_hash, pending_name) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                 (hash_link_token(raw), user_id, purpose,
-                 iso(now + TOKEN_LIFETIMES[purpose]), iso(now)),
+                 iso(now + TOKEN_LIFETIMES[purpose]), iso(now),
+                 pending_password_hash, pending_name),
             )
         return raw
 
@@ -240,15 +246,34 @@ class AccountStore:
         self.db.execute("DELETE FROM auth_tokens WHERE token_hash = %s", (hash_link_token(raw),))
         self.db.commit()
 
-    def consume_token(self, raw: str, purposes: Iterable[str], now: datetime) -> Optional[str]:
-        """Mark a live token used and return its user_id, or None."""
+    def consume_token(self, raw: str, purposes: Iterable[str], now: datetime) -> Optional[tuple]:
+        """Mark a live token used; return (user_id, pending_password_hash,
+        pending_name), or None."""
         row = self.db.execute(
             "UPDATE auth_tokens SET used_at = %s WHERE token_hash = %s AND used_at IS NULL "
-            "AND expires_at > %s AND purpose = ANY(%s) RETURNING user_id",
+            "AND expires_at > %s AND purpose = ANY(%s) "
+            "RETURNING user_id, pending_password_hash, pending_name",
             (iso(now), hash_link_token(raw or ""), iso(now), list(purposes)),
         ).fetchone()
         self.db.commit()
-        return row[0] if row else None
+        return (row[0], row[1], row[2]) if row else None
+
+    def latest_pending(self, user_id: str, now: datetime) -> Optional[tuple]:
+        """(hash, name) carried by the newest live verify token, or None."""
+        row = self.db.execute(
+            "SELECT pending_password_hash, pending_name FROM auth_tokens "
+            "WHERE user_id = %s AND purpose = %s AND used_at IS NULL AND expires_at > %s "
+            "AND pending_password_hash IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+            (user_id, PURPOSE_VERIFY, iso(now)),
+        ).fetchone()
+        return (row[0], row[1] or "") if row else None
+
+    def delete_tokens(self, user_id: str, purpose: str) -> None:
+        self.db.execute(
+            "DELETE FROM auth_tokens WHERE user_id = %s AND purpose = %s AND used_at IS NULL",
+            (user_id, purpose),
+        )
+        self.db.commit()
 
     def delete_account(self, user_id: str) -> None:
         # No table has a foreign key to users, so nothing cascades — without

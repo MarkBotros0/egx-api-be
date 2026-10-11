@@ -9,7 +9,7 @@ have accounts. Errors that do leak (login's email_not_verified) need the
 right password first.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import HTTPException
@@ -33,6 +33,9 @@ CHECK_EMAIL = {"status": "check_email"}
 INVALID_LINK = "invalid_or_expired_link"
 DISABLED = "This account has been disabled."
 BAD_CREDENTIALS = "Invalid email or password"
+# Verified against when there is no real hash, so a wrong email costs the same
+# bcrypt time as a wrong password.
+_DUMMY_HASH = hash_password("dummy-password-for-timing")
 
 
 def session(account: Account) -> dict:
@@ -59,13 +62,14 @@ def _deliver(store, mailer, account: Account, now: datetime, message, token: Opt
 
 
 def send_link(store, mailer, account: Account, purpose: str, now: datetime,
-              inviter: str = "") -> bool:
+              inviter: str = "", pending_password_hash: Optional[str] = None,
+              pending_name: Optional[str] = None) -> bool:
     """Email a fresh link of `purpose`. False (and nothing sent) inside the cooldown."""
     if _in_cooldown(account, now):
         return False
     path = "/verify-email" if purpose == PURPOSE_VERIFY else "/set-password"
     mail.link(path, "probe")   # 503 before a token exists if FE_BASE_URL is missing
-    token = store.issue_token(account.id, purpose, now)
+    token = store.issue_token(account.id, purpose, now, pending_password_hash, pending_name)
     url = mail.link(path, token)
     if purpose == PURPOSE_VERIFY:
         message = mail.verify_message(account.name, url)
@@ -78,19 +82,26 @@ def send_link(store, mailer, account: Account, purpose: str, now: datetime,
 
 
 def signup(store, mailer, *, name: str, email: str, password: str, now: datetime) -> dict:
+    """
+    The password and name asked for live on the emailed verify link, never on
+    the account: whoever clicks the link proves the inbox AND chooses the
+    password, so a stranger re-signing-up with a victim's address cannot
+    swap in their own password under the victim's pending link.
+    """
     email = normalize_email(email)
     password = clean_password(password)
     name = clean_name(name)
     existing = store.by_email(email)
     if existing is None:
-        account = store.create(email=email, name=name, password_hash=hash_password(password),
+        account = store.create(email=email, name=name, password_hash=None,
                                email_verified=False, now=now)
-        send_link(store, mailer, account, PURPOSE_VERIFY, now)
+        send_link(store, mailer, account, PURPOSE_VERIFY, now,
+                  pending_password_hash=hash_password(password), pending_name=name)
     elif not existing.email_verified:
-        # Whoever proves the inbox owns the account; until then the latest
-        # sign-up's password and name win.
-        store.update(existing.id, password_hash=hash_password(password), name=name)
-        send_link(store, mailer, store.by_id(existing.id), PURPOSE_VERIFY, now)
+        if existing.is_active:
+            # send_link is a no-op inside the cooldown, leaving the earlier link untouched.
+            send_link(store, mailer, existing, PURPOSE_VERIFY, now,
+                      pending_password_hash=hash_password(password), pending_name=name)
     elif not _in_cooldown(existing, now):
         message = mail.already_registered_message(existing.name, mail.login_url(), mail.forgot_url())
         _deliver(store, mailer, existing, now, message, None)
@@ -100,7 +111,10 @@ def signup(store, mailer, *, name: str, email: str, password: str, now: datetime
 def resend_verification(store, mailer, *, email: str, now: datetime) -> dict:
     account = store.by_email(normalize_email(email))
     if account and account.is_active and not account.email_verified:
-        send_link(store, mailer, account, PURPOSE_VERIFY, now)
+        pending = store.latest_pending(account.id, now)
+        if pending:
+            send_link(store, mailer, account, PURPOSE_VERIFY, now,
+                      pending_password_hash=pending[0], pending_name=pending[1])
     return CHECK_EMAIL
 
 
@@ -111,37 +125,53 @@ def forgot_password(store, mailer, *, email: str, now: datetime) -> dict:
     return CHECK_EMAIL
 
 
-def _redeem(store, token: str, purposes: set, now: datetime) -> Account:
-    user_id = store.consume_token(token, purposes, now)
-    account = store.by_id(user_id) if user_id else None
+def _redeem(store, token: str, purposes: set, now: datetime) -> tuple:
+    consumed = store.consume_token(token, purposes, now)
+    account = store.by_id(consumed[0]) if consumed else None
     if account is None:
         raise HTTPException(status_code=400, detail=INVALID_LINK)
     if not account.is_active:
         raise HTTPException(status_code=403, detail=DISABLED)
-    return account
+    return account, consumed[1], consumed[2]
 
 
 def verify_email(store, *, token: str, now: datetime) -> Account:
-    account = _redeem(store, token, {PURPOSE_VERIFY}, now)
-    store.update(account.id, email_verified=True)
+    account, pending_hash, pending_name = _redeem(store, token, {PURPOSE_VERIFY}, now)
+    fields = {"email_verified": True}
+    if pending_hash is not None:
+        fields["password_hash"] = pending_hash
+    if pending_name:
+        fields["name"] = pending_name
+    store.update(account.id, **fields)
     return store.by_id(account.id)
 
 
 def set_password(store, *, token: str, password: str, now: datetime) -> Account:
     password = clean_password(password)           # validate BEFORE burning the link
-    account = _redeem(store, token, {PURPOSE_RESET, PURPOSE_INVITE}, now)
-    # Clicking an emailed link proves the inbox, so this also verifies.
-    store.update(account.id, password_hash=hash_password(password), email_verified=True)
+    account, _, _ = _redeem(store, token, {PURPOSE_RESET, PURPOSE_INVITE}, now)
+    # Clicking an emailed link proves the inbox, so this also verifies. It also
+    # ends every session issued before now (the old password's holders).
+    store.update(account.id, password_hash=hash_password(password), email_verified=True,
+                 sessions_valid_after=iso(now))
     return store.by_id(account.id)
 
 
-def login(store, *, email: str, password: str) -> Account:
+def login(store, *, email: str, password: str, now: Optional[datetime] = None) -> Account:
+    now = now or datetime.now(timezone.utc)
     try:
         email = normalize_email(email)
     except HTTPException:
         raise HTTPException(status_code=401, detail=BAD_CREDENTIALS)
     account = store.by_email(email)
-    if not account or not account.password_hash or not verify_password(password or "", account.password_hash):
+    password = password or ""
+    stored = account.password_hash if account else None
+    if account and not stored and not account.email_verified:
+        # Sign-up parks the password on the verify link; a right password
+        # there earns the "verify your email" prompt, anything else is a 401.
+        pending = store.latest_pending(account.id, now)
+        stored = pending[0] if pending else None
+    ok = verify_password(password, stored or _DUMMY_HASH) and bool(stored)
+    if not account or not ok:
         raise HTTPException(status_code=401, detail=BAD_CREDENTIALS)
     if not account.is_active:
         raise HTTPException(status_code=403, detail=DISABLED)

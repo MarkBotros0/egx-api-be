@@ -70,7 +70,7 @@ class MemoryAccountStore:
         """Test-only: the real store has no way to write a role."""
         self.users[user_id] = replace(self.users[user_id], role=role)
 
-    def issue_token(self, user_id, purpose, now):
+    def issue_token(self, user_id, purpose, now, pending_password_hash=None, pending_name=None):
         for h, row in list(self.tokens.items()):
             if row["user_id"] == user_id and row["purpose"] == purpose and row["used_at"] is None:
                 del self.tokens[h]
@@ -79,6 +79,7 @@ class MemoryAccountStore:
             "user_id": user_id, "purpose": purpose,
             "expires_at": iso(now + TOKEN_LIFETIMES[purpose]), "used_at": None,
             "created_at": iso(now),
+            "pending_password_hash": pending_password_hash, "pending_name": pending_name,
         }
         return raw
 
@@ -91,7 +92,20 @@ class MemoryAccountStore:
                 or row["purpose"] not in purposes):
             return None
         row["used_at"] = iso(now)
-        return row["user_id"]
+        return (row["user_id"], row["pending_password_hash"], row["pending_name"])
+
+    def latest_pending(self, user_id, now):
+        live = [r for r in self.tokens.values()
+                if r["user_id"] == user_id and r["purpose"] == "verify" and r["used_at"] is None
+                and r["expires_at"] > iso(now) and r["pending_password_hash"] is not None]
+        if not live:
+            return None
+        r = max(live, key=lambda r: r["created_at"])
+        return (r["pending_password_hash"], r["pending_name"] or "")
+
+    def delete_tokens(self, user_id, purpose):
+        self.tokens = {h: r for h, r in self.tokens.items()
+                       if not (r["user_id"] == user_id and r["purpose"] == purpose and r["used_at"] is None)}
 
     def delete_account(self, user_id):
         for t in USER_OWNED_TABLES:
