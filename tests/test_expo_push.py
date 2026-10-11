@@ -118,3 +118,44 @@ def test_send_expo_posts_json_and_returns_tickets(monkeypatch):
     assert captured["url"] == "https://exp.host/--/api/v2/push/send"
     assert captured["ctype"] == "application/json"
     assert captured["timeout"] == 3.0
+
+
+def test_empty_ticket_list_bumps_attempts_instead_of_stranding_the_row():
+    db = _db([_row("a")], [("ExponentPushToken[x]", "u1")])
+    out = deliver_pending(db, DAY, sender=lambda m: [])
+    assert out["sent"] == 0 and out["failed"] == 0
+    assert any("status = 'pending', attempts = attempts + 1" in s and p == ("a",)
+               for s, p in _status_updates(db))
+
+
+def test_non_list_response_is_treated_as_no_tickets():
+    db = _db([_row("a")], [("ExponentPushToken[x]", "u1")])
+    out = deliver_pending(db, DAY, sender=lambda m: {"errors": [{"code": "X"}]})
+    assert out["sent"] == 0
+    assert any("attempts = attempts + 1" in s and p == ("a",) for s, p in _status_updates(db))
+
+
+def test_short_ticket_list_is_padded_and_the_unticketed_row_is_bumped():
+    rows = [_row("a", symbol="COMI"), _row("b", symbol="FWRY")]
+    db = _db(rows, [("ExponentPushToken[x]", "u1")])
+    out = deliver_pending(db, DAY, sender=lambda m: [{"status": "ok", "id": "t"}])
+    assert out["sent"] == 1
+    updates = _status_updates(db)
+    assert any("status = 'sent'" in s and p[-1] == "a" for s, p in updates)
+    assert any("attempts = attempts + 1" in s and p == ("b",) for s, p in updates)
+
+
+def test_non_dict_ticket_entry_counts_as_a_failed_attempt():
+    db = _db([_row("a")], [("ExponentPushToken[x]", "u1")])
+    out = deliver_pending(db, DAY, sender=lambda m: ["oops"])
+    assert out["sent"] == 0
+    assert any("attempts = attempts + 1" in s and p == ("a",) for s, p in _status_updates(db))
+
+
+def test_sender_exception_is_logged(capsys):
+    def boom(_):
+        raise OSError("expo down")
+
+    db = _db([_row("a")], [("ExponentPushToken[x]", "u1")])
+    deliver_pending(db, DAY, sender=boom)
+    assert "[alerts] expo send failed: expo down" in capsys.readouterr().out

@@ -102,11 +102,19 @@ def deliver_pending(db, now_utc: datetime, sender=send_expo) -> dict:
         chunk_owners = owners[start:start + EXPO_BATCH_SIZE]
         try:
             tickets = sender(chunk)
-        except Exception:
-            tickets = [None] * len(chunk)
+        except Exception as e:
+            print(f"[alerts] expo send failed: {e}")
+            tickets = None
+        # Normalise to exactly one entry per message: anything short, long or
+        # non-list is padded/truncated, so every owner gets an outcome and an
+        # unticketed row is bumped rather than retried forever.
+        if not isinstance(tickets, list):
+            tickets = []
+        tickets = (tickets[:len(chunk)] + [None] * len(chunk))[:len(chunk)]
         for (row, token), ticket in zip(chunk_owners, tickets):
-            ok = bool(ticket) and ticket.get("status") == "ok"
-            if ticket and ((ticket.get("details") or {}).get("error") == "DeviceNotRegistered"):
+            ok = isinstance(ticket, dict) and ticket.get("status") == "ok"
+            details = ticket.get("details") if isinstance(ticket, dict) else None
+            if isinstance(details, dict) and details.get("error") == "DeviceNotRegistered":
                 db.execute("DELETE FROM push_devices WHERE token = %s", (token,))
             prev = outcome.get(row[0], (row, False))
             outcome[row[0]] = (row, prev[1] or ok)
