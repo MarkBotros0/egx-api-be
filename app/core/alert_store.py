@@ -116,39 +116,45 @@ def run_detection(db, scored: dict, macro: Optional[dict], now: str,
         return 0
     baselines = _read_baselines(db, scored)
 
-    sessions = sorted({v["session_date"] for v in scored.values()})
-    logged = db.execute(
-        "SELECT user_id, symbol, direction FROM alert_log "
-        "WHERE session_date = ANY(%s) AND symbol = ANY(%s)",
-        (sessions, list(scored) + [SUMMARY_SYMBOL]),
-    ).fetchall()
-    already = {(r[0], r[1], r[2]) for r in logged}
-    counts = db.execute(
-        "SELECT user_id, COUNT(*) FROM alert_log WHERE session_date = ANY(%s) "
-        "AND status IN ('pending', 'sent') AND direction <> 'summary' GROUP BY user_id",
-        (sessions,),
-    ).fetchall()
-    sent_today = {r[0]: r[1] for r in counts}
-    summary_sent = {u for (u, s, d) in already if d == "summary"}
-
-    signals = []
+    by_session: dict = {}
     for symbol, info in scored.items():
-        baseline = baselines.get((symbol, info["session_date"]))
-        if baseline is None:
-            continue
-        signals += detect_signals(symbol, info["session_date"], baseline,
-                                  info["categories"], macro,
-                                  subscribers.get(symbol, []), already)
+        by_session.setdefault(info["session_date"], []).append(symbol)
 
     inserted = 0
-    for sig, status in apply_daily_cap(signals, sent_today, summary_sent):
-        db.execute(
-            "INSERT INTO alert_log (id, user_id, symbol, session_date, direction, "
-            "score_before, score_after, status, attempts, created_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0, %s) "
-            "ON CONFLICT (user_id, symbol, session_date, direction) DO NOTHING",
-            (new_id(), sig.user_id, sig.symbol, sig.session_date, sig.direction,
-             sig.before, sig.after, status, now),
-        )
-        inserted += 1
+    for session, symbols in sorted(by_session.items()):
+        logged = db.execute(
+            "SELECT user_id, symbol, direction FROM alert_log "
+            "WHERE session_date = %s AND symbol = ANY(%s)",
+            (session, symbols + [SUMMARY_SYMBOL]),
+        ).fetchall()
+        already = {(r[0], r[1], r[2]) for r in logged}
+        counts = db.execute(
+            "SELECT user_id, COUNT(*) FROM alert_log WHERE session_date = %s "
+            "AND status IN ('pending', 'sent') AND direction <> 'summary' GROUP BY user_id",
+            (session,),
+        ).fetchall()
+        sent_today = {r[0]: r[1] for r in counts}
+        summary_sent = {u for (u, s, d) in already if d == "summary"}
+
+        signals = []
+        for symbol in symbols:
+            baseline = baselines.get((symbol, session))
+            if baseline is None:
+                continue
+            signals += detect_signals(symbol, session, baseline,
+                                      scored[symbol]["categories"], macro,
+                                      subscribers.get(symbol, []), already)
+
+        for sig, status in apply_daily_cap(signals, sent_today, summary_sent):
+            row = db.execute(
+                "INSERT INTO alert_log (id, user_id, symbol, session_date, direction, "
+                "score_before, score_after, status, attempts, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0, %s) "
+                "ON CONFLICT (user_id, symbol, session_date, direction) DO NOTHING "
+                "RETURNING id",
+                (new_id(), sig.user_id, sig.symbol, sig.session_date, sig.direction,
+                 sig.before, sig.after, status, now),
+            ).fetchone()
+            if row:
+                inserted += 1
     return inserted

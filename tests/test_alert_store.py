@@ -134,6 +134,7 @@ def test_run_detection_queues_a_pending_alert_for_a_qualifying_move():
         prefs=[("u1", "all", 10, 10)],
         extra=[
             ("FROM score_baseline", [_baseline_row("COMI", "2026-10-11", 50.0)]),
+            ("INSERT INTO alert_log", [("id1",)]),
             ("FROM alert_log", []),
         ],
     )
@@ -170,3 +171,59 @@ def test_run_detection_with_nothing_scored_touches_nothing():
     db = FakeDB()
     assert run_detection(db, {}, None, "now") == 0
     assert db.log == []
+
+
+class _SessionDB(FakeDB):
+    """FakeDB whose alert_log SELECTs answer per session (params[0])."""
+
+    def __init__(self, responses, logged=None, counts=None):
+        super().__init__(responses)
+        self.logged, self.counts = logged or {}, counts or {}
+
+    def execute(self, sql, params=()):
+        if "FROM alert_log" in sql and sql.startswith("SELECT"):
+            self.log.append((sql, params))
+            src = self.counts if "COUNT(*)" in sql else self.logged
+            from alert_fakes import _Result
+            return _Result(src.get(params[0], []))
+        return super().execute(sql, params)
+
+
+def test_run_detection_scopes_dedup_to_each_symbols_own_session():
+    db = _SessionDB(
+        [
+            ("FROM alert_preferences", [("u1", "all", 10, 10)]),
+            ("FROM settings", []),
+            ("FROM user_settings", []),
+            ("FROM score_baseline", [_baseline_row("COMI", "2026-10-11", 50.0),
+                                     _baseline_row("FWRY", "2026-10-07", 50.0)]),
+            ("INSERT INTO alert_log", [("x",)]),
+        ],
+        logged={"2026-10-07": [("u1", "COMI", "up")]},
+    )
+    scored = {
+        "COMI": {"session_date": "2026-10-11", "categories": _cats(70.0)},
+        "FWRY": {"session_date": "2026-10-07", "categories": _cats(30.0)},
+    }
+    assert run_detection(db, scored, None, "now", new_id=lambda: "i") == 2
+    inserts = {(p[2], p[3], p[4]) for _, p in db.statements("INSERT INTO alert_log")}
+    assert inserts == {("COMI", "2026-10-11", "up"), ("FWRY", "2026-10-07", "down")}
+
+
+def test_run_detection_applies_the_daily_cap_with_a_summary():
+    db = _SessionDB(
+        [
+            ("FROM alert_preferences", [("u1", "all", 10, 10)]),
+            ("FROM settings", []),
+            ("FROM user_settings", []),
+            ("FROM score_baseline", [_baseline_row("COMI", "2026-10-11", 50.0)]),
+            ("INSERT INTO alert_log", [("x",)]),
+        ],
+        counts={"2026-10-11": [("u1", 10)]},
+    )
+    n = run_detection(db, {"COMI": {"session_date": "2026-10-11", "categories": _cats(70.0)}},
+                      None, "now", new_id=lambda: "i")
+    assert n == 2
+    rows = [p for _, p in db.statements("INSERT INTO alert_log")]
+    assert any(p[2] == "*" and p[4] == "summary" and p[7] == "pending" for p in rows)
+    assert any(p[2] == "COMI" and p[4] == "up" and p[7] == "suppressed" for p in rows)
