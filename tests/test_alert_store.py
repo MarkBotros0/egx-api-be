@@ -4,8 +4,14 @@ from __future__ import annotations
 
 from alert_fakes import FakeDB
 from app.core.card_snapshot import CATEGORY_COLUMNS
-from app.core.composite import CATEGORY_ORDER
-from app.core.alert_store import capture_baseline, prune_baselines, read_previous_rows
+from app.core.alert_store import (
+    capture_baseline,
+    load_subscribers,
+    prune_baselines,
+    read_previous_rows,
+    run_detection,
+)
+from app.core.composite import CATEGORY_ORDER, PRESETS
 
 
 def test_init_db_creates_the_four_alert_tables():
@@ -81,3 +87,86 @@ def test_prune_deletes_baselines_older_than_retention():
     [(sql, params)] = db.log
     assert sql.startswith("DELETE FROM score_baseline WHERE session_date <")
     assert params == ("2026-10-01",)
+
+
+BAL = PRESETS["balanced"]
+
+
+def _subs_db(prefs, watch=(), extra=()):
+    """prefs rows: (user_id, scope, rise, fall)."""
+    return FakeDB([
+        ("FROM alert_preferences", list(prefs)),
+        ("FROM watchlist", list(watch)),
+        ("FROM settings", []),
+        ("FROM user_settings", []),
+        *extra,
+    ])
+
+
+def test_scope_all_subscribes_to_every_symbol_and_watchlist_only_to_followed():
+    db = _subs_db(
+        prefs=[("all-user", "all", 10, 10), ("watch-user", "watchlist", 5, None)],
+        watch=[("watch-user", "COMI")],
+    )
+    out = load_subscribers(db, ["COMI", "FWRY"])
+    assert sorted(s.user_id for s in out["COMI"]) == ["all-user", "watch-user"]
+    assert [s.user_id for s in out["FWRY"]] == ["all-user"]
+    watch = next(s for s in out["COMI"] if s.user_id == "watch-user")
+    assert (watch.rise, watch.fall) == (5, None)
+    pref_sql = db.statements("FROM alert_preferences")[0][0]
+    assert "enabled" in pref_sql and "is_active" in pref_sql and "push_devices" in pref_sql
+    follow_sql = db.statements("FROM watchlist")[0][0]
+    assert "UNION" in follow_sql and "FROM portfolio" in follow_sql
+
+
+def test_no_enabled_users_means_no_follow_query():
+    db = _subs_db(prefs=[])
+    assert load_subscribers(db, ["COMI"]) == {}
+    assert db.statements("FROM watchlist") == []
+
+
+def _baseline_row(symbol, session, v):
+    return (symbol, session) + tuple([v] * len(CATEGORY_ORDER))
+
+
+def test_run_detection_queues_a_pending_alert_for_a_qualifying_move():
+    db = _subs_db(
+        prefs=[("u1", "all", 10, 10)],
+        extra=[
+            ("FROM score_baseline", [_baseline_row("COMI", "2026-10-11", 50.0)]),
+            ("FROM alert_log", []),
+        ],
+    )
+    n = run_detection(db, {"COMI": {"session_date": "2026-10-11", "categories": _cats(70.0)}},
+                      None, "now", new_id=lambda: "id1")
+    assert n == 1
+    [(sql, params)] = db.statements("INSERT INTO alert_log")
+    assert "ON CONFLICT (user_id, symbol, session_date, direction) DO NOTHING" in sql
+    assert params[:5] == ("id1", "u1", "COMI", "2026-10-11", "up")
+    assert params[7] == "pending"
+
+
+def test_run_detection_without_a_baseline_queues_nothing():
+    db = _subs_db(prefs=[("u1", "all", 10, 10)], extra=[("FROM score_baseline", [])])
+    assert run_detection(db, {"COMI": {"session_date": "2026-10-11", "categories": _cats(90.0)}},
+                         None, "now") == 0
+    assert db.statements("INSERT INTO alert_log") == []
+
+
+def test_run_detection_skips_a_direction_already_logged_this_session():
+    db = _subs_db(
+        prefs=[("u1", "all", 10, 10)],
+        extra=[
+            ("FROM score_baseline", [_baseline_row("COMI", "2026-10-11", 50.0)]),
+            ("SELECT user_id, symbol, direction FROM alert_log", [("u1", "COMI", "up")]),
+            ("FROM alert_log", []),
+        ],
+    )
+    assert run_detection(db, {"COMI": {"session_date": "2026-10-11", "categories": _cats(70.0)}},
+                         None, "now") == 0
+
+
+def test_run_detection_with_nothing_scored_touches_nothing():
+    db = FakeDB()
+    assert run_detection(db, {}, None, "now") == 0
+    assert db.log == []
