@@ -1,0 +1,233 @@
+# Email accounts, open sign-up, Google + Apple sign-in, SMTP email — design
+
+Date: 2026-10-12 · Repos: `egx-api-be` (this spec), `egx-api-fe`, `egx-api-mobile`
+
+## Goal
+
+Replace admin-made username/password accounts with email accounts that anyone can create:
+email + password (verified by an emailed link), Google (web + mobile), or Apple (iOS app only).
+Admins invite by email instead of copy-pasting generated passwords; users set their own
+password from an emailed link and can reset a forgotten one themselves.
+
+## Decisions (from the user)
+
+- Login identity is the **email**. Usernames are removed.
+- **Open sign-up with email verification.** Email+password accounts cannot sign in until the
+  link is clicked. Google/Apple emails count as verified.
+- Sign-up asks for a **name**; the UI shows `name || email`.
+- **Existing users are deleted** (with all their data) by a one-off script the user runs.
+  The only admin is `mark3essam@gmail.com`.
+- SMTP via a **Gmail app password**, configured through generic `SMTP_*` env vars.
+- **Forgot password** is self-service.
+- Our backend keeps issuing its own JWT (HS256, 30 days, `AUTH_SECRET`). No auth vendor, no Firebase.
+- Apple sign-in is iOS-app only (not web, not Android).
+
+## Non-goals
+
+Universal/app links (email links open the web), 2FA, changing email address, changing password
+while signed in (use Forgot password), Apple on web/Android, social providers other than Google/Apple.
+
+## 1. Data model (Postgres, `app/core/db.py`)
+
+`users` is recreated in this shape (new installs get it from `init_db`; the reset script
+drops the old table first):
+
+| column | type | notes |
+|---|---|---|
+| `id` | TEXT PK | uuid4, unchanged meaning — every other table keys on it |
+| `email` | TEXT UNIQUE NOT NULL | stored trimmed + lowercased |
+| `name` | TEXT NOT NULL DEFAULT '' | ≤ 80 chars |
+| `password_hash` | TEXT NULL | NULL = no password (Google/Apple-only or invited-not-yet-set) |
+| `email_verified` | BOOLEAN NOT NULL DEFAULT FALSE | |
+| `google_sub` | TEXT UNIQUE NULL | Google `sub` claim |
+| `apple_sub` | TEXT UNIQUE NULL | Apple `sub` claim |
+| `apple_refresh_token` | TEXT NULL | for revocation on account deletion |
+| `role` | TEXT NOT NULL DEFAULT 'user' | still written ONLY by `AUTH_ADMINS` seeding |
+| `is_active` | BOOLEAN NOT NULL DEFAULT TRUE | |
+| `last_email_at` | TEXT NULL | when we last emailed this user — drives the 60 s cooldown |
+| `created_at` | TEXT NOT NULL | ISO-8601 UTC `…Z` |
+
+`auth_tokens` (email-link tokens):
+
+| column | type | notes |
+|---|---|---|
+| `token_hash` | TEXT PK | SHA-256 hex of the raw token; the raw token is never stored |
+| `user_id` | TEXT NOT NULL | |
+| `purpose` | TEXT NOT NULL | `verify` \| `reset` \| `invite` |
+| `expires_at` | TEXT NOT NULL | verify 24 h, reset 1 h, invite 7 days |
+| `used_at` | TEXT NULL | set on first use; a used token is rejected |
+| `created_at` | TEXT NOT NULL | |
+
+Raw tokens: `secrets.token_urlsafe(32)`. Issuing a new token of a purpose for a user deletes
+that user's older unused tokens of the same purpose (only the newest link works).
+
+**User-owned tables** (deleted with the user, both by account deletion and by the reset
+script): `portfolio`, `portfolio_sales`, `portfolio_dividends`, `user_settings`, `watchlist`,
+`push_devices`, `alert_preferences`, `alert_log`, `auth_tokens`. A test asserts this list
+matches every table in `init_db` that has a `user_id` column, so a future table can't be missed.
+
+## 2. Seeding and the reset script
+
+- `AUTH_ADMINS` becomes a comma-separated list of **emails**. On boot, each listed email is
+  created if missing (`email_verified=TRUE`, no password, `name=''`) and stamped `admin`; others
+  are demoted only when the var is non-empty (existing rule kept). Production value:
+  `AUTH_ADMINS=mark3essam@gmail.com`.
+- `AUTH_USERS` is removed (code, docs, `.env.example`). The admin signs in with Google (Gmail)
+  or uses Forgot password.
+- `scripts/reset_users_for_email_auth.py`: prints row counts per user-owned table, requires the
+  user to type `DELETE ALL USERS`, then in one transaction deletes all rows of the user-owned
+  tables and drops `users`, then runs `init_db()` + seeding. Run by the user against
+  production; never run automatically.
+
+## 3. API (`app/routers/auth.py`, `app/core/auth.py`, new `app/core/email.py`, `app/core/oauth.py`)
+
+All new auth routes are added to `PUBLIC_ENDPOINTS`; `tests/test_auth_gate.py` keeps sweeping
+the real route table. Passwords: 8–128 chars (existing bcrypt-over-SHA-256 hashing).
+Email validation: trimmed, lowercased, one `@`, a dot in the domain, ≤ 254 chars.
+
+| Route | Body | Result |
+|---|---|---|
+| `POST /api/auth/signup` | `{name, email, password}` | Always `200 {"status":"check_email"}`. New email → create unverified user + send verify email. Existing **unverified** email → replace its password hash and name, resend verify. Existing **verified** email → send an "you already have an account — sign in or reset your password" email. |
+| `POST /api/auth/resend-verification` | `{email}` | Always `200`. Sends a new verify link if the account exists and is unverified. |
+| `POST /api/auth/verify-email` | `{token}` | Marks verified, consumes token, returns `{token, user}` (signed in). |
+| `POST /api/auth/login` | `{email, password}` | `200 {token, user}`; `401 "Invalid email or password"` (same message for unknown email, wrong password, no password set); `403 {"detail":"email_not_verified"}` when the password is right but email unverified; `403` for disabled. |
+| `POST /api/auth/forgot-password` | `{email}` | Always `200`. Sends a `reset` link if an active account exists. |
+| `POST /api/auth/set-password` | `{token, password}` | Accepts `reset` and `invite` tokens. Sets the hash, sets `email_verified=TRUE`, consumes the token, returns `{token, user}`. |
+| `POST /api/auth/google` | `{idToken, name?}` | `200 {token, user}`. |
+| `POST /api/auth/apple` | `{identityToken, authorizationCode?, name?}` | `200 {token, user}`. |
+| `GET /api/auth/me` | — | `{id, email, name, role}` |
+| `DELETE /api/auth/me` | — | Deletes the caller and all their rows; revokes the Apple token if stored. `204`. The **last active admin cannot delete themselves** (`409`). |
+
+`user` in responses is the same `{id, email, name, role}` shape as `/me`.
+
+Token errors (`verify-email`, `set-password`): unknown, used, expired, or wrong purpose →
+`400 {"detail":"invalid_or_expired_link"}`. Disabled user → `403`.
+
+**Cooldown:** every email to a user (verify, reset, invite, already-registered) first checks
+`users.last_email_at`; if it is less than 60 s ago nothing is sent and the endpoint still returns
+its normal response. A successful send sets `last_email_at`.
+
+### Google and Apple verification (`app/core/oauth.py`)
+
+Both use `PyJWT`'s `PyJWKClient` (requirements: `pyjwt[crypto]`), JWKS cached in-process.
+- **Google:** JWKS `https://www.googleapis.com/oauth2/v3/certs`; `iss` ∈
+  {`https://accounts.google.com`, `accounts.google.com`}; `aud` ∈ `GOOGLE_CLIENT_IDS`
+  (comma-separated: web, Android, iOS); require `email_verified == true`. Name from `name`.
+- **Apple:** JWKS `https://appleid.apple.com/auth/keys`; `iss == https://appleid.apple.com`;
+  `aud` ∈ `APPLE_CLIENT_IDS` (comma-separated: `com.markbotros.borsacompass`, plus
+  `host.exp.Exponent` so Expo Go works in development). Apple sends `email` only on first
+  sign-in and the name never in the token — the app passes `name` from the native response.
+  If `authorizationCode` is present and `APPLE_TEAM_ID`/`APPLE_KEY_ID`/`APPLE_PRIVATE_KEY` are
+  set, exchange it at `https://appleid.apple.com/auth/token` (client secret = ES256 JWT) and
+  store `apple_refresh_token`. On account deletion, POST it to
+  `https://appleid.apple.com/auth/revoke` — best-effort: a failure is logged, never blocks deletion.
+- A provider that isn't configured (empty client-id var) returns `503`.
+
+### Account resolution for Google/Apple (`provider` = google|apple, `sub`, `email`)
+
+1. A user with that `{provider}_sub` exists → sign in (403 if disabled).
+2. Else a user with that email exists → link: set `{provider}_sub`. If that user was
+   **unverified**, also set `password_hash = NULL` (prevents a pre-registered password from
+   surviving a takeover) and `email_verified = TRUE`. Fill `name` if empty.
+3. Else create `{email, name, email_verified=TRUE, {provider}_sub}`.
+4. Apple with no email in the token and no matching sub → `400` (Apple only omits email on
+   repeat sign-ins, which step 1 handles).
+
+### Email (`app/core/email.py`)
+
+`smtplib.SMTP(SMTP_HOST, SMTP_PORT)` + `starttls()` + login; envs `SMTP_HOST`
+(default `smtp.gmail.com`), `SMTP_PORT` (default `587`), `SMTP_USER`, `SMTP_PASSWORD`,
+`SMTP_FROM` (default `"Borsa Compass <SMTP_USER>"`). Multipart plain + minimal HTML.
+Links: `{FE_BASE_URL}/verify-email?token=…`, `{FE_BASE_URL}/set-password?token=…` (reset and
+invite share the page). Missing SMTP or `FE_BASE_URL` → `503 "Email is not configured"` on
+routes that must send (signup, invite, admin reset); the "always 200" routes also 503 rather
+than pretend. An SMTP failure → `502 "Could not send email"`; the token row is deleted so the
+cooldown doesn't block a retry. Four templates: verify, reset, invite ("{admin name} invited you
+to Borsa Compass"), already-registered. Tests swap the sender for an in-memory outbox.
+
+## 4. Admin API (`app/routers/users.py`)
+
+- `GET /api/users` → `{id, email, name, role, is_active, email_verified, methods:[password|google|apple], created_at}`.
+- `POST /api/users` `{email, name?}` → creates an unverified user with no password, sends an
+  `invite` email, `201`. Existing email → `409`.
+- `POST /api/users/{id}/send-reset` → sends a `reset` email (`invite` if the user has no
+  password and never verified). Replaces `POST /api/users/{id}/password`.
+- `PATCH` (active) and `DELETE` keep the self/last-admin guards. `DELETE` now removes all
+  user-owned rows (shared helper with `DELETE /api/auth/me`).
+- No API writes `role` (existing grep test stays).
+- Generated passwords are removed (`generate_password`, related tests and docs).
+
+## 5. Web (`egx-api-fe`)
+
+- `lib/auth.ts`, `lib/api.ts`, `lib/types.ts`: `AuthUser = {id, email, name, role}`;
+  `displayName(u) = u.name || u.email`; client functions for every route above. These sync to mobile.
+- Pages: `/login` (email, password, "Continue with Google", links to `/signup` and
+  `/forgot-password`; on `email_not_verified` show "Check your inbox" + Resend), `/signup`,
+  `/forgot-password`, `/verify-email` (auto-submits the token, then lands signed in on `/`),
+  `/set-password` (new password + confirm, then signed in on `/`). All reachable signed out
+  (middleware allowlist). Neutral confirmation copy that never reveals whether an email exists.
+- Google: Google Identity Services script, `NEXT_PUBLIC_GOOGLE_CLIENT_ID`; button hidden when unset.
+- Header/Navbar shows `displayName`. New **Account** section (reached from the header user
+  menu) with name, email, and "Delete account" (type `DELETE` to confirm → `DELETE /api/auth/me`
+  → logout).
+- Admin page: Invite form (email + optional name), user rows with methods/verified badges,
+  "Send password reset", disable/delete. `PasswordRevealDialog` and the credential copy block are deleted.
+
+## 6. Mobile (`egx-api-mobile`)
+
+- Shared logic via `npm run sync:shared`.
+- Screens: Login (email/password, Google, Apple on iOS, links), Sign up, Forgot password,
+  "Check your inbox" state with Resend. Verify / set-password links open the web.
+- Google: `@react-native-google-signin/google-signin` (config plugin; `webClientId` +
+  `iosClientId` from `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID` / `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID`).
+  Native module → **not in Expo Go**: the button is not rendered when `isExpoGo()` (CLAUDE.md
+  exception list gains this second entry).
+- Apple: `expo-apple-authentication`, iOS only, `ios.usesAppleSignIn: true` in app config;
+  rendered only when `isAvailableAsync()` is true.
+- Header shows `displayName`; Account section with Delete account (same confirm).
+- Admin screen mirrors the web admin; `PasswordRevealSheet` and `credentials.ts` are deleted.
+
+## 7. Env vars
+
+Backend: `AUTH_ADMINS` (emails), `FE_BASE_URL`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
+`SMTP_PASSWORD`, `SMTP_FROM`, `GOOGLE_CLIENT_IDS`, `APPLE_CLIENT_IDS`, `APPLE_TEAM_ID`,
+`APPLE_KEY_ID`, `APPLE_PRIVATE_KEY`. Removed: `AUTH_USERS`.
+Web: `NEXT_PUBLIC_GOOGLE_CLIENT_ID`. Mobile: `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID`,
+`EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID`.
+
+## 8. Testing
+
+Backend (pytest, existing fixtures):
+- signup → verify → login; login before verify → 403 `email_not_verified`.
+- Enumeration: signup / forgot / resend give identical responses for existing vs unknown emails.
+- Tokens: expired, reused, wrong purpose, newer-token-invalidates-older → `invalid_or_expired_link`.
+- Cooldown: second request inside 60 s sends nothing.
+- Google/Apple: tokens signed with a test RSA key served by a stubbed JWKS client — wrong
+  `aud`, wrong `iss`, expired, Google `email_verified=false` rejected; the 3 resolution paths;
+  **takeover case**: unverified password account + Google sign-in with the same email → linked,
+  `password_hash` NULL, old password no longer logs in.
+- Deletion removes rows from every user-owned table; table-list completeness test; last-admin guard.
+- Seeding from `AUTH_ADMINS` emails; no `SET role` in any router (existing).
+- Auth-gate sweep passes with the new public routes.
+- SMTP unconfigured → 503; send failure → 502 and token row removed.
+
+Web/mobile: component tests for each new screen and the admin invite/reset flow, provider SDKs
+mocked; `npm run verify` (mobile) and lint/tsc/tests (web) green.
+
+Manual (user, on devices): Google on web, Android dev build, iOS dev build; Apple on iOS;
+real Gmail delivery of all four emails.
+
+## 9. Rollout order
+
+1. Backend deployed with new env vars (SMTP, `FE_BASE_URL`, `AUTH_ADMINS`, Google/Apple ids).
+2. User runs the reset script against production.
+3. Web deployed; admin signs in with Google.
+4. Mobile dev build for device tests.
+Old clients (username login) stop working at step 1 — accepted, since all accounts are reset.
+
+## 10. User setup checklist
+
+Gmail app password; Google Cloud OAuth consent screen + 3 OAuth clients (web with the FE origin,
+Android with the EAS SHA-1, iOS with the bundle id); Apple Developer: enable Sign in with Apple
+on `com.markbotros.borsacompass`, create a Sign in with Apple key (`.p8`); set env vars on Vercel
+(backend + web) and EAS (mobile).
