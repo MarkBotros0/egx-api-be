@@ -37,6 +37,7 @@ from app.routers import (
     risk,
     calibration,
     dashboard,
+    alerts,
 )
 
 app = FastAPI(
@@ -119,5 +120,6 @@ for router_module in (
     risk,
     calibration,
     dashboard,
+    alerts,
 ):
     app.include_router(router_module.router)

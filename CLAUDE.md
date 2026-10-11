@@ -81,6 +81,9 @@ egx-api-be/                     # Python FastAPI backend
       returns.py                # Position-level return maths, shared open/closed
       sales.py                  # Realized-gains maths (pure)
       dividends.py              # Dividend ledger maths + the one spelling of its queries
+      score_alerts.py           # Score alerts: detect_signals, daily cap, copy, quiet hours (pure)
+      alert_store.py            # Score alerts: baseline capture, subscribers, run_detection (DB)
+      expo_push.py              # Score alerts: Expo Push delivery (deliver_pending, injected sender)
     routers/
       analysis.py               # GET /api/analysis (single stock + batch mode)
       portfolio.py              # CRUD /api/portfolio
@@ -103,6 +106,7 @@ egx-api-be/                     # Python FastAPI backend
       watchlist.py              # GET/POST/DELETE /api/watchlist
       auth.py                   # POST /api/auth/login ; GET /api/auth/me
       users.py                  # Admin-only user management (/api/users)
+      alerts.py                 # Score alerts: /api/push/devices, /api/alerts/preferences, /api/alerts
     schemas/                    # (empty — Pydantic response shapes are inline dicts)
 
 egx-api-fe/                     # Next.js frontend
@@ -1484,6 +1488,80 @@ guarded by the `CRON_SECRET` env var exactly as `/api/pe/refresh` is guarded by
 walks each public cron's source and fails if one stops reading its env var —
 without that check the allowlist entry alone would open the route to anyone.
 
+### Score alerts (mobile push)
+
+Tells a user, while the market is open, when the composite score of a stock
+they care about moves a lot within one trading session, so they can go and
+look. Detection and delivery ride the existing `POST /api/cron/risk_snapshot`
+call (no new public route): after the symbols are rescored, `run_alerts`
+(`routers/cron.py`) detects signals for the symbols just scored and delivers
+pending ones through Expo Push (free; FCM on Android, APNs on iOS).
+
+**An INDICATOR, never an instruction.** The walk-forward backtest shows a single
+stock's score does not rank returns (IC ~ 0), so the copy only reports a fact:
+"COMI score up 12 points" / "58 -> 70 - now Strong", with the band word from
+`composite.classify_signal`. Alert copy never contains (case-insensitive, whole
+word) `buy`, `sell`, `opportunity`, `risk`, `recommend` - enforced by a test over
+`BANNED_WORDS` in `core/score_alerts.py`.
+
+**Baseline = the previous session's close, captured before it is overwritten.**
+When a rescore carries a new `last_bar_date`, the old row's eight category
+scores go into `score_baseline` (`ON CONFLICT DO NOTHING`, first capture wins).
+No baseline (first scoring, previously unscorable) -> no alert for that symbol
+that session; a baseline is never guessed, so there is no "0 -> 65" alert.
+Both ends are blended with the SAME regime (`blend_categories`) so a market-wide
+regime flip cannot fire on every stock, and with each subscriber's OWN weights,
+so the number in the push equals the number their stock page shows. Threshold
+unit is points on the 0-100 score; allowed 5/10/15/20 or null (direction off);
+the boundary is inclusive. A user switching scope from watchlist to all may
+receive a burst for moves before they subscribed - accepted, bounded by the cap.
+
+**Measured 2026-10-11 10:42 Cairo: the tvDatafeed daily bar includes today's
+in-progress bar** (`get_OHLCV_data(..., "Daily", 5)` returned a `2026-10-11` bar
+with partial volume for COMI, ETEL, FWRY), so scores move intraday and alerts
+fire mid-session.
+
+**Scheduling (external, cron-job.org).** For intraday alerts the job must call
+`POST /api/cron/risk_snapshot` **every minute, Sun-Thu 10:00-15:30
+Africa/Cairo**, in addition to the existing schedule. The response carries
+`alerts` = `{queued, sent, skipped, error}` (`skipped` is `"deadline"` or
+`"quiet-hours"`; `error` is the exception class name if alert code crashed).
+A crash in alert code never fails the scoring call.
+
+**`ALERTS_START_LIMIT_SECONDS = 22.0`.** The scoring loop ends by
+`DEADLINE_SECONDS` (20s) worst case; detection plus one Expo call
+(`EXPO_TIMEOUT_SECONDS`) fits before Vercel's 30s only if it STARTS by 22s.
+Past that, alerts are skipped (`skipped: "deadline"`) and everything stays
+`pending` for the next call.
+
+**Limits and delivery.**
+- Quiet hours 22:00-08:00 Africa/Cairo (`tzdata` is in requirements so the zone
+  resolves on Vercel): nothing is sent; after quiet hours, pending rows from an
+  older session than the latest are marked `expired` (yesterday's move is not news).
+- Daily cap `ALERT_DAILY_CAP = 10` per user per session date; the next signal
+  becomes ONE summary alert (`symbol '*'`, `direction 'summary'`, opens the
+  dashboard), further ones are `suppressed`.
+- Retries: an Expo failure leaves the row `pending` and bumps `attempts`;
+  `failed` after `ALERT_MAX_ATTEMPTS = 3`. Batches of <=100 messages; Android
+  `channelId: "score-alerts"`. Failures are logged as `[alerts] expo send failed`.
+- Ticket status `ok` -> `sent`; ticket error `DeviceNotRegistered` deletes that
+  token. Receipts are not polled in v1. Expo's ticket shapes are normalised in
+  `expo_push.py`.
+- Overlapping cron calls cannot send twice: `alert_log` UNIQUE + `ON CONFLICT DO
+  NOTHING`, and detection skips already-logged keys.
+
+**Routes (all bearer-auth; the auth-gate sweep covers them):**
+- `POST /api/push/devices` `{token, platform: "ios"|"android"}` -> 201
+  `{token}`. Token must look like `ExponentPushToken[...]`; re-binds a token to
+  the caller.
+- `DELETE /api/push/devices?token=...` -> `{deleted}`; only the caller's own
+  token (query param, not a path segment - Expo tokens contain `[` `]`).
+- `GET /api/alerts/preferences` -> `{enabled, scope, rise_threshold,
+  fall_threshold}`, or the defaults (off, `watchlist`, 10, 10) when no row.
+- `PUT /api/alerts/preferences` same body/shape; 400 outside the allowed values.
+- `GET /api/alerts` -> `{alerts: [{symbol, session_date, direction,
+  score_before, score_after, sent_at}]}`: the caller's `sent` alerts, last 30 days.
+
 ### The backtest's Risk-Adjusted verdict — withheld for months, now readable
 
 `scripts/backtest.py` ran ONE flat risk-free rate across twenty years in which
@@ -2346,6 +2424,26 @@ dividend_events (symbol, ex_date, amount, source, created_at,
                  -- forward nightly by refresh_pe_data appending the scanner's
                  -- latest coupon. Read by /api/dividend_history (self-heals from
                  -- Yahoo on a miss) and /api/dividend_calendar (latest per symbol).
+```
+
+```sql
+push_devices (token PK, user_id, platform, created_at, last_seen)
+             -- Expo push tokens; a token belongs to whoever registered it last
+             -- (shared phone re-binds). Index on user_id.
+alert_preferences (user_id PK, enabled, scope, rise_threshold, fall_threshold, updated_at)
+             -- scope 'watchlist' (watchlist + holdings) | 'all'; thresholds are
+             -- points on the 0-100 score: 5|10|15|20, NULL = that direction off.
+score_baseline (symbol, session_date, <8 category columns>, source_bar_date,
+                captured_at, PRIMARY KEY (symbol, session_date))
+             -- Category scores at the PREVIOUS session's close, captured just
+             -- before the first rescore of a new session overwrites them.
+             -- Pruned after ALERT_BASELINE_RETENTION_DAYS (10).
+alert_log (id PK, user_id, symbol, session_date, direction, score_before,
+           score_after, status, attempts, created_at, sent_at,
+           UNIQUE (user_id, symbol, session_date, direction))
+             -- status pending|sent|failed|suppressed|expired. symbol '*' /
+             -- direction 'summary' is the daily-cap summary. The UNIQUE is the
+             -- duplicate guard of last resort for overlapping cron calls.
 ```
 
 ```sql
