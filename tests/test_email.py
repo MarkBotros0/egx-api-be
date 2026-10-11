@@ -5,6 +5,8 @@ the machine.
 Run from egx-api-be:  python -m pytest tests/test_email.py -v
 """
 
+import ssl
+
 import pytest
 
 from app.core import email as email_mod
@@ -34,8 +36,9 @@ class _FakeSMTP:
     def __exit__(self, *a):
         return False
 
-    def starttls(self):
+    def starttls(self, context=None):
         self.calls.append("starttls")
+        self.tls_context = context
 
     def login(self, user, pw):
         self.calls.append(("login", user, pw))
@@ -60,6 +63,9 @@ def test_defaults_to_gmail_starttls(smtp_env):
     s = _FakeSMTP.instances[-1]
     assert (s.host, s.port) == ("smtp.gmail.com", 587)
     assert s.calls[0] == "starttls"
+    assert s.tls_context is not None
+    assert s.tls_context.verify_mode == ssl.CERT_REQUIRED
+    assert s.tls_context.check_hostname is True
     assert s.calls[1] == ("login", "me@gmail.com", "app-pw")
     msg = s.calls[2][1]
     assert msg["To"] == "to@x.com"
@@ -71,6 +77,15 @@ def test_defaults_to_gmail_starttls(smtp_env):
 def test_missing_credentials_is_503(monkeypatch):
     monkeypatch.delenv("SMTP_USER", raising=False)
     monkeypatch.delenv("SMTP_PASSWORD", raising=False)
+    with pytest.raises(EmailNotConfigured) as e:
+        SmtpMailer.from_env()
+    assert e.value.status_code == 503
+
+
+def test_non_numeric_port_is_503_not_a_crash(monkeypatch):
+    monkeypatch.setenv("SMTP_USER", "me@gmail.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "app-pw")
+    monkeypatch.setenv("SMTP_PORT", "abc")
     with pytest.raises(EmailNotConfigured) as e:
         SmtpMailer.from_env()
     assert e.value.status_code == 503

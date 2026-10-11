@@ -14,6 +14,7 @@ tests/account_fakes.OutboxMailer.
 import html as _html
 import os
 import smtplib
+import ssl
 from email.message import EmailMessage
 from typing import Protocol
 
@@ -46,9 +47,13 @@ class SmtpMailer:
         password = os.environ.get("SMTP_PASSWORD", "").strip()
         if not user or not password:
             raise EmailNotConfigured()
+        try:
+            port = int(os.environ.get("SMTP_PORT", "").strip() or 587)
+        except ValueError:
+            raise EmailNotConfigured()
         return cls(
             host=os.environ.get("SMTP_HOST", "").strip() or "smtp.gmail.com",
-            port=int(os.environ.get("SMTP_PORT", "").strip() or 587),
+            port=port,
             user=user,
             password=password,
             sender=os.environ.get("SMTP_FROM", "").strip() or f"{APP_NAME} <{user}>",
@@ -63,7 +68,7 @@ class SmtpMailer:
         msg.add_alternative(html, subtype="html")
         try:
             with smtplib.SMTP(self.host, self.port, timeout=15) as smtp:
-                smtp.starttls()
+                smtp.starttls(context=ssl.create_default_context())
                 smtp.login(self.user, self.password)
                 smtp.send_message(msg)
         except (smtplib.SMTPException, OSError) as e:
