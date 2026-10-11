@@ -5,12 +5,11 @@ from __future__ import annotations
 from alert_fakes import FakeDB
 from app.core.card_snapshot import CATEGORY_COLUMNS
 from app.core.alert_store import (
-    capture_baseline,
     load_subscribers,
     prune_baselines,
-    read_previous_rows,
     run_detection,
 )
+from app.core.card_snapshot import upsert_snapshot
 from app.core.composite import CATEGORY_ORDER, PRESETS
 
 
@@ -36,49 +35,54 @@ def _card(bar_date, v=60.0):
     return {"categories": _cats(v), "last_bar_date": bar_date}
 
 
-def test_read_previous_rows_shapes_categories_by_name():
-    row = ("COMI", "2026-10-07") + tuple(float(i) for i in range(len(CATEGORY_ORDER)))
-    db = FakeDB([("FROM risk_snapshot", [row])])
-    out = read_previous_rows(db, ["COMI"])
-    assert out["COMI"]["last_bar_date"] == "2026-10-07"
-    assert out["COMI"]["categories"][CATEGORY_ORDER[1]] == 1.0
+def _full_card(bar_date):
+    return {"categories": _cats(60.0), "last_bar_date": bar_date,
+            "prev_close": 1.0, "sparkline_json": "[]"}
+
+
+def _upsert(db, card):
+    upsert_snapshot(db, "COMI", "now", None, False, True, card)
+
+
+def test_upsert_with_a_card_captures_the_baseline_before_writing_the_row():
+    """Both writers (cron and the dashboard's live upgrade) go through here."""
+    db = FakeDB()
+    _upsert(db, _full_card("2026-10-11"))
+    sqls = [s for s, _ in db.log]
+    assert len(sqls) == 2
+    assert sqls[0].startswith("INSERT INTO score_baseline")
+    assert sqls[1].startswith("INSERT INTO risk_snapshot")
     sql, params = db.log[0]
-    assert "symbol = ANY(%s)" in sql and params == (["COMI"],)
+    cols = ", ".join(CATEGORY_COLUMNS)
+    assert f"(symbol, session_date, {cols}, source_bar_date, captured_at)" in sql
+    assert f"SELECT symbol, %s, {cols}, last_bar_date, %s FROM risk_snapshot" in sql
+    assert "WHERE symbol = %s AND last_bar_date IS DISTINCT FROM %s" in sql
+    # never guess a baseline from an unscored row
+    assert " OR ".join(f"{c} IS NOT NULL" for c in CATEGORY_COLUMNS) in sql
+    # first capture wins
+    assert sql.rstrip().endswith("ON CONFLICT (symbol, session_date) DO NOTHING")
+    assert params == ("2026-10-11", "now", "COMI", "2026-10-11")
 
 
-def test_read_previous_rows_with_no_symbols_skips_the_query():
+def test_upsert_without_a_card_or_a_bar_date_captures_nothing():
     db = FakeDB()
-    assert read_previous_rows(db, []) == {}
-    assert db.log == []
+    _upsert(db, None)
+    _upsert(db, _full_card(None))
+    _upsert(db, _full_card(""))
+    assert db.statements("score_baseline") == []
+    assert len(db.statements("INSERT INTO risk_snapshot")) == 3
 
 
-def test_a_new_session_captures_the_previous_close_as_baseline():
-    db = FakeDB()
-    prev = {"last_bar_date": "2026-10-07", "categories": _cats(50.0)}
-    assert capture_baseline(db, "COMI", prev, _card("2026-10-11"), "now") is True
-    [(sql, params)] = db.statements("INSERT INTO score_baseline")
-    assert "ON CONFLICT (symbol, session_date) DO NOTHING" in sql
-    assert params[:2] == ("COMI", "2026-10-11")
-    assert params[2:2 + len(CATEGORY_ORDER)] == tuple([50.0] * len(CATEGORY_ORDER))
-    assert params[-2:] == ("2026-10-07", "now")
+def test_a_failing_baseline_statement_never_stops_the_snapshot_write():
+    class _Flaky(FakeDB):
+        def execute(self, sql, params=()):
+            if "score_baseline" in sql:
+                raise RuntimeError("baseline broke")
+            return super().execute(sql, params)
 
-
-def test_same_session_rescore_writes_no_baseline():
-    db = FakeDB()
-    prev = {"last_bar_date": "2026-10-11", "categories": _cats(50.0)}
-    assert capture_baseline(db, "COMI", prev, _card("2026-10-11"), "now") is False
-    assert db.log == []
-
-
-def test_no_baseline_from_an_unscored_previous_row_or_without_a_card():
-    db = FakeDB()
-    empty = {"last_bar_date": "2026-10-07", "categories": _cats(None)}
-    assert capture_baseline(db, "COMI", empty, _card("2026-10-11"), "now") is False
-    assert capture_baseline(db, "COMI", None, _card("2026-10-11"), "now") is False
-    full = {"last_bar_date": "2026-10-07", "categories": _cats(50.0)}
-    assert capture_baseline(db, "COMI", full, None, "now") is False
-    assert capture_baseline(db, "COMI", full, {"categories": _cats(1.0), "last_bar_date": None}, "now") is False
-    assert db.log == []
+    db = _Flaky()
+    _upsert(db, _full_card("2026-10-11"))
+    assert len(db.statements("INSERT INTO risk_snapshot")) == 1
 
 
 def test_prune_deletes_baselines_older_than_retention():

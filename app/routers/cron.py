@@ -50,7 +50,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query
 
-from app.core.alert_store import capture_baseline, prune_baselines, read_previous_rows, run_detection
+from app.core.alert_store import prune_baselines, run_detection
 from app.core.cache import get as cache_get, make_key, set as cache_set
 from app.core.card_snapshot import SPARKLINE_BARS, upsert_snapshot
 from app.core.composite import CATEGORY_ORDER, score_categories
@@ -326,10 +326,6 @@ def risk_snapshot(
 
     risk_free_rate_pct = read_risk_free_rate(db)
 
-    try:
-        previous_rows = read_previous_rows(db, slice_)
-    except Exception:
-        previous_rows = {}
     scored_for_alerts: dict = {}
 
     def _upsert(symbol: str, stats: Optional[dict], tradeable: bool,
@@ -439,10 +435,8 @@ def risk_snapshot(
         # be risk-graded would leave it permanently blank on the grid.
         card = _score_card(symbol, df)
         if card is not None:
-            try:
-                capture_baseline(db, symbol, previous_rows.get(symbol), card, now)
-            except Exception:
-                pass
+            # The score-alert baseline is captured inside upsert_snapshot,
+            # just before the row below is overwritten.
             scored_for_alerts[symbol] = {
                 "session_date": card["last_bar_date"],
                 "categories": card["categories"],

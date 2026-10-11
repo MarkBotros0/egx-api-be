@@ -6,7 +6,7 @@ import inspect
 from datetime import datetime
 
 from alert_fakes import FakeDB
-from app.core import macro_fetch
+from app.core import card_snapshot, macro_fetch
 from app.routers import cron
 
 
@@ -38,14 +38,17 @@ def test_quiet_hours_are_reported(monkeypatch):
     assert out["skipped"] == "quiet-hours"
 
 
-def test_baseline_is_captured_before_the_row_is_overwritten():
-    """Order matters: capture reads the row the upsert is about to replace."""
+def test_baseline_capture_lives_in_the_shared_writer_not_the_cron():
+    """
+    Capture rides upsert_snapshot, so the dashboard's live upgrade cannot
+    overwrite a row without first saving the previous session's scores.
+    """
     src = inspect.getsource(cron.risk_snapshot)
-    assert src.index("read_previous_rows(") < src.index("for symbol in slice_")
-    capture = src.index("capture_baseline(")
-    assert capture > src.index("card = _score_card(symbol, df)")
-    assert capture < src.index("_upsert(symbol, stats, is_tradeable")
+    assert "capture_baseline" not in src and "read_previous_rows" not in src
+    assert "_upsert(symbol, stats, is_tradeable" in src
     assert "run_alerts(" in src and '"alerts": alerts' in src
+    writer = inspect.getsource(card_snapshot.upsert_snapshot)
+    assert writer.index("_capture_baseline(") < writer.index("INSERT INTO risk_snapshot")
 
 
 def test_read_cached_macro_never_touches_the_network(monkeypatch):

@@ -208,6 +208,39 @@ def attach_risk_bands(rows: list, cards: list) -> None:
         card["risk_band_label"] = (g or {}).get("band_label")
 
 
+def _capture_baseline(db, symbol: str, now: str, session: str) -> None:
+    """
+    Score alerts: save the row's CURRENT category scores as `session`'s
+    baseline, just before a card carrying a new bar date overwrites them.
+
+    Lives in the one writer so BOTH writers capture — the cron and the
+    dashboard's live upgrade. When the app refreshed a watched stock before
+    the cron reached it, the row already carried today's bar date by the time
+    the cron looked, and that stock never alerted that session.
+
+    One statement, reading the row it is about to replace:
+      * same bar date -> nothing (a same-session rescore is not a new close);
+      * every category NULL -> nothing (never guess a baseline from an
+        unscored row);
+      * ON CONFLICT DO NOTHING -> the first capture of a session wins.
+    Swallowed: an alerts side-table must never cost the snapshot write.
+    """
+    cols = ", ".join(CATEGORY_COLUMNS)
+    any_scored = " OR ".join(f"{c} IS NOT NULL" for c in CATEGORY_COLUMNS)
+    try:
+        db.execute(
+            f"INSERT INTO score_baseline (symbol, session_date, {cols}, "
+            "source_bar_date, captured_at) "
+            f"SELECT symbol, %s, {cols}, last_bar_date, %s FROM risk_snapshot "
+            "WHERE symbol = %s AND last_bar_date IS DISTINCT FROM %s "
+            f"AND ({any_scored}) "
+            "ON CONFLICT (symbol, session_date) DO NOTHING",
+            (session, now, symbol, session),
+        )
+    except Exception as e:
+        print(f"[alerts] baseline capture failed for {symbol}: {e}")
+
+
 def upsert_snapshot(db, symbol: str, now: str, stats: Optional[dict],
                     tradeable: bool, ok: bool,
                     card: Optional[dict] = None) -> None:
@@ -231,7 +264,14 @@ def upsert_snapshot(db, symbol: str, now: str, stats: Optional[dict],
     `ok` resets `consecutive_failures` to 0 and anything else increments it, so
     a symbol that starts working un-demotes itself on its first good fetch —
     a counter, never a blocklist.
+
+    A card with a bar date first captures the score-alert baseline (see
+    `_capture_baseline`), so the previous session's scores are saved before
+    this statement replaces them.
     """
+    if card is not None and card.get("last_bar_date"):
+        _capture_baseline(db, symbol, now, card["last_bar_date"])
+
     card_cols, card_vals = [], []
     if card is not None:
         for name, column in zip(CATEGORY_ORDER, CATEGORY_COLUMNS):
