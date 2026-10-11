@@ -158,9 +158,9 @@ def test_both_dividend_routes_are_registered_and_behind_the_gate():
     the whole route table; this is the local canary.
     """
     from app.core.auth import PUBLIC_ENDPOINTS
-    from app.main import app
+    from route_table import api_paths
 
-    paths = {r.path for r in app.routes}
+    paths = api_paths()
     assert "/api/dividend_history" in paths
     assert "/api/dividend_calendar" in paths
     for _, p in PUBLIC_ENDPOINTS:

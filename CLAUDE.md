@@ -958,6 +958,16 @@ shipped" — which is exactly what **nine** endpoints (`tickers`, `ohlcv`,
 non-allowlisted route answers an anonymous caller, so the guarantee is
 verified by enumeration rather than by memory.
 
+**It reads the route table from the OpenAPI schema (`tests/route_table.py`),
+never from `app.routes`.** FastAPI 0.139+ wraps each `include_router` in a
+private `_IncludedRouter`, so walking `app.routes` for `APIRoute`s found ZERO
+routes and the sweep passed while checking nothing — only its "> 15 routes"
+guard caught it (2026-10-11). The schema cannot see an
+`include_in_schema=False` route, so a test forbids that flag in `app/`.
+`requirements.txt` pins **`fastapi>=0.115,<0.144`** — the range the suite has
+passed on. Raise the ceiling deliberately, after running the suite on the new
+version, not by letting a fresh deploy pick it.
+
 Routers that need the caller's identity still declare
 `Depends(get_current_user)`. The middleware is a second layer, not a
 replacement — do not remove those.

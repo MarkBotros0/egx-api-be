@@ -390,9 +390,9 @@ def test_news_route_is_registered_and_requires_auth():
     caller's holdings — so it could not be public even if policy allowed it.
     """
     from app.core.auth import PUBLIC_ENDPOINTS
-    from app.main import app
+    from route_table import api_paths
 
-    paths = {r.path for r in app.routes}
+    paths = api_paths()
     assert "/api/news" in paths, "router not wired into main.py"
     assert not any(p == "/api/news" for _, p in PUBLIC_ENDPOINTS)
 

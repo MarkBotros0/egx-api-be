@@ -14,7 +14,7 @@ import os
 
 import pytest
 from fastapi import HTTPException
-from fastapi.routing import APIRoute
+from route_table import api_routes
 
 os.environ.setdefault("AUTH_SECRET", "test-secret-for-the-gate")
 os.environ.setdefault("DATABASE_URL", "postgresql://unused/unused")
@@ -106,23 +106,29 @@ def test_a_trailing_slash_does_not_open_a_closed_path():
 # ---------------------------------------------------------------------------
 
 def _app_routes():
-    from app.main import app
-    out = []
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
-            continue
-        if not route.path.startswith("/api/"):
-            continue
-        for method in route.methods:
-            if method in ("HEAD", "OPTIONS"):
-                continue
-            out.append((method, route.path))
-    return sorted(set(out))
+    return api_routes()
 
 
 def test_the_app_actually_has_routes():
     """Guards the tests below from passing vacuously on an import failure."""
     assert len(_app_routes()) > 15
+
+
+def test_no_route_hides_from_the_schema():
+    """
+    The sweep below reads routes from the OpenAPI schema (see route_table.py),
+    which cannot see a route declared include_in_schema=False. Such a route
+    would be exempt from the "nothing is public" check, so none may exist.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent / "app"
+    hiding = [
+        str(f.relative_to(root.parent))
+        for f in root.rglob("*.py")
+        if "vendor" not in f.parts and "include_in_schema" in f.read_text(encoding="utf-8")
+    ]
+    assert not hiding, f"routes hidden from the schema escape the auth sweep: {hiding}"
 
 
 def test_every_route_except_the_allowlist_rejects_an_anonymous_caller():
