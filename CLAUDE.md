@@ -82,7 +82,7 @@ egx-api-be/                     # Python FastAPI backend
       sales.py                  # Realized-gains maths (pure)
       dividends.py              # Dividend ledger maths + the one spelling of its queries
       score_alerts.py           # Score alerts: detect_signals, daily cap, copy, quiet hours (pure)
-      alert_store.py            # Score alerts: baseline capture, subscribers, run_detection (DB)
+      alert_store.py            # Score alerts: subscribers, run_detection, prune_baselines (DB)
       expo_push.py              # Score alerts: Expo Push delivery (deliver_pending, injected sender)
     routers/
       analysis.py               # GET /api/analysis (single stock + batch mode)
@@ -1505,15 +1505,24 @@ word) `buy`, `sell`, `opportunity`, `risk`, `recommend` - enforced by a test ove
 `BANNED_WORDS` in `core/score_alerts.py`.
 
 **Baseline = the previous session's close, captured before it is overwritten.**
-When a rescore carries a new `last_bar_date`, the old row's eight category
-scores go into `score_baseline` (`ON CONFLICT DO NOTHING`, first capture wins).
-No baseline (first scoring, previously unscorable) -> no alert for that symbol
+Capture lives INSIDE `card_snapshot.upsert_snapshot`, the one writer both the
+cron and the dashboard's live upgrade (`routers/analysis.py`) use - so a watched
+stock the app refreshes before the cron reaches it still gets its baseline. When
+the card being written carries a `last_bar_date`, one `INSERT ... SELECT` issued
+just before the upsert copies the row about to be replaced into `score_baseline`
+- only if its bar date differs (a same-session rescore captures nothing) and at
+least one category is non-NULL; `ON CONFLICT DO NOTHING`, first capture wins. A
+failure there is logged and never stops the snapshot write. No baseline (first scoring, previously unscorable) -> no alert for that symbol
 that session; a baseline is never guessed, so there is no "0 -> 65" alert.
 Both ends are blended with the SAME regime (`blend_categories`) so a market-wide
 regime flip cannot fire on every stock, and with each subscriber's OWN weights,
 so the number in the push equals the number their stock page shows. Threshold
 unit is points on the 0-100 score; allowed 5/10/15/20 or null (direction off);
-the boundary is inclusive. A user switching scope from watchlist to all may
+the boundary is inclusive. The regime is read CACHE-ONLY
+(`macro_fetch.read_cached_macro`, never the network inside the cron budget);
+`None` when the macro cache is empty, and modulation is then skipped on both
+ends. Detection, the "already logged" dedupe and the daily cap are all scoped to
+each SESSION date (a call can score symbols carrying different bar dates). A user switching scope from watchlist to all may
 receive a burst for moves before they subscribed - accepted, bounded by the cap.
 
 **Measured 2026-10-11 10:42 Cairo: the tvDatafeed daily bar includes today's
@@ -1521,9 +1530,12 @@ in-progress bar** (`get_OHLCV_data(..., "Daily", 5)` returned a `2026-10-11` bar
 with partial volume for COMI, ETEL, FWRY), so scores move intraday and alerts
 fire mid-session.
 
-**Scheduling (external, cron-job.org).** For intraday alerts the job must call
-`POST /api/cron/risk_snapshot` **every minute, Sun-Thu 10:00-15:30
-Africa/Cairo**, in addition to the existing schedule. The response carries
+**Scheduling (external, cron-job.org).** For intraday alerts
+`POST /api/cron/risk_snapshot` must be called **every minute, Sun-Thu
+10:00-15:30 Africa/Cairo**, as well as on the existing post-close schedule.
+Use ONE cron-job.org job for this endpoint whose schedule is the SUPERSET of
+both (overlapping calls are safe - see the delivery claim below - but two jobs
+firing on the same minute just waste the scoring budget). The response carries
 `alerts` = `{queued, sent, skipped, error}` (`skipped` is `"deadline"` or
 `"quiet-hours"`; `error` is the exception class name if alert code crashed).
 A crash in alert code never fails the scoring call.
@@ -1547,8 +1559,21 @@ Past that, alerts are skipped (`skipped: "deadline"`) and everything stays
 - Ticket status `ok` -> `sent`; ticket error `DeviceNotRegistered` deletes that
   token. Receipts are not polled in v1. Expo's ticket shapes are normalised in
   `expo_push.py`.
-- Overlapping cron calls cannot send twice: `alert_log` UNIQUE + `ON CONFLICT DO
-  NOTHING`, and detection skips already-logged keys.
+- Overlapping cron calls: the QUEUE is deduped by `alert_log`'s UNIQUE
+  `(user_id, symbol, session_date, direction)` + `ON CONFLICT DO NOTHING` (and
+  detection skips already-logged keys); SENDING is guarded by a delivery claim.
+  `deliver_pending` first reclaims rows stuck in `sending` for over 2 min
+  (`claimed_at`; back to `pending`, or `failed` at the attempt limit), then
+  claims up to 200 `pending` rows newest session first with one
+  `UPDATE ... SET status = 'sending' ... FOR UPDATE SKIP LOCKED RETURNING`, so a
+  concurrent call claims nothing it does not own. Outcomes are written per Expo
+  batch (`sent` / back to `pending` with `attempts + 1` / `failed`). No new batch
+  starts past 26s into the call (`ALERTS_SEND_DEADLINE_SECONDS`); claimed rows
+  not started go back to `pending` without an attempt counted. A call killed
+  after Expo accepted a batch but before it was marked can still re-send that
+  batch once, after the 2-min reclaim.
+- Deleting a user (`DELETE /api/users/{id}`) removes their `push_devices`,
+  `alert_preferences` and `alert_log` rows in the same transaction.
 
 **Routes (all bearer-auth; the auth-gate sweep covers them):**
 - `POST /api/push/devices` `{token, platform: "ios"|"android"}` -> 201
