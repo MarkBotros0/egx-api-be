@@ -79,3 +79,24 @@ def test_forgot_and_resend_answer_identically_for_known_and_unknown_emails(ctx):
         assert known.content == unknown.content
     # The reset email is delivered after the response, by the background task.
     assert any("set-password" in m["text"] for m in mailer.sent)
+
+
+def test_google_route_signs_in(ctx, monkeypatch):
+    client, store, _ = ctx
+    from app.core import oauth
+    monkeypatch.setattr(oauth, "verify_google", lambda tok: oauth.Identity(sub="g1", email="g@x.com", name="G"))
+    r = client.post("/api/auth/google", json={"idToken": "anything"})
+    assert r.status_code == 200 and r.json()["user"]["email"] == "g@x.com"
+    assert store.by_provider("google", "g1")
+
+
+def test_apple_route_stores_refresh_token_once(ctx, monkeypatch):
+    client, store, _ = ctx
+    from app.core import oauth
+    monkeypatch.setattr(oauth, "verify_apple", lambda tok: oauth.Identity(sub="a1", email="a@x.com", name=""))
+    calls = []
+    monkeypatch.setattr(oauth, "exchange_apple_code", lambda code: calls.append(code) or "rt-1")
+    for _ in range(2):
+        assert client.post("/api/auth/apple", json={"identityToken": "t", "authorizationCode": "c", "name": "Ann"}).status_code == 200
+    acc = store.by_provider("apple", "a1")
+    assert acc.apple_refresh_token == "rt-1" and acc.name == "Ann" and calls == ["c"]

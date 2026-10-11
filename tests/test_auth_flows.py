@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from account_fakes import MemoryAccountStore, OutboxMailer
 from app.core import auth_flows as flows
 from app.core.auth import hash_password
+from app.core.oauth import Identity
 
 NOW = datetime(2026, 10, 12, 9, 0, tzinfo=timezone.utc)
 LATER = NOW + timedelta(minutes=2)
@@ -286,3 +287,57 @@ def test_session_shape(store):
     s = flows.session(a)
     assert s["token_type"] == "bearer" and s["access_token"]
     assert s["user"] == {"id": a.id, "email": "a@x.com", "name": "A", "role": "user"}
+
+
+def test_oauth_creates_a_verified_account(store):
+    acc = flows.oauth_sign_in(store, provider="google",
+                              identity=Identity(sub="g1", email="new@x.com", name="New"), now=NOW)
+    assert acc.email_verified and acc.google_sub == "g1" and acc.name == "New" and acc.password_hash is None
+
+
+def test_oauth_finds_by_sub_first(store):
+    first = flows.oauth_sign_in(store, provider="apple", identity=Identity(sub="a1", email="r@privaterelay.appleid.com", name=""), now=NOW)
+    again = flows.oauth_sign_in(store, provider="apple", identity=Identity(sub="a1", email=None, name=""), now=NOW)
+    assert again.id == first.id
+
+
+def test_oauth_links_a_verified_password_account_by_email_and_keeps_its_password(store):
+    a = store.create(email="mark@gmail.com", name="Mark", password_hash=hash_password("keep-this-pw"), email_verified=True, now=NOW)
+    acc = flows.oauth_sign_in(store, provider="google", identity=Identity(sub="g1", email="mark@gmail.com", name="Other"), now=NOW)
+    assert acc.id == a.id and acc.google_sub == "g1" and acc.name == "Mark"
+    assert flows.login(store, email="mark@gmail.com", password="keep-this-pw")
+
+
+def test_oauth_takeover_of_an_unverified_account_clears_the_password(store, mailer):
+    """Review focus 1."""
+    flows.signup(store, mailer, name="", email="victim@x.com", password="attacker-pw", now=NOW)
+    acc = flows.oauth_sign_in(store, provider="google", identity=Identity(sub="g9", email="victim@x.com", name="Victim"), now=NOW)
+    assert acc.email_verified and acc.password_hash is None and acc.name == "Victim"
+    with pytest.raises(HTTPException) as e:
+        flows.login(store, email="victim@x.com", password="attacker-pw")
+    assert e.value.status_code == 401
+    # The pre-registered verify link (carrying the attacker's password) is dead too.
+    with pytest.raises(HTTPException) as e:
+        flows.verify_email(store, token=mailer.last_link(), now=NOW)
+    assert e.value.detail == "invalid_or_expired_link"
+    assert store.by_email("victim@x.com").password_hash is None
+
+
+def test_oauth_disabled_account_is_403(store):
+    a = store.create(email="d@x.com", name="", password_hash=None, email_verified=True, now=NOW, google_sub="g1")
+    store.update(a.id, is_active=False)
+    with pytest.raises(HTTPException) as e:
+        flows.oauth_sign_in(store, provider="google", identity=Identity(sub="g1", email="d@x.com", name=""), now=NOW)
+    assert e.value.status_code == 403
+
+
+def test_apple_without_email_and_unknown_sub_is_400(store):
+    with pytest.raises(HTTPException) as e:
+        flows.oauth_sign_in(store, provider="apple", identity=Identity(sub="a-new", email=None, name=""), now=NOW)
+    assert e.value.status_code == 400
+
+
+def test_name_hint_fills_an_empty_name(store):
+    acc = flows.oauth_sign_in(store, provider="apple", identity=Identity(sub="a1", email="a@x.com", name=""),
+                              name_hint="  Sara  K ", now=NOW)
+    assert acc.name == "Sara K"

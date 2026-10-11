@@ -50,6 +50,8 @@ def test_only_the_ways_in_and_the_crons_are_public():
         ("POST", "/api/auth/verify-email"),
         ("POST", "/api/auth/forgot-password"),
         ("POST", "/api/auth/set-password"),
+        ("POST", "/api/auth/google"),
+        ("POST", "/api/auth/apple"),
         ("POST", "/api/pe/refresh"),
         ("POST", "/api/cron/risk_snapshot"),
     })

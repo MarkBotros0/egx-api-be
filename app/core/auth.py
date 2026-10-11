@@ -198,6 +198,8 @@ PUBLIC_ENDPOINTS = frozenset({
     ("POST", "/api/auth/verify-email"),
     ("POST", "/api/auth/forgot-password"),
     ("POST", "/api/auth/set-password"),
+    ("POST", "/api/auth/google"),
+    ("POST", "/api/auth/apple"),
     ("POST", "/api/pe/refresh"),      # scheduled; guarded by PE_REFRESH_SECRET
     ("POST", "/api/cron/risk_snapshot"),  # scheduled; guarded by CRON_SECRET
 })

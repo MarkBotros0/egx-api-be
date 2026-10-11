@@ -183,3 +183,36 @@ def login(store, *, email: str, password: str, now: Optional[datetime] = None) -
     if not account.email_verified:
         raise HTTPException(status_code=403, detail="email_not_verified")
     return account
+
+
+def oauth_sign_in(store, *, provider: str, identity, name_hint: str = "", now: datetime) -> Account:
+    """Resolve a verified Google/Apple identity to an account (spec §3)."""
+    name = clean_name(identity.name or name_hint)
+    account = store.by_provider(provider, identity.sub)
+    if account is None:
+        if not identity.email:
+            raise HTTPException(status_code=400, detail="Your Apple ID did not share an email address.")
+        email = normalize_email(identity.email)
+        account = store.by_email(email)
+        if account is None:
+            account = store.create(email=email, name=name, password_hash=None, email_verified=True,
+                                   now=now, **{f"{provider}_sub": identity.sub})
+        else:
+            fields = {f"{provider}_sub": identity.sub}
+            if not account.email_verified:
+                # The provider just proved the inbox. A password set by whoever
+                # pre-registered this email must not survive that.
+                fields.update(password_hash=None, email_verified=True)
+                # ...and neither may a pending sign-up link, which carries the
+                # password its author would set on the account.
+                store.delete_tokens(account.id, PURPOSE_VERIFY)
+            if not account.name and name:
+                fields["name"] = name
+            store.update(account.id, **fields)
+            account = store.by_id(account.id)
+    elif not account.name and name:
+        store.update(account.id, name=name)
+        account = store.by_id(account.id)
+    if not account.is_active:
+        raise HTTPException(status_code=403, detail=DISABLED)
+    return account
