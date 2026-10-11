@@ -1277,7 +1277,9 @@ reintroduce the divergence measured once at **66 "Buy" on the card against 45
   the 14:30 bell has rung.
 - **Sorting by score exists only because of this.** While cards were fetched a
   page at a time, off-screen stocks had no score, so the control was
-  structurally impossible.
+  structurally impossible. **The dashboard OPENS sorted by Score** (web and
+  mobile, since 2026-10-11); "Default" is the ticker-file order. Unscored
+  stocks sink to the bottom whichever sort is active.
 
 **It also warms the market-regime card for free.** `read_cached_scores` falls
 back to the snapshot when the in-memory cache misses, which per this document
