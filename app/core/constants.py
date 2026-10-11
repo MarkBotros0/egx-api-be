@@ -251,3 +251,22 @@ NEWS_MAX_UNTAGGED_ITEMS = 15
 # longer than a price — no reason to re-fetch a stable list every 15 minutes.
 DIVIDEND_HISTORY_TTL_SECONDS = 6 * 3600     # 6h
 DIVIDEND_HISTORY_TIMEOUT_SECONDS = 6.0      # one Yahoo GET; generous for a cold serverless container
+
+# ---------------------------------------------------------------------------
+# Score alerts (mobile push). See CLAUDE.md "Score alerts".
+# ---------------------------------------------------------------------------
+# Thresholds are POINTS on the 0-100 composite, not a relative percentage: a
+# relative 10% would fire a score of 30 on a 3-point wobble.
+ALERT_THRESHOLD_CHOICES = (5, 10, 15, 20)
+ALERT_DEFAULT_THRESHOLD = 10
+ALERT_SCOPES = ("watchlist", "all")
+ALERT_DAILY_CAP = 10
+ALERT_MAX_ATTEMPTS = 3
+ALERT_QUIET_START_HOUR = 22
+ALERT_QUIET_END_HOUR = 8
+ALERT_TIMEZONE = "Africa/Cairo"
+ALERT_BASELINE_RETENTION_DAYS = 10
+ALERT_CHANNEL_ID = "score-alerts"
+EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
+EXPO_BATCH_SIZE = 100
+EXPO_TIMEOUT_SECONDS = 3.0

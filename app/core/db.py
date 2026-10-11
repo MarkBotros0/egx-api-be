@@ -516,6 +516,73 @@ def init_db(db: _DB) -> None:
             f"ALTER TABLE risk_snapshot ADD COLUMN IF NOT EXISTS {column} {coltype}"
         )
 
+    # --- Score alerts (mobile push) -----------------------------------------
+    # A device token belongs to whoever registered it last: a shared phone
+    # re-binds rather than duplicating. No FK to users, matching the rest of
+    # this schema (users are deleted through the admin API, which cleans up).
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS push_devices (
+            token TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_seen TEXT NOT NULL
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_push_devices_user ON push_devices(user_id)")
+
+    # NULL threshold = that direction is off. Points on the 0-100 score.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS alert_preferences (
+            user_id TEXT PRIMARY KEY,
+            enabled BOOLEAN NOT NULL DEFAULT FALSE,
+            scope TEXT NOT NULL DEFAULT 'watchlist',
+            rise_threshold INTEGER DEFAULT 10,
+            fall_threshold INTEGER DEFAULT 10,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+    # The category scores a symbol carried at the PREVIOUS session's close,
+    # captured just before the first rescore of a new session overwrites them.
+    # Weight-free and macro-free like risk_snapshot, so every subscriber's own
+    # sliders apply to both ends of the comparison.
+    baseline_categories = ",\n            ".join(
+        f"{c} DOUBLE PRECISION" for c in CATEGORY_COLUMNS
+    )
+    db.execute(f"""
+        CREATE TABLE IF NOT EXISTS score_baseline (
+            symbol TEXT NOT NULL,
+            session_date TEXT NOT NULL,
+            {baseline_categories},
+            source_bar_date TEXT,
+            captured_at TEXT NOT NULL,
+            PRIMARY KEY (symbol, session_date)
+        )
+    """)
+
+    # One row per (user, stock, session, direction). The UNIQUE constraint is
+    # the duplicate guard of last resort: two overlapping cron calls cannot
+    # both queue the same push.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS alert_log (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            session_date TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            score_before DOUBLE PRECISION,
+            score_after DOUBLE PRECISION,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            sent_at TEXT,
+            UNIQUE (user_id, symbol, session_date, direction)
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_alert_log_status ON alert_log(status)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_alert_log_user_session ON alert_log(user_id, session_date)")
+
     for key in ("pe_last_successful_fetch", "pe_last_attempt_status"):
         db.execute(
             "INSERT INTO settings (key, value) VALUES (%s, '') ON CONFLICT (key) DO NOTHING",
