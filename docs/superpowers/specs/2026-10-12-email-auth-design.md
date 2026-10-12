@@ -114,8 +114,12 @@ Both use `PyJWT`'s `PyJWKClient` (requirements: `pyjwt[crypto]`), JWKS cached in
   {`https://accounts.google.com`, `accounts.google.com`}; `aud` ∈ `GOOGLE_CLIENT_IDS`
   (comma-separated: web, Android, iOS); require `email_verified == true`. Name from `name`.
 - **Apple:** JWKS `https://appleid.apple.com/auth/keys`; `iss == https://appleid.apple.com`;
-  `aud` ∈ `APPLE_CLIENT_IDS` (comma-separated: `com.markbotros.borsacompass`, plus
-  `host.exp.Exponent` so Expo Go works in development). Apple sends `email` only on first
+  `aud` ∈ `APPLE_CLIENT_IDS` (production: `com.markbotros.borsacompass` ONLY). Expo Go's
+  shared audience `host.exp.Exponent` is rejected (401) unless the dev-only flag
+  `APPLE_ALLOW_EXPO_GO=1` is set on a development backend — every Expo Go project receives
+  tokens with that audience, so accepting it in production would let anyone's Expo Go app
+  link to an account by email. The token/revoke calls use the first `APPLE_CLIENT_IDS` entry
+  that is not `host.exp.Exponent`. Apple sends `email` only on first
   sign-in and the name never in the token — the app passes `name` from the native response.
   If `authorizationCode` is present and `APPLE_TEAM_ID`/`APPLE_KEY_ID`/`APPLE_PRIVATE_KEY` are
   set, exchange it at `https://appleid.apple.com/auth/token` (client secret = ES256 JWT) and
@@ -136,10 +140,12 @@ Both use `PyJWT`'s `PyJWKClient` (requirements: `pyjwt[crypto]`), JWKS cached in
 ### Email (`app/core/email.py`)
 
 `smtplib.SMTP(SMTP_HOST, SMTP_PORT)` + `starttls()` + login; envs `SMTP_HOST`
-(default `smtp.gmail.com`), `SMTP_PORT` (default `587`), `SMTP_USER`, `SMTP_PASSWORD`,
-`SMTP_FROM` (default `"Borsa Compass <SMTP_USER>"`). Multipart plain + minimal HTML.
-Links: `{FE_BASE_URL}/verify-email?token=…`, `{FE_BASE_URL}/set-password?token=…` (reset and
-invite share the page). Missing SMTP or `FE_BASE_URL` → `503 "Email is not configured"` on
+(default `smtp.gmail.com`), `SMTP_PORT` (default `587`), `SMTP_USER`, `SMTP_PASSWORD`.
+The sender is always `"Borsa Compass <SMTP_USER>"`. Multipart plain + minimal HTML.
+Links use the FIRST entry of `FRONTEND_ORIGIN` (the production web origin; the same variable
+sets CORS): `{origin}/verify-email?token=…`, `{origin}/set-password?token=…` (reset and
+invite share the page). It is read raw, with no localhost default. Missing SMTP or
+`FRONTEND_ORIGIN` → `503 "Email is not configured"` on
 routes that must send (signup, invite, admin reset); the "always 200" routes also 503 rather
 than pretend. An SMTP failure → `502 "Could not send email"`; the token row is deleted so the
 cooldown doesn't block a retry. Four templates: verify, reset, invite ("{admin name} invited you
@@ -149,7 +155,9 @@ to Borsa Compass"), already-registered. Tests swap the sender for an in-memory o
 
 - `GET /api/users` → `{id, email, name, role, is_active, email_verified, methods:[password|google|apple], created_at}`.
 - `POST /api/users` `{email, name?}` → creates an unverified user with no password, sends an
-  `invite` email, `201`. Existing email → `409`.
+  `invite` email, `201`. Existing email → `409`, except an active account nobody has set up
+  (unverified, no password, no Google/Apple), which is re-invited (`201`, `429` inside the
+  cooldown) — a failed invite email must not strand the address.
 - `POST /api/users/{id}/send-reset` → sends a `reset` email (`invite` if the user has no
   password and never verified). Replaces `POST /api/users/{id}/password`.
 - `PATCH` (active) and `DELETE` keep the self/last-admin guards. `DELETE` now removes all
@@ -189,9 +197,13 @@ to Borsa Compass"), already-registered. Tests swap the sender for an in-memory o
 
 ## 7. Env vars
 
-Backend: `AUTH_ADMINS` (emails), `FE_BASE_URL`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
-`SMTP_PASSWORD`, `SMTP_FROM`, `GOOGLE_CLIENT_IDS`, `APPLE_CLIENT_IDS`, `APPLE_TEAM_ID`,
-`APPLE_KEY_ID`, `APPLE_PRIVATE_KEY`. Removed: `AUTH_USERS`.
+Backend: `AUTH_ADMINS` (emails), `FRONTEND_ORIGIN` (comma-separated; the FIRST entry must be
+the production web origin — it is the base of every emailed link, and the list is the CORS
+allow-list), `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `GOOGLE_CLIENT_IDS`
+(web, Android, iOS client ids), `APPLE_CLIENT_IDS` (the bundle id only in production),
+`APPLE_TEAM_ID`, `APPLE_KEY_ID`, `APPLE_PRIVATE_KEY` (needed for App Store review: deleting
+an account must revoke the Apple grant). Dev backends only: `APPLE_ALLOW_EXPO_GO=1` — never
+in production. Removed: `AUTH_USERS`, `FE_BASE_URL`, `SMTP_FROM`.
 Web: `NEXT_PUBLIC_GOOGLE_CLIENT_ID`. Mobile: `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID`,
 `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID`.
 
@@ -219,11 +231,18 @@ real Gmail delivery of all four emails.
 
 ## 9. Rollout order
 
-1. Backend deployed with new env vars (SMTP, `FE_BASE_URL`, `AUTH_ADMINS`, Google/Apple ids).
-2. User runs the reset script against production.
-3. Web deployed; admin signs in with Google.
-4. Mobile dev build for device tests.
-Old clients (username login) stop working at step 1 — accepted, since all accounts are reset.
+One order, used everywhere (this spec, the reset script, CLAUDE.md):
+
+1. Set the backend env vars on Vercel (`FRONTEND_ORIGIN` with the production web origin first,
+   `SMTP_*`, `AUTH_ADMINS`, `GOOGLE_CLIENT_IDS`, `APPLE_*`) and the web's
+   `NEXT_PUBLIC_GOOGLE_CLIENT_ID`. Before production, deploy a Vercel PREVIEW of the backend
+   with real SMTP and confirm a forgot-password email actually arrives (background sends after
+   the response are unverified on Vercel's Python runtime).
+2. Run `scripts/reset_users_for_email_auth.py` against production (from the email-auth code).
+3. Deploy the backend.
+4. Deploy the web; the admin signs in with Google or Forgot password.
+Then a mobile dev build for device tests. Sign-in is broken between steps 2 and 4 (old
+clients use username login) — accepted, since every account is reset anyway.
 
 ## 10. User setup checklist
 
@@ -248,3 +267,11 @@ Review of the backend tasks changed the behaviour below; it supersedes the text 
 4. **SMTP** uses STARTTLS with a certificate-verifying context; a non-numeric `SMTP_PORT` answers `503`.
 5. **OAuth hardening.** Tokens are decoded with 60 s clock leeway; JWKS fetch failures answer `503 "<Provider> sign-in is temporarily unavailable"` (not `401`), with a 5 s JWKS timeout. Apple's email is used only when Apple marks it `email_verified` (otherwise `sub`-only; an unknown `sub` without an email is `400`). Disabled accounts are rejected before any linking write. Linking an unverified account also deletes its pending verify links and takes the provider's name.
 6. **Account deletion** lives in `AccountStore.delete_account` (one transaction over `USER_OWNED_TABLES`, then `users`) and `flows.delete_account`, shared by `DELETE /api/auth/me` and admin `DELETE /api/users/{id}`. The `SET role` grep test now scans every file in `app/routers/`; `users.py` writes no password (test-pinned).
+7. **Final review fixes.**
+   - Apple: `host.exp.Exponent` is rejected unless `APPLE_ALLOW_EXPO_GO=1` (dev only); exchange/revoke use the first non-Expo-Go audience (see §3).
+   - Email env: `FE_BASE_URL` and `SMTP_FROM` are gone; links use the first `FRONTEND_ORIGIN` entry (see §3, §7).
+   - Sign-up creates the account with `name = ""`; the name arrives only through `pending_name` on verify, and verify emails greet plain "Hi,". Failure logs name the recipient's domain only.
+   - Re-inviting an account nobody set up resends the invite (see §4).
+   - **Abuse limits** (`app/core/limits.py`, counters in a `rate_limits (key, window_start, count)` table bumped by one atomic upsert per fixed window): signup / resend-verification / forgot-password allow 5 requests per IP (first `X-Forwarded-For` entry) per 10 minutes, then answer `check_email` and send nothing; every send attempt (all purposes) counts against `email:global`, 300 per UTC day — over it nothing is sent, public routes still answer `check_email`, admin routes `429 "Daily email limit reached — try again tomorrow."`; login allows 10 failed attempts per IP per 15 minutes, then `429 "Too many attempts — try again in a few minutes."` before checking the password.
+   - **Pruning** (`limits.prune_auth`, best-effort from the nightly `POST /api/pe/refresh`): links used or expired over a day ago, rate-limit windows over two days old, and accounts over a week old that are unverified, passwordless, unlinked, role user, without a live link and owning no rows.
+   - Not yet verified (I3): background sends after the response on Vercel's Python runtime. Verify a forgot-password email arrives on a Vercel preview deploy before production (rollout step 1).

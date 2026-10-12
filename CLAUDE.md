@@ -29,15 +29,15 @@ An educational stock market analysis and portfolio tracker for the **Egyptian Ex
 Environment variables: `DATABASE_URL` (Neon connection string, includes
 `sslmode=require`), `AUTH_SECRET`, `AUTH_ADMINS`, `PE_REFRESH_SECRET`, and
 **`CRON_SECRET`** (guards `POST /api/cron/risk_snapshot`; scheduling is
-external, see that endpoint). The email-account variables (`FE_BASE_URL`,
+external, see that endpoint). The email-account variables (`FRONTEND_ORIGIN`,
 `SMTP_*`, `GOOGLE_CLIENT_IDS`, `APPLE_*`) are listed under *Auth, roles and
 user management*.
 
 **Frontend environment variables** live in `egx-api-fe/.env`:
 `NEXT_PUBLIC_API_BASE_URL` (the backend's `/api` base) and
 **`NEXT_PUBLIC_GOOGLE_CLIENT_ID`** (the Google web OAuth client; unset hides
-`GoogleSignInButton`). The web no longer reads `FE_BASE_URL` — it is a BACKEND
-variable now, the address the emailed links point at.
+`GoogleSignInButton`). `FE_BASE_URL` no longer exists anywhere: the address the
+emailed links point at is the FIRST entry of the backend's `FRONTEND_ORIGIN`.
 
 ## Directory Layout
 
@@ -978,7 +978,9 @@ replacement — do not remove those.
 home), plus `/verify-email` and `/set-password`, which are **always
 reachable** — an emailed link must work whoever is signed in — and static
 assets (`/_next`, `/icons`, `/manifest.json`, `/sw.js`, favicons). Everything
-else redirects to `/login?next=…`. `Navbar` and `BottomTabBar` return `null`
+else redirects to `/login?next=…`; the login page follows `next` only when it
+starts with `/` and not `//` or `/\` (anything else lands on `/`), so a crafted
+link cannot bounce a fresh sign-in to another site. `Navbar` and `BottomTabBar` return `null`
 when unauthenticated so the signed-out pages stand alone. That redirect is UX
 only — the `egx.auth.present` cookie is set by client JS and carries no
 signature, so the backend gate is the real guard.
@@ -1019,12 +1021,13 @@ an SMTP failure there is logged, not a 502. `signup`, admin invite and admin
 send-reset send synchronously (502 on SMTP failure).
 
 **Sign-up credentials ride on the verify link, not the account.** A new
-email+password sign-up creates the user with `password_hash` NULL; the password
-and name are parked on the `verify` row of `auth_tokens`
+email+password sign-up creates the user with `password_hash` NULL and `name`
+`""`; the password and name are parked on the `verify` row of `auth_tokens`
 (`pending_password_hash`, `pending_name`) and applied only when that link is
 used. So whoever clicks proves the inbox AND chooses the password, and a
 stranger re-signing-up with someone else's address cannot swap a password in.
-Consequences, all test-pinned:
+Verify emails greet a plain "Hi," — the name typed at sign-up is never mailed to
+an inbox that may not be the typist's. Consequences, all test-pinned:
 - Re-signing-up for an unverified email never edits the account: outside the
   cooldown it emails a NEW verify link (older unused ones die) carrying the new
   pending password; inside it nothing happens; a disabled account gets nothing.
@@ -1044,7 +1047,10 @@ Consequences, all test-pinned:
 The newest link of a purpose wins (issuing deletes the user's older unused ones),
 each is single use (one `UPDATE … RETURNING`, so a double click works once), and
 anything else is `400 invalid_or_expired_link`. Links point at the WEB —
-`{FE_BASE_URL}/verify-email?token=…` and `…/set-password?token=…`. At most one
+`{origin}/verify-email?token=…` and `…/set-password?token=…`, where `origin` is
+the FIRST entry of `FRONTEND_ORIGIN`, read raw (no localhost default, unlike the
+CORS list in `main.py`; unset → `503 "Email is not configured"` before any link
+is issued). The sender is always `Borsa Compass <SMTP_USER>`. At most one
 email per user per 60 s (`users.last_email_at`); inside it nothing is sent and
 the normal response is returned (admin send-reset answers 429). `set-password`
 validates the new password BEFORE burning the link, and also verifies the email.
@@ -1066,7 +1072,36 @@ Apple's email is used only when Apple marks it `email_verified` (otherwise the
 login is `sub`-only, and an unknown `sub` without an email is `400`); Apple
 sends the name from the app, never in the token. On the first Apple sign-in the
 `authorizationCode` is traded for a refresh token, kept in
-`users.apple_refresh_token` for revocation.
+`users.apple_refresh_token` for revocation (the token/revoke calls use the first
+`APPLE_CLIENT_IDS` entry that is not `host.exp.Exponent`).
+**Expo Go's Apple audience is refused.** Every Expo Go project on iOS gets Apple
+tokens with `aud = host.exp.Exponent`; accepting it would let a stranger's Expo
+Go app link to any account by email (admin included). Such a token is `401`
+unless `APPLE_ALLOW_EXPO_GO=1` — a flag for a DEVELOPMENT backend only, never
+production, where `APPLE_CLIENT_IDS` is the bundle id alone.
+
+**Abuse limits** (`core/limits.py`). Counters live in Postgres
+(`rate_limits (key, window_start, count)`, one atomic `INSERT … ON CONFLICT DO
+UPDATE … RETURNING count` per hit on a fixed window), never in process memory —
+each serverless request may be a fresh instance. The client IP is the first
+`X-Forwarded-For` entry (Vercel sets it), else the socket peer.
+- `signup`, `resend-verification`, `forgot-password`: 5 requests per IP per 10
+  min; over it the route still answers `check_email` and sends nothing.
+- Global email budget: every send attempt (verify, reset, invite,
+  already-registered — admin sends included) counts against `email:global`, 300
+  per UTC day (Gmail SMTP allows a few hundred a day). Over it nothing is sent
+  and a warning is printed; public routes still answer `check_email`, admin
+  invite / send-reset answer `429 "Daily email limit reached — try again
+  tomorrow."` It is checked before a link is issued, so a user's live link
+  survives.
+- `login`: 10 FAILED attempts (401s) per IP per 15 min, then `429 "Too many
+  attempts — try again in a few minutes."` before the password is checked.
+- **Pruning:** `limits.prune_auth` runs best-effort after the nightly
+  `POST /api/pe/refresh` (a failure is printed, never fails the feed) and
+  deletes links used or expired over a day ago, rate-limit windows over two days
+  old, and accounts over a week old that are unverified, passwordless, unlinked,
+  role user, without a live link and owning no row in any user-owned table
+  (junk sign-ups, expired invites).
 
 Two roles, `user` and `admin`, on `users.role`. **Admin status comes ONLY from
 the `AUTH_ADMINS` env var** (comma-separated emails), applied at boot by
@@ -1118,7 +1153,8 @@ you disabling or deleting yourself).
 **Code map.** `core/accounts.py` — validation, the `Account` row, `AccountStore`
 (all SQL for `users` / `auth_tokens`), `USER_OWNED_TABLES`; `core/auth_flows.py`
 — every flow as plain functions over a store and a `Mailer`; `core/oauth.py` —
-Google/Apple token verification and Apple code exchange/revoke; `core/email.py`
+Google/Apple token verification and Apple code exchange/revoke; `core/limits.py`
+— per-IP limits, the daily email budget, login throttling, `prune_auth`; `core/email.py`
 — `SmtpMailer` (STARTTLS with a verified certificate; non-numeric `SMTP_PORT` →
 503), `BackgroundMailer`, link builders and message templates; `core/auth.py` —
 hashing, JWT, the dependencies, the gate and the admin seed; `routers/auth.py` /
@@ -1127,25 +1163,40 @@ hashing, JWT, the dependencies, the gate and the admin seed; `routers/auth.py` /
 the network; real SQL is covered by `tests/test_accounts_pg.py`, opt-in via
 `TEST_DATABASE_URL`.
 
-**Env vars** (backend): `AUTH_SECRET`, `AUTH_ADMINS`, `FE_BASE_URL` (the web's
-public origin — emailed links; unset → email routes answer `503 "Email is not
-configured"`), `SMTP_HOST` (default `smtp.gmail.com`), `SMTP_PORT` (587),
-`SMTP_USER`, `SMTP_PASSWORD` (a Gmail app password), `SMTP_FROM` (default
-`Borsa Compass <SMTP_USER>`), `GOOGLE_CLIENT_IDS` (comma-separated web / Android
-/ iOS client ids = accepted audiences), `APPLE_CLIENT_IDS` (the iOS bundle id),
-`APPLE_TEAM_ID`, `APPLE_KEY_ID`, `APPLE_PRIVATE_KEY` (the `.p8`; `\n` escapes
-accepted — the last three are only needed to exchange/revoke Apple's grant).
-Unconfigured providers answer 503. Web: `NEXT_PUBLIC_GOOGLE_CLIENT_ID`.
+**Env vars** (backend): `AUTH_SECRET`, `AUTH_ADMINS`, `FRONTEND_ORIGIN`
+(comma-separated; the CORS allow-list, and its FIRST entry must be the
+production web origin — it is the base of every emailed link; unset → email
+routes answer `503 "Email is not configured"`), `SMTP_HOST` (default
+`smtp.gmail.com`), `SMTP_PORT` (587), `SMTP_USER`, `SMTP_PASSWORD` (a Gmail app
+password; the sender is always `Borsa Compass <SMTP_USER>`), `GOOGLE_CLIENT_IDS`
+(comma-separated web / Android / iOS client ids = accepted audiences),
+`APPLE_CLIENT_IDS` (the iOS bundle id ONLY in production), `APPLE_TEAM_ID`,
+`APPLE_KEY_ID`, `APPLE_PRIVATE_KEY` (the `.p8`; `\n` escapes accepted — needed
+to exchange/revoke Apple's grant, which App Store review expects on account
+deletion). Dev backends only: `APPLE_ALLOW_EXPO_GO=1` (never in production).
+`FE_BASE_URL` and `SMTP_FROM` no longer exist. Unconfigured providers answer
+503. Web: `NEXT_PUBLIC_GOOGLE_CLIENT_ID`.
 
-**One-off migration:** `scripts/reset_users_for_email_auth.py` deletes ALL users
-and their data (typed confirmation) so `init_db` can recreate `users` with the
-email schema. Run it once, before deploying the email-accounts release.
+**Rollout (one order, also in the spec §9 and the script's docstring):**
+1. set the backend env vars above (`FRONTEND_ORIGIN` first entry = production
+   web origin) and the web's `NEXT_PUBLIC_GOOGLE_CLIENT_ID`;
+2. run `scripts/reset_users_for_email_auth.py` against production, from the
+   email-auth code — it deletes ALL users and their data (typed confirmation)
+   so `init_db` can recreate `users` with the email schema;
+3. deploy the backend;
+4. deploy the web.
+Sign-in is down between 2 and 4 (accepted: every account is reset). **Before
+production, verify a forgot-password email arrives on a Vercel preview deploy**
+— forgot-password and resend send in a background task after the response, and
+that has only been verified under uvicorn, not on Vercel's Python runtime.
 
 ### /api/users — admin only
 
 `GET` list (with `email_verified`, `methods` and `holdings_count`) · `POST`
 invite `{email, name?}` (creates the account unverified and emails a
-set-password link, `409` if the email exists) · `POST /{id}/send-reset` · `PATCH
+set-password link; `409` if the email exists — except an active account nobody
+has set up (unverified, no password, no Google/Apple), which is re-invited, so a
+failed invite email can be retried) · `POST /{id}/send-reset` · `PATCH
 /{id}` enable/disable · `DELETE /{id}`.
 
 - **No password ever passes through this API** — nothing is generated, returned
@@ -1176,7 +1227,8 @@ that header, so in production the guard was either unset or silently 403ing.
 - `GET /api/pe?symbol=XXX` returns the single row or 404
 - `POST /api/pe/refresh` makes ONE POST to the TradingView scanner via
   `core/tradingview.scan`, and upserts. **Never wipes existing rows on failure** —
-  last-known-good is preserved.
+  last-known-good is preserved. It also runs the email-account pruning
+  (`limits.prune_auth`, best-effort) — see *Auth, roles and user management*.
 - `PE_REFRESH_SECRET` env var guards manual invocation in production.
 
 **The source is no longer egx.com.eg.** That page is behind a JavaScript bot
@@ -2292,7 +2344,7 @@ Components in `src/app/components/`:
 - `RealizedSection` — **everything banked, in one collapsed section**, replacing `RealizedGainsCard` / `ClosedPositionsTable` / `DividendsTable` (all three deleted). The header is the combined gains + dividends headline, stated as two separate figures. Inside: the record/proceeds/best/worst row, the T-bill count, then tabs — **Closed** (rendered from `orders`, so one submit is one line; a `N lots` pill and a Show-purchases toggle expose the parts, each with its own basis and annualized figure), **Dividends**, **By stock**. The tab opened first is the first non-empty one. Undo on a closed row removes the WHOLE order and says how many purchases that is. Rows in all three tabs name the COMPANY beside the ticker — four opaque letters are not what a reader recognises — truncated rather than wrapped, and dropped entirely when the stored name is just the symbol again (`_bucket` in `core/dividends.py` falls back to it), which would otherwise render as "COMI COMI".
 
 **Admin (admin role only):**
-- `AdminUsersTable` — desktop table / mobile cards. Each row shows a method badge (Password / Google / Apple, Invited, Unverified). Actions per user: **Send reset email**, disable/enable, delete. Hides the destructive actions on your own row (the backend guards them anyway).
+- `AdminUsersTable` — desktop table / mobile cards. Each row shows its sign-in method badges (Password / Google / Apple) plus a status badge: **Pending** when unverified with no method yet (a sign-up whose link was never clicked, or an unaccepted invite), **Unverified** when unverified but with a method; a verified row with no method shows nothing extra. Actions per user: **Send reset email**, disable/enable, delete. Hides the destructive actions on your own row (the backend guards them anyway).
 - Invite form (`InviteUserModal`) — email + optional name. The server emails the person a link to choose their own password; the admin never sees or relays a password.
 - Page at `src/app/admin/page.tsx`, gated on `isAdmin` from `useAuth()`.
 
@@ -2314,7 +2366,7 @@ Components in `src/app/components/`:
 **UI helpers:**
 - `Navbar`, `BottomTabBar` — mobile bottom nav, desktop top nav. **Neither carries a "Users" destination any more.** Administering accounts is not a place in the app, it is an account action, so it renders as a button beside Log out at the right-hand end of `Navbar` — icon-only on mobile where it pairs with the log-out icon, icon + label at `md:`, the same shape the dashboard's Compare button uses. It is **36px tall, not the project's usual 44px target**, deliberately: the nav row is 61px and `--top-nav-clearance` IS that number, so a taller control here silently pushes every sticky element on every page down out of alignment. **The two navs no longer carry the same destinations:** Compare left the mobile pill for a button in the dashboard header (see *Dashboard*) and stayed in the desktop top nav, which has room for it. So the pill is Dashboard / Portfolio / Learn / News **for everyone, admin or not** — it holds the places every user has, and its tab count no longer changes with a role. On `/admin` it shows no highlight at all (`activeIndex` is -1, so the travelling span is not rendered), which is correct for a page it does not contain.
 - `AuthProvider` — token + user in localStorage, an `egx.auth.present` cookie for middleware, `useAuth()` → `{user, isAuthenticated, isAdmin, login, logout}`. Re-reads the role from `/api/auth/me` on every load, so a role change lands on next refresh.
-- `AuthCard` — the shared chrome (card and footer links) for the five signed-out pages: `/login`, `/signup`, `/forgot-password`, `/verify-email`, `/set-password`. `/verify-email` and `/set-password` read `?token=`, call the matching endpoint and sign the user in from the session it returns.
+- `AuthCard` — the shared chrome (card and footer links) for the five signed-out pages: `/login`, `/signup`, `/forgot-password`, `/verify-email`, `/set-password`. `/verify-email` and `/set-password` read `?token=`, call the matching endpoint and sign the user in from the session it returns, then stay on the page with "You're signed in. Using the Borsa Compass app? Sign in there with the same email." and a Continue button to `/` — the links always open the web, and a mobile user would otherwise be left on the web dashboard wondering about the app.
 - `GoogleSignInButton` — Google Identity Services; posts the ID token to `/api/auth/google`. Renders nothing without `NEXT_PUBLIC_GOOGLE_CLIENT_ID`.
 - `/account` page (`src/app/account/page.tsx`) — name, email, Log out, and Delete account (the user must type `DELETE`; calls `DELETE /api/auth/me`). Reached from the name in `Navbar`; has its own `loading.tsx`.
 - `LearnTooltip` — dashed-underline hover tooltip used everywhere for inline education
@@ -2495,6 +2547,9 @@ users (id, email UNIQUE, name, password_hash NULL, email_verified, google_sub UN
                  -- already issued, because get_current_user re-reads this row.
                  -- sessions_valid_after: stamped by set-password; older
                  -- tokens (by iat) are rejected.
+rate_limits (key, window_start, count, PRIMARY KEY (key, window_start))
+                 -- Abuse-limit counters (core/limits.py), one row per key per
+                 -- fixed window; pruned nightly after two days.
 auth_tokens (token_hash PK, user_id, purpose 'verify'|'reset'|'invite',
              expires_at, used_at, created_at, pending_password_hash, pending_name)
                  -- Only the SHA-256 of the emailed token. pending_* exist on

@@ -5,8 +5,15 @@ in the email-account shape and seed AUTH_ADMINS.
     DATABASE_URL=... AUTH_ADMINS=mark3essam@gmail.com \
         python scripts/reset_users_for_email_auth.py
 
-It prints row counts and asks you to type DELETE ALL USERS. Run it from the
-email-auth code, BEFORE deploying that code. There is no undo.
+It prints row counts and asks you to type DELETE ALL USERS. There is no undo.
+
+Rollout order (the same in the spec §9 and CLAUDE.md):
+  1. set the backend env vars (FRONTEND_ORIGIN first entry = the production
+     web origin, SMTP_*, AUTH_ADMINS, GOOGLE_CLIENT_IDS, APPLE_*) and the web's
+     NEXT_PUBLIC_GOOGLE_CLIENT_ID;
+  2. run THIS script against production, from the email-auth code;
+  3. deploy the backend;
+  4. deploy the web.
 """
 
 import os
