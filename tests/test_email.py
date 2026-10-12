@@ -80,6 +80,16 @@ def test_sender_is_always_the_app_name_and_smtp_user(smtp_env, monkeypatch):
     assert _FakeSMTP.instances[-1].calls[2][1]["From"] == "Borsa Compass <me@gmail.com>"
 
 
+def test_failure_log_names_the_recipient_domain_not_the_address(smtp_env, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise OSError("connection refused")
+    monkeypatch.setattr(email_mod.smtplib, "SMTP", boom)
+    with pytest.raises(EmailSendFailed):
+        SmtpMailer.from_env().send("someone.private@example.org", "s", "t", "h")
+    out = capsys.readouterr().out
+    assert "example.org" in out and "someone.private" not in out
+
+
 def test_missing_credentials_is_503(monkeypatch):
     monkeypatch.delenv("SMTP_USER", raising=False)
     monkeypatch.delenv("SMTP_PASSWORD", raising=False)

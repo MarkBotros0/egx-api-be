@@ -96,8 +96,14 @@ class SmtpMailer:
                 smtp.login(self.user, self.password)
                 smtp.send_message(msg)
         except (smtplib.SMTPException, OSError) as e:
-            print(f"[email] send to {to} failed: {e}")
+            # The domain is enough to diagnose a delivery problem; the full
+            # address is personal data and would sit in the platform logs.
+            print(f"[email] send to @{_domain(to)} failed: {e}")
             raise EmailSendFailed(str(e)) from e
+
+
+def _domain(address: str) -> str:
+    return address.rpartition("@")[2] or "?"
 
 
 def get_mailer() -> Mailer:
