@@ -82,6 +82,14 @@ def iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def window_start(now: datetime, window: timedelta) -> str:
+    """Start of the fixed window containing `now` (floor of epoch seconds), so
+    a one-day window starts at UTC midnight."""
+    epoch = int(now.timestamp())
+    size = int(window.total_seconds())
+    return iso(datetime.fromtimestamp(epoch - epoch % size, tz=timezone.utc))
+
+
 def hash_link_token(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -274,6 +282,64 @@ class AccountStore:
             (user_id, purpose),
         )
         self.db.commit()
+
+    # -- abuse limits (core/limits.py) --
+    def hit(self, key: str, window: timedelta, now: datetime) -> int:
+        """Count one event in the fixed window containing `now`; return the
+        window's total. One atomic upsert, so concurrent requests on separate
+        serverless instances never lose a count."""
+        row = self.db.execute(
+            "INSERT INTO rate_limits (key, window_start, count) VALUES (%s, %s, 1) "
+            "ON CONFLICT (key, window_start) DO UPDATE SET count = rate_limits.count + 1 "
+            "RETURNING count",
+            (key, window_start(now, window)),
+        ).fetchone()
+        self.db.commit()
+        return int(row[0]) if row else 0
+
+    def count(self, key: str, window: timedelta, now: datetime) -> int:
+        row = self.db.execute(
+            "SELECT count FROM rate_limits WHERE key = %s AND window_start = %s",
+            (key, window_start(now, window)),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    # -- pruning (core/limits.prune_auth) --
+    def prune_tokens(self, cutoff: datetime) -> int:
+        rows = self.db.execute(
+            "DELETE FROM auth_tokens WHERE used_at < %s OR expires_at < %s RETURNING token_hash",
+            (iso(cutoff), iso(cutoff)),
+        ).fetchall()
+        self.db.commit()
+        return len(rows)
+
+    def prune_rate_limits(self, cutoff: datetime) -> int:
+        rows = self.db.execute(
+            "DELETE FROM rate_limits WHERE window_start < %s RETURNING key", (iso(cutoff),),
+        ).fetchall()
+        self.db.commit()
+        return len(rows)
+
+    def prune_abandoned_accounts(self, created_before: datetime, now: datetime) -> int:
+        """Delete accounts nobody ever used (see limits.prune_auth) and their
+        dead links. Anything that owns a row anywhere is left alone."""
+        owns_nothing = " ".join(
+            f"AND NOT EXISTS (SELECT 1 FROM {t} x WHERE x.user_id = u.id)"
+            for t in USER_OWNED_TABLES if t != "auth_tokens")
+        with self.db.transaction() as tx:
+            rows = tx.execute(
+                "DELETE FROM users u WHERE u.email_verified = FALSE AND u.password_hash IS NULL "
+                "AND u.google_sub IS NULL AND u.apple_sub IS NULL AND u.role = 'user' "
+                "AND u.created_at < %s "
+                "AND NOT EXISTS (SELECT 1 FROM auth_tokens t WHERE t.user_id = u.id "
+                "AND t.used_at IS NULL AND t.expires_at > %s) "
+                f"{owns_nothing} RETURNING u.id",
+                (iso(created_before), iso(now)),
+            ).fetchall()
+            ids = [r[0] for r in rows]
+            if ids:
+                tx.execute("DELETE FROM auth_tokens WHERE user_id = ANY(%s)", (ids,))
+        return len(ids)
 
     def delete_account(self, user_id: str) -> None:
         # No table has a foreign key to users, so nothing cascades — without

@@ -18,6 +18,7 @@ from app.core.accounts import (
     Account,
     hash_link_token,
     iso,
+    window_start,
 )
 from app.core.email import EmailSendFailed
 
@@ -28,6 +29,8 @@ class MemoryAccountStore:
         self.tokens: dict[str, dict] = {}          # token_hash -> row
         self.holdings: dict[str, int] = {}
         self.deleted_from: list[tuple[str, str]] = []  # (table, user_id)
+        self.rate: dict[tuple[str, str], int] = {}     # (key, window_start) -> count
+        self.owned_rows: set[tuple[str, str]] = set()  # (table, user_id) rows a user owns
 
     # -- reads --
     def by_id(self, user_id):
@@ -110,6 +113,41 @@ class MemoryAccountStore:
     def delete_tokens(self, user_id, purpose):
         self.tokens = {h: r for h, r in self.tokens.items()
                        if not (r["user_id"] == user_id and r["purpose"] == purpose and r["used_at"] is None)}
+
+    def hit(self, key, window, now):
+        k = (key, window_start(now, window))
+        self.rate[k] = self.rate.get(k, 0) + 1
+        return self.rate[k]
+
+    def count(self, key, window, now):
+        return self.rate.get((key, window_start(now, window)), 0)
+
+    def prune_tokens(self, cutoff):
+        c = iso(cutoff)
+        dead = [h for h, r in self.tokens.items()
+                if (r["used_at"] is not None and r["used_at"] < c) or r["expires_at"] < c]
+        for h in dead:
+            del self.tokens[h]
+        return len(dead)
+
+    def prune_rate_limits(self, cutoff):
+        dead = [k for k in self.rate if k[1] < iso(cutoff)]
+        for k in dead:
+            del self.rate[k]
+        return len(dead)
+
+    def prune_abandoned_accounts(self, created_before, now):
+        def live_link(uid):
+            return any(r["user_id"] == uid and r["used_at"] is None and r["expires_at"] > iso(now)
+                       for r in self.tokens.values())
+        gone = [u.id for u in self.users.values()
+                if not u.email_verified and not u.password_hash and not u.google_sub
+                and not u.apple_sub and u.role == "user" and u.created_at < iso(created_before)
+                and not live_link(u.id) and not any(uid == u.id for _, uid in self.owned_rows)]
+        for uid in gone:
+            del self.users[uid]
+        self.tokens = {h: r for h, r in self.tokens.items() if r["user_id"] not in gone}
+        return len(gone)
 
     def delete_account(self, user_id):
         for t in USER_OWNED_TABLES:

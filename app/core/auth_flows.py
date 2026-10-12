@@ -15,6 +15,7 @@ from typing import Optional
 from fastapi import HTTPException
 
 from app.core import email as mail
+from app.core import limits
 from app.core import oauth
 from app.core.accounts import (
     EMAIL_COOLDOWN,
@@ -70,6 +71,9 @@ def send_link(store, mailer, account: Account, purpose: str, now: datetime,
         return False
     path = "/verify-email" if purpose == PURPOSE_VERIFY else "/set-password"
     mail.link(path, "probe")   # 503 before a token exists if FRONTEND_ORIGIN is unset
+    # Every send attempt counts against the daily budget. Checked before the
+    # token is issued, because issuing kills the user's older live link.
+    limits.spend_email_budget(store, now)
     token = store.issue_token(account.id, purpose, now, pending_password_hash, pending_name)
     url = mail.link(path, token)
     if purpose == PURPOSE_VERIFY:
@@ -94,6 +98,14 @@ def signup(store, mailer, *, name: str, email: str, password: str, now: datetime
     email = normalize_email(email)
     password = clean_password(password)
     name = clean_name(name)
+    try:
+        _signup(store, mailer, email, password, name, now)
+    except limits.EmailBudgetExceeded:
+        pass                                     # the answer must not change
+    return CHECK_EMAIL
+
+
+def _signup(store, mailer, email: str, password: str, name: str, now: datetime) -> None:
     existing = store.by_email(email)
     if existing is None:
         account = store.create(email=email, name="", password_hash=None,
@@ -107,8 +119,8 @@ def signup(store, mailer, *, name: str, email: str, password: str, now: datetime
                       pending_password_hash=hash_password(password), pending_name=name)
     elif not _in_cooldown(existing, now):
         message = mail.already_registered_message(existing.name, mail.login_url(), mail.forgot_url())
+        limits.spend_email_budget(store, now)
         _deliver(store, mailer, existing, now, message, None)
-    return CHECK_EMAIL
 
 
 def resend_verification(store, mailer, *, email: str, now: datetime) -> dict:
@@ -116,15 +128,21 @@ def resend_verification(store, mailer, *, email: str, now: datetime) -> dict:
     if account and account.is_active and not account.email_verified:
         pending = store.latest_pending(account.id, now)
         if pending:
-            send_link(store, mailer, account, PURPOSE_VERIFY, now,
-                      pending_password_hash=pending[0], pending_name=pending[1])
+            try:
+                send_link(store, mailer, account, PURPOSE_VERIFY, now,
+                          pending_password_hash=pending[0], pending_name=pending[1])
+            except limits.EmailBudgetExceeded:
+                pass
     return CHECK_EMAIL
 
 
 def forgot_password(store, mailer, *, email: str, now: datetime) -> dict:
     account = store.by_email(normalize_email(email))
     if account and account.is_active:
-        send_link(store, mailer, account, PURPOSE_RESET, now)
+        try:
+            send_link(store, mailer, account, PURPOSE_RESET, now)
+        except limits.EmailBudgetExceeded:
+            pass
     return CHECK_EMAIL
 
 

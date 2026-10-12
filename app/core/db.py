@@ -136,6 +136,16 @@ def init_db(db: _DB) -> None:
     db.execute("ALTER TABLE auth_tokens ADD COLUMN IF NOT EXISTS pending_password_hash TEXT")
     db.execute("ALTER TABLE auth_tokens ADD COLUMN IF NOT EXISTS pending_name TEXT")
     db.execute("CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id, purpose)")
+    # Abuse-limit counters (core/limits.py): one row per key per fixed window,
+    # bumped by an atomic upsert. Pruned nightly after two days.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS rate_limits (
+            key TEXT NOT NULL,
+            window_start TEXT NOT NULL,
+            count INTEGER NOT NULL,
+            PRIMARY KEY (key, window_start)
+        )
+    """)
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS portfolio (

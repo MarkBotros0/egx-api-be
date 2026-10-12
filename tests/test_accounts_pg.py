@@ -29,7 +29,7 @@ def store(monkeypatch):
     monkeypatch.setattr(db_mod, "_pool", None)
     monkeypatch.setattr(db_mod, "_initialized", True)
     d = db_mod._DB(db_mod._get_pool())
-    for t in (*USER_OWNED_TABLES, "users"):
+    for t in (*USER_OWNED_TABLES, "users", "rate_limits"):
         d.execute(f"DROP TABLE IF EXISTS {t}")
     db_mod.init_db(d)
     return AccountStore(d)
@@ -84,3 +84,31 @@ def test_sessions_valid_after_round_trips(store):
     assert a.sessions_valid_after is None
     store.update(a.id, sessions_valid_after="2026-10-12T09:00:00Z")
     assert store.by_id(a.id).sessions_valid_after == "2026-10-12T09:00:00Z"
+
+
+def test_rate_limit_hits_are_counted_per_window(store):
+    w = timedelta(minutes=10)
+    assert [store.hit("k", w, NOW) for _ in range(3)] == [1, 2, 3]
+    assert store.count("k", w, NOW) == 3
+    assert store.hit("k", w, NOW + w) == 1
+    assert store.prune_rate_limits(NOW + timedelta(minutes=5)) == 1
+    assert store.count("k", w, NOW) == 0
+
+
+def test_pruning_removes_only_what_nobody_used(store):
+    old = NOW - timedelta(days=8)
+    gone = store.create(email="gone@b.co", name="", password_hash=None, email_verified=False, now=old)
+    store.issue_token(gone.id, "verify", old)
+    owner = store.create(email="own@b.co", name="", password_hash=None, email_verified=False, now=old)
+    store.db.execute("INSERT INTO watchlist (user_id, symbol, added_at) VALUES (%s, 'COMI', %s)",
+                     (owner.id, "2026-10-01T00:00:00Z"))
+    live = store.create(email="live@b.co", name="", password_hash=None, email_verified=False, now=old)
+    store.issue_token(live.id, "invite", NOW - timedelta(days=1))
+    verified = store.create(email="v@b.co", name="", password_hash=None, email_verified=True, now=old)
+    assert store.prune_abandoned_accounts(NOW - timedelta(days=7), NOW) == 1
+    assert store.by_id(gone.id) is None
+    assert all(store.by_id(a.id) for a in (owner, live, verified))
+    used = store.issue_token(verified.id, "reset", NOW - timedelta(days=3))
+    store.consume_token(used, {"reset"}, NOW - timedelta(days=3))
+    assert store.prune_tokens(NOW - timedelta(days=1)) == 1
+    assert store.latest_pending(live.id, NOW) is None    # invite carries no pending password
