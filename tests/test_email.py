@@ -53,7 +53,6 @@ def smtp_env(monkeypatch):
     monkeypatch.setenv("SMTP_PASSWORD", "app-pw")
     monkeypatch.delenv("SMTP_HOST", raising=False)
     monkeypatch.delenv("SMTP_PORT", raising=False)
-    monkeypatch.delenv("SMTP_FROM", raising=False)
     _FakeSMTP.instances.clear()
     monkeypatch.setattr(email_mod.smtplib, "SMTP", _FakeSMTP)
 
@@ -72,6 +71,13 @@ def test_defaults_to_gmail_starttls(smtp_env):
     assert msg["From"] == "Borsa Compass <me@gmail.com>"
     assert msg["Subject"] == "Subj"
     assert msg.is_multipart()
+
+
+def test_sender_is_always_the_app_name_and_smtp_user(smtp_env, monkeypatch):
+    # SMTP_FROM no longer exists: a stray value must not change the sender.
+    monkeypatch.setenv("SMTP_FROM", "Someone Else <x@evil.example>")
+    SmtpMailer.from_env().send("to@x.com", "Subj", "plain", "<p>html</p>")
+    assert _FakeSMTP.instances[-1].calls[2][1]["From"] == "Borsa Compass <me@gmail.com>"
 
 
 def test_missing_credentials_is_503(monkeypatch):
@@ -99,13 +105,25 @@ def test_smtp_errors_become_email_send_failed(smtp_env, monkeypatch):
         SmtpMailer.from_env().send("to@x.com", "s", "t", "h")
 
 
-def test_links_use_fe_base_url_without_double_slash(monkeypatch):
-    monkeypatch.setenv("FE_BASE_URL", "https://app.example.com/")
+def test_links_use_the_first_frontend_origin_without_double_slash(monkeypatch):
+    monkeypatch.setenv("FRONTEND_ORIGIN", " https://app.example.com/ , http://localhost:3000")
     assert link("/set-password", "abc") == "https://app.example.com/set-password?token=abc"
 
 
-def test_links_require_fe_base_url(monkeypatch):
-    monkeypatch.delenv("FE_BASE_URL", raising=False)
+@pytest.mark.parametrize("value", [None, "", "  ", " , "])
+def test_links_require_frontend_origin_with_no_localhost_default(monkeypatch, value):
+    # main.py's CORS list defaults to localhost; emailed links must never.
+    if value is None:
+        monkeypatch.delenv("FRONTEND_ORIGIN", raising=False)
+    else:
+        monkeypatch.setenv("FRONTEND_ORIGIN", value)
+    with pytest.raises(EmailNotConfigured):
+        link("/verify-email", "abc")
+
+
+def test_fe_base_url_is_no_longer_read(monkeypatch):
+    monkeypatch.delenv("FRONTEND_ORIGIN", raising=False)
+    monkeypatch.setenv("FE_BASE_URL", "https://app.example.com")
     with pytest.raises(EmailNotConfigured):
         link("/verify-email", "abc")
 

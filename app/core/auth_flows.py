@@ -69,7 +69,7 @@ def send_link(store, mailer, account: Account, purpose: str, now: datetime,
     if _in_cooldown(account, now):
         return False
     path = "/verify-email" if purpose == PURPOSE_VERIFY else "/set-password"
-    mail.link(path, "probe")   # 503 before a token exists if FE_BASE_URL is missing
+    mail.link(path, "probe")   # 503 before a token exists if FRONTEND_ORIGIN is unset
     token = store.issue_token(account.id, purpose, now, pending_password_hash, pending_name)
     url = mail.link(path, token)
     if purpose == PURPOSE_VERIFY:

@@ -24,7 +24,7 @@ LATER = NOW + timedelta(minutes=2)
 
 @pytest.fixture(autouse=True)
 def fe_base(monkeypatch):
-    monkeypatch.setenv("FE_BASE_URL", "https://app.test")
+    monkeypatch.setenv("FRONTEND_ORIGIN", "https://app.test")
 
 
 @pytest.fixture
@@ -275,8 +275,8 @@ def test_send_failure_is_502_and_frees_the_token_and_cooldown(store, mailer):
     assert store.by_email("mark@gmail.com").last_email_at is None
 
 
-def test_missing_fe_base_url_is_503(store, mailer, monkeypatch):
-    monkeypatch.delenv("FE_BASE_URL")
+def test_missing_frontend_origin_is_503(store, mailer, monkeypatch):
+    monkeypatch.delenv("FRONTEND_ORIGIN")
     with pytest.raises(HTTPException) as e:
         _signup(store, mailer)
     assert e.value.status_code == 503

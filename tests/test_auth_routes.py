@@ -21,7 +21,7 @@ from app.routers.auth import get_store
 
 @pytest.fixture
 def ctx(monkeypatch):
-    monkeypatch.setenv("FE_BASE_URL", "https://app.test")
+    monkeypatch.setenv("FRONTEND_ORIGIN", "https://app.test")
     store, mailer = MemoryAccountStore(), OutboxMailer()
     app.dependency_overrides[get_store] = lambda: store
     app.dependency_overrides[get_mailer] = lambda: mailer

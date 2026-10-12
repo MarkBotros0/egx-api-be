@@ -2,9 +2,13 @@
 Outgoing email over SMTP (a Gmail app password in production).
 
 Env: SMTP_HOST (default smtp.gmail.com), SMTP_PORT (587), SMTP_USER,
-SMTP_PASSWORD, SMTP_FROM (default "Borsa Compass <SMTP_USER>"), and
-FE_BASE_URL — every emailed link points at the web app, which hosts
-/verify-email and /set-password for both clients.
+SMTP_PASSWORD. The sender is always "Borsa Compass <SMTP_USER>".
+
+Every emailed link points at the web app, which hosts /verify-email and
+/set-password for both clients. Its address is the FIRST entry of
+FRONTEND_ORIGIN (the same variable main.py reads for CORS), read raw here:
+main.py defaults it to localhost for development, and an unset production
+variable must be a 503, never an email full of localhost links.
 
 Routes that must send depend on get_mailer(); a missing config is a 503,
 never a silent success. Tests replace the mailer with
@@ -57,9 +61,10 @@ class Mailer(Protocol):
 
 
 class SmtpMailer:
-    def __init__(self, host: str, port: int, user: str, password: str, sender: str):
+    def __init__(self, host: str, port: int, user: str, password: str):
         self.host, self.port = host, port
-        self.user, self.password, self.sender = user, password, sender
+        self.user, self.password = user, password
+        self.sender = f"{APP_NAME} <{user}>"
 
     @classmethod
     def from_env(cls) -> "SmtpMailer":
@@ -76,7 +81,6 @@ class SmtpMailer:
             port=port,
             user=user,
             password=password,
-            sender=os.environ.get("SMTP_FROM", "").strip() or f"{APP_NAME} <{user}>",
         )
 
     def send(self, to: str, subject: str, text: str, html: str) -> None:
@@ -102,7 +106,8 @@ def get_mailer() -> Mailer:
 
 
 def _base_url() -> str:
-    base = os.environ.get("FE_BASE_URL", "").strip().rstrip("/")
+    origins = [o.strip() for o in os.environ.get("FRONTEND_ORIGIN", "").split(",") if o.strip()]
+    base = origins[0].rstrip("/") if origins else ""
     if not base:
         raise EmailNotConfigured()
     return base

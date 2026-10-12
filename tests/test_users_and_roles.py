@@ -266,7 +266,7 @@ def test_listing_shows_methods_and_never_a_password_hash():
 
 
 def test_invite_route_uses_admin_name_as_inviter(monkeypatch):
-    monkeypatch.setenv("FE_BASE_URL", "https://app.test")
+    monkeypatch.setenv("FRONTEND_ORIGIN", "https://app.test")
     s, (boss,) = _store_with("admin")
     mailer = OutboxMailer()
     actor = CurrentUser(id=boss.id, email=boss.email, name="Mark", role=ROLE_ADMIN)
@@ -276,7 +276,7 @@ def test_invite_route_uses_admin_name_as_inviter(monkeypatch):
 
 
 def test_send_reset_route_emails_a_link_and_writes_no_password(monkeypatch):
-    monkeypatch.setenv("FE_BASE_URL", "https://app.test")
+    monkeypatch.setenv("FRONTEND_ORIGIN", "https://app.test")
     s, (boss, target) = _store_with("admin", "user")
     s.update(target.id, password_hash="old-hash")
     mailer = OutboxMailer()
