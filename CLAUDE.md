@@ -2293,7 +2293,7 @@ Components in `src/app/components/`:
 
 **Admin (admin role only):**
 - `AdminUsersTable` — desktop table / mobile cards. Each row shows a method badge (Password / Google / Apple, Invited, Unverified). Actions per user: **Send reset email**, disable/enable, delete. Hides the destructive actions on your own row (the backend guards them anyway).
-- Invite form (`CreateUserModal`) — email + optional name. The server emails the person a link to choose their own password; the admin never sees or relays a password.
+- Invite form (`InviteUserModal`) — email + optional name. The server emails the person a link to choose their own password; the admin never sees or relays a password.
 - Page at `src/app/admin/page.tsx`, gated on `isAdmin` from `useAuth()`.
 
 **Learn page (`src/app/components/learn/`):**
@@ -2314,9 +2314,9 @@ Components in `src/app/components/`:
 **UI helpers:**
 - `Navbar`, `BottomTabBar` — mobile bottom nav, desktop top nav. **Neither carries a "Users" destination any more.** Administering accounts is not a place in the app, it is an account action, so it renders as a button beside Log out at the right-hand end of `Navbar` — icon-only on mobile where it pairs with the log-out icon, icon + label at `md:`, the same shape the dashboard's Compare button uses. It is **36px tall, not the project's usual 44px target**, deliberately: the nav row is 61px and `--top-nav-clearance` IS that number, so a taller control here silently pushes every sticky element on every page down out of alignment. **The two navs no longer carry the same destinations:** Compare left the mobile pill for a button in the dashboard header (see *Dashboard*) and stayed in the desktop top nav, which has room for it. So the pill is Dashboard / Portfolio / Learn / News **for everyone, admin or not** — it holds the places every user has, and its tab count no longer changes with a role. On `/admin` it shows no highlight at all (`activeIndex` is -1, so the travelling span is not rendered), which is correct for a page it does not contain.
 - `AuthProvider` — token + user in localStorage, an `egx.auth.present` cookie for middleware, `useAuth()` → `{user, isAuthenticated, isAdmin, login, logout}`. Re-reads the role from `/api/auth/me` on every load, so a role change lands on next refresh.
-- `AuthCard` — the shared chrome (logo, card, footer links) for the five signed-out pages: `/login`, `/signup`, `/forgot-password`, `/verify-email`, `/set-password`. `/verify-email` and `/set-password` read `?token=`, call the matching endpoint and sign the user in from the session it returns.
+- `AuthCard` — the shared chrome (card and footer links) for the five signed-out pages: `/login`, `/signup`, `/forgot-password`, `/verify-email`, `/set-password`. `/verify-email` and `/set-password` read `?token=`, call the matching endpoint and sign the user in from the session it returns.
 - `GoogleSignInButton` — Google Identity Services; posts the ID token to `/api/auth/google`. Renders nothing without `NEXT_PUBLIC_GOOGLE_CLIENT_ID`.
-- `/account` page (`src/app/account/page.tsx`) — name, email, Log out, and Delete account (the user must type `DELETE`; calls `DELETE /api/auth/me`). Reached from the name in `Navbar`.
+- `/account` page (`src/app/account/page.tsx`) — name, email, Log out, and Delete account (the user must type `DELETE`; calls `DELETE /api/auth/me`). Reached from the name in `Navbar`; has its own `loading.tsx`.
 - `LearnTooltip` — dashed-underline hover tooltip used everywhere for inline education
 - `LoadingSkeleton` — Card/Chart/Table skeletons
 - `StockCard`, `Watchlist`, `IndexFilter`, `SectorFilter`, `StatsPanel`
@@ -2451,7 +2451,7 @@ flash of unrelated layout, and each reuses `CardSkeleton` / `ChartSkeleton` /
 most: every dashboard card links there and that page pulls 400 bars and scores
 them.
 
-**Add a route, add its `loading.tsx` in the same breath.**
+**Add a route, add its `loading.tsx` in the same breath.** The signed-out account pages (`/login`, `/signup`, `/forgot-password`, `/verify-email`, `/set-password`) are covered by the root `src/app/loading.tsx` and deliberately have no per-page skeleton.
 
 ### Money inputs use `step="any"`, never `step={0.01}`
 
