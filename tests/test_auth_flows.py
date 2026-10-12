@@ -425,6 +425,41 @@ def test_invite_for_an_existing_email_is_409(store, mailer):
     assert e.value.status_code == 409
 
 
+def test_reinviting_after_a_failed_invite_email_resends_it(store, mailer):
+    mailer.fail = True
+    with pytest.raises(HTTPException) as e:
+        flows.invite(store, mailer, email="sara@x.com", name="Sara", inviter="Mark", now=NOW)
+    assert e.value.status_code == 502
+    first = store.by_email("sara@x.com")          # the account stayed behind
+    mailer.fail = False
+    acc = flows.invite(store, mailer, email=" SARA@x.com", name="Sara", inviter="Mark", now=NOW)
+    assert acc.id == first.id and len(store.users) == 1
+    assert "Mark invited you" in mailer.sent[-1]["subject"]
+    assert flows.set_password(store, token=mailer.last_link(), password="sara-pw-123", now=NOW).email_verified
+
+
+def test_reinviting_a_pending_invite_inside_the_cooldown_is_429(store, mailer):
+    flows.invite(store, mailer, email="sara@x.com", name="", inviter="", now=NOW)
+    with pytest.raises(HTTPException) as e:
+        flows.invite(store, mailer, email="sara@x.com", name="", inviter="", now=NOW + timedelta(seconds=10))
+    assert e.value.status_code == 429 and len(mailer.sent) == 1
+
+
+@pytest.mark.parametrize("fields", [
+    {"email_verified": True},
+    {"password_hash": "h"},
+    {"google_sub": "g"},
+    {"apple_sub": "a"},
+    {"is_active": False},
+])
+def test_reinviting_an_account_someone_set_up_is_still_409(store, mailer, fields):
+    acc = store.create(email="sara@x.com", name="", password_hash=None, email_verified=False, now=NOW)
+    store.update(acc.id, **fields)
+    with pytest.raises(HTTPException) as e:
+        flows.invite(store, mailer, email="sara@x.com", name="", inviter="", now=LATER)
+    assert e.value.status_code == 409 and mailer.sent == []
+
+
 def test_admin_send_reset_picks_invite_or_reset(store, mailer):
     invited = flows.invite(store, mailer, email="i@x.com", name="", inviter="", now=NOW)
     assert flows.admin_send_reset(store, mailer, user_id=invited.id, now=LATER) == "invite"

@@ -237,12 +237,23 @@ def delete_account(store, account_id: str, *, revoke=None) -> None:
 
 def invite(store, mailer, *, email: str, name: str, inviter: str, now: datetime) -> Account:
     email = normalize_email(email)
-    if store.by_email(email):
-        raise HTTPException(status_code=409, detail="An account with this email already exists.")
-    account = store.create(email=email, name=clean_name(name), password_hash=None,
-                           email_verified=False, now=now)
-    send_link(store, mailer, account, PURPOSE_INVITE, now, inviter=inviter)
+    account = store.by_email(email)
+    if account is not None:
+        # An invite whose email failed (or never got used) leaves an account
+        # nobody has set up; inviting again resends rather than 409ing.
+        if not _never_set_up(account):
+            raise HTTPException(status_code=409, detail="An account with this email already exists.")
+    else:
+        account = store.create(email=email, name=clean_name(name), password_hash=None,
+                               email_verified=False, now=now)
+    if not send_link(store, mailer, account, PURPOSE_INVITE, now, inviter=inviter):
+        raise HTTPException(status_code=429, detail="An email was sent less than a minute ago.")
     return store.by_id(account.id)
+
+
+def _never_set_up(account: Account) -> bool:
+    return (account.is_active and not account.email_verified and not account.password_hash
+            and not account.google_sub and not account.apple_sub)
 
 
 def admin_send_reset(store, mailer, *, user_id: str, now: datetime) -> str:

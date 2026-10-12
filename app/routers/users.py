@@ -3,6 +3,8 @@ User administration — the admin tab's backend.
 
 GET    /api/users                   — list every user
 POST   /api/users                   — invite {email, name?}: creates the account, emails a set-password link
+                                       (re-inviting an account nobody has set up resends the link;
+                                       any other existing email is 409)
 POST   /api/users/{id}/send-reset   — email a reset link (an invite link if they never set up)
 PATCH  /api/users/{id}              — enable / disable
 DELETE /api/users/{id}              — delete the user and everything they own
