@@ -40,7 +40,7 @@ def ids(monkeypatch):
 GOOD_GOOGLE = {"iss": "https://accounts.google.com", "aud": "android-id", "sub": "g-1",
                "email": "Mark@Gmail.com", "email_verified": True, "name": "Mark B"}
 GOOD_APPLE = {"iss": "https://appleid.apple.com", "aud": "com.markbotros.borsacompass",
-              "sub": "a-1", "email": "x@privaterelay.appleid.com"}
+              "sub": "a-1", "email": "x@privaterelay.appleid.com", "email_verified": "true"}
 
 
 def test_google_happy_path_normalises_email():
@@ -56,7 +56,7 @@ def test_google_accepts_the_bare_issuer_too():
 @pytest.mark.parametrize("bad", [
     {"aud": "someone-else"},
     {"iss": "https://evil.example"},
-    {"exp": int(time.time()) - 10},
+    {"exp": int(time.time()) - 120},
     {"email_verified": False},
     {"email": None},
 ])
@@ -105,3 +105,26 @@ def test_revoke_never_raises(monkeypatch):
     monkeypatch.setenv("APPLE_TEAM_ID", "T"); monkeypatch.setenv("APPLE_KEY_ID", "K")
     monkeypatch.setenv("APPLE_PRIVATE_KEY", "not-a-key")
     oauth.revoke_apple_token("rt")   # no exception
+
+
+@pytest.mark.parametrize("claim,kept", [
+    ({"email_verified": False}, False), ({"email_verified": "false"}, False), ({"email_verified": None}, False),
+    ({"email_verified": True}, True), ({"email_verified": "true"}, True),
+])
+def test_apple_uses_the_email_only_when_verified(claim, kept):
+    ident = oauth.verify_apple(_token({**GOOD_APPLE, **claim}), jwks=StubJWKS(KEY))
+    assert ident.email == ("x@privaterelay.appleid.com" if kept else None)
+
+
+def test_clock_skew_within_leeway_is_accepted():
+    tok = _token({**GOOD_GOOGLE, "iat": int(time.time()) + 30})
+    assert oauth.verify_google(tok, jwks=StubJWKS(KEY)).sub == "g-1"
+
+
+def test_jwks_outage_is_503_not_401():
+    class Down:
+        def get_signing_key_from_jwt(self, token):
+            raise jwt.PyJWKClientError("down")
+    with pytest.raises(HTTPException) as e:
+        oauth.verify_google(_token(GOOD_GOOGLE), jwks=Down())
+    assert e.value.status_code == 503

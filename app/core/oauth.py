@@ -14,6 +14,7 @@ Env:
 import json
 import os
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -44,13 +45,23 @@ def _client_ids(env_var: str) -> list:
 
 @lru_cache(maxsize=2)
 def _jwks(url: str):
-    return jwt.PyJWKClient(url, cache_keys=True)
+    return jwt.PyJWKClient(url, cache_keys=True, timeout=5)
 
 
 def _decode(token: str, jwks, audiences: list, issuers, label: str) -> dict:
     try:
         key = jwks.get_signing_key_from_jwt(token).key
-        claims = jwt.decode(token, key, algorithms=["RS256"], audience=audiences,
+    except (jwt.PyJWKClientConnectionError, urllib.error.URLError, OSError):
+        raise HTTPException(status_code=503, detail=f"{label} sign-in is temporarily unavailable")
+    except jwt.PyJWKClientError as e:
+        # Fetching the key set failed -> outage; an unknown kid is a bad token.
+        if "Unable to find a signing key" in str(e):
+            raise HTTPException(status_code=401, detail=f"{label} sign-in failed")
+        raise HTTPException(status_code=503, detail=f"{label} sign-in is temporarily unavailable")
+    except Exception:
+        raise HTTPException(status_code=401, detail=f"{label} sign-in failed")
+    try:
+        claims = jwt.decode(token, key, algorithms=["RS256"], audience=audiences, leeway=60,
                             options={"require": ["exp", "iat", "sub", "iss", "aud"]})
     except Exception:
         raise HTTPException(status_code=401, detail=f"{label} sign-in failed")
@@ -76,6 +87,8 @@ def verify_apple(identity_token: str, jwks=None) -> Identity:
         raise HTTPException(status_code=503, detail="Apple sign-in is not configured")
     claims = _decode(identity_token, jwks or _jwks(APPLE_JWKS), audiences, (APPLE_ISSUER,), "Apple")
     email = (claims.get("email") or "").strip().lower() or None
+    if claims.get("email_verified") not in (True, "true"):
+        email = None   # an unverified address must never link or create accounts
     # Apple never puts the name in the token; the app sends it (first sign-in only).
     return Identity(sub=str(claims["sub"]), email=email, name="")
 

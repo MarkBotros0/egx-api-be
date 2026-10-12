@@ -310,7 +310,7 @@ def test_oauth_links_a_verified_password_account_by_email_and_keeps_its_password
 
 def test_oauth_takeover_of_an_unverified_account_clears_the_password(store, mailer):
     """Review focus 1."""
-    flows.signup(store, mailer, name="", email="victim@x.com", password="attacker-pw", now=NOW)
+    flows.signup(store, mailer, name="Attacker", email="victim@x.com", password="attacker-pw", now=NOW)
     acc = flows.oauth_sign_in(store, provider="google", identity=Identity(sub="g9", email="victim@x.com", name="Victim"), now=NOW)
     assert acc.email_verified and acc.password_hash is None and acc.name == "Victim"
     with pytest.raises(HTTPException) as e:
@@ -341,3 +341,24 @@ def test_name_hint_fills_an_empty_name(store):
     acc = flows.oauth_sign_in(store, provider="apple", identity=Identity(sub="a1", email="a@x.com", name=""),
                               name_hint="  Sara  K ", now=NOW)
     assert acc.name == "Sara K"
+
+
+def test_unverified_apple_email_cannot_link_an_existing_account(store):
+    a = store.create(email="mark@gmail.com", name="Mark", password_hash=hash_password("keep-this-pw"), email_verified=True, now=NOW)
+    with pytest.raises(HTTPException) as e:
+        flows.oauth_sign_in(store, provider="apple", identity=Identity(sub="a-evil", email=None, name=""), now=NOW)
+    assert e.value.status_code == 400
+    after = store.by_id(a.id)
+    assert after == a and after.apple_sub is None
+
+
+@pytest.mark.parametrize("by", ["sub", "email"])
+def test_disabled_account_is_403_before_any_linking_write(store, by):
+    kw = {"google_sub": "g1"} if by == "sub" else {}
+    a = store.create(email="d@x.com", name="", password_hash=None, email_verified=False, now=NOW, **kw)
+    store.update(a.id, is_active=False)
+    before = store.by_id(a.id)
+    with pytest.raises(HTTPException) as e:
+        flows.oauth_sign_in(store, provider="google", identity=Identity(sub="g1", email="d@x.com", name="Named"), now=NOW)
+    assert e.value.status_code == 403
+    assert store.by_id(a.id) == before

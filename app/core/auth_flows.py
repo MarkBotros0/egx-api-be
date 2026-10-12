@@ -195,24 +195,25 @@ def oauth_sign_in(store, *, provider: str, identity, name_hint: str = "", now: d
         email = normalize_email(identity.email)
         account = store.by_email(email)
         if account is None:
-            account = store.create(email=email, name=name, password_hash=None, email_verified=True,
-                                   now=now, **{f"{provider}_sub": identity.sub})
-        else:
-            fields = {f"{provider}_sub": identity.sub}
-            if not account.email_verified:
-                # The provider just proved the inbox. A password set by whoever
-                # pre-registered this email must not survive that.
-                fields.update(password_hash=None, email_verified=True)
-                # ...and neither may a pending sign-up link, which carries the
-                # password its author would set on the account.
-                store.delete_tokens(account.id, PURPOSE_VERIFY)
-            if not account.name and name:
-                fields["name"] = name
-            store.update(account.id, **fields)
-            account = store.by_id(account.id)
-    elif not account.name and name:
-        store.update(account.id, name=name)
-        account = store.by_id(account.id)
+            return store.create(email=email, name=name, password_hash=None, email_verified=True,
+                                now=now, **{f"{provider}_sub": identity.sub})
     if not account.is_active:
-        raise HTTPException(status_code=403, detail=DISABLED)
+        raise HTTPException(status_code=403, detail=DISABLED)   # before any write
+    fields = {}
+    if getattr(account, f"{provider}_sub") != identity.sub:
+        fields[f"{provider}_sub"] = identity.sub
+    if not account.email_verified:
+        # The provider just proved the inbox. A password set by whoever
+        # pre-registered this email must not survive that...
+        fields.update(password_hash=None, email_verified=True)
+        # ...nor a pending sign-up link carrying the password it would set...
+        store.delete_tokens(account.id, PURPOSE_VERIFY)
+        # ...nor the name they chose.
+        if name:
+            fields["name"] = name
+    if "name" not in fields and not account.name and name:
+        fields["name"] = name
+    if fields:
+        store.update(account.id, **fields)
+        account = store.by_id(account.id)
     return account
