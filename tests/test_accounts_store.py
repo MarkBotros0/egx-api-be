@@ -77,6 +77,18 @@ def test_update_refuses_role_and_unknown_fields():
             store.update("u1", **bad)
 
 
+@pytest.mark.parametrize("bad", [{"role": "admin"}, {"email": "x@y.z"}, {"nope": 1}])
+def test_the_memory_fake_refuses_the_same_fields_as_the_real_store(bad):
+    # A flow writing a forbidden column must fail its tests, not production.
+    from account_fakes import MemoryAccountStore
+    store = MemoryAccountStore()
+    acc = store.create(email="a@x.com", name="", password_hash=None, email_verified=False,
+                       now=datetime(2026, 10, 12, tzinfo=timezone.utc))
+    with pytest.raises(ValueError):
+        store.update(acc.id, **bad)
+    assert store.by_id(acc.id) == acc
+
+
 def test_issue_token_stores_only_the_hash_and_replaces_older_unused():
     db = FakeDB()
     raw = AccountStore(db).issue_token("u1", "reset", NOW)

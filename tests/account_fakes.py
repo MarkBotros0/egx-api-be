@@ -14,6 +14,7 @@ from typing import Optional
 from app.core.accounts import (
     TOKEN_LIFETIMES,
     USER_OWNED_TABLES,
+    _UPDATABLE,
     Account,
     hash_link_token,
     iso,
@@ -64,6 +65,9 @@ class MemoryAccountStore:
         return acc
 
     def update(self, user_id, **fields):
+        bad = set(fields) - _UPDATABLE          # same guard as AccountStore.update
+        if bad:
+            raise ValueError(f"not updatable: {sorted(bad)}")
         self.users[user_id] = replace(self.users[user_id], **fields)
 
     def set_role(self, user_id, role):
