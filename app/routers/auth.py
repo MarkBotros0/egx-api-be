@@ -13,12 +13,13 @@ Public (no token — listed in core/auth.PUBLIC_ENDPOINTS):
   POST /api/auth/apple                {identityToken, authorizationCode?, name?} -> session
 Signed in:
   GET  /api/auth/me                                            -> user
+  DELETE /api/auth/me                                          -> 204 (deletes the account and everything it owns)
 """
 
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, Response
 from pydantic import BaseModel
 
 from app.core import auth_flows as flows
@@ -101,6 +102,12 @@ def set_password(body: SetPasswordRequest, store=Depends(get_store)):
 @router.get("/api/auth/me")
 def me(user: CurrentUser = Depends(get_current_user)):
     return {"id": user.id, "email": user.email, "name": user.name, "role": user.role}
+
+
+@router.delete("/api/auth/me", status_code=204)
+def delete_me(user: CurrentUser = Depends(get_current_user), store=Depends(get_store)):
+    flows.delete_account(store, user.id)
+    return Response(status_code=204)
 
 
 class GoogleRequest(BaseModel):

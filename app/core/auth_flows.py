@@ -15,6 +15,7 @@ from typing import Optional
 from fastapi import HTTPException
 
 from app.core import email as mail
+from app.core import oauth
 from app.core.accounts import (
     EMAIL_COOLDOWN,
     PURPOSE_INVITE,
@@ -217,3 +218,36 @@ def oauth_sign_in(store, *, provider: str, identity, name_hint: str = "", now: d
         store.update(account.id, **fields)
         account = store.by_id(account.id)
     return account
+
+
+def delete_account(store, account_id: str, *, revoke=None) -> None:
+    account = store.by_id(account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if account.role == "admin" and account.is_active and store.count_active_admins() <= 1:
+        raise HTTPException(
+            status_code=409,
+            detail="You are the last active admin — no one could administer the app.")
+    store.delete_account(account.id)
+    if account.apple_refresh_token:
+        (revoke or oauth.revoke_apple_token)(account.apple_refresh_token)
+
+
+def invite(store, mailer, *, email: str, name: str, inviter: str, now: datetime) -> Account:
+    email = normalize_email(email)
+    if store.by_email(email):
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+    account = store.create(email=email, name=clean_name(name), password_hash=None,
+                           email_verified=False, now=now)
+    send_link(store, mailer, account, PURPOSE_INVITE, now, inviter=inviter)
+    return store.by_id(account.id)
+
+
+def admin_send_reset(store, mailer, *, user_id: str, now: datetime) -> str:
+    account = store.by_id(user_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    purpose = PURPOSE_INVITE if (not account.password_hash and not account.email_verified) else PURPOSE_RESET
+    if not send_link(store, mailer, account, purpose, now):
+        raise HTTPException(status_code=429, detail="An email was sent less than a minute ago.")
+    return purpose

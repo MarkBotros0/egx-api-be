@@ -362,3 +362,53 @@ def test_disabled_account_is_403_before_any_linking_write(store, by):
         flows.oauth_sign_in(store, provider="google", identity=Identity(sub="g1", email="d@x.com", name="Named"), now=NOW)
     assert e.value.status_code == 403
     assert store.by_id(a.id) == before
+
+
+def test_delete_account_removes_everything_and_revokes_apple(store):
+    a = store.create(email="a@x.com", name="", password_hash=None, email_verified=True, now=NOW, apple_sub="a1")
+    store.update(a.id, apple_refresh_token="rt")
+    revoked = []
+    flows.delete_account(store, a.id, revoke=revoked.append)
+    assert store.by_id(a.id) is None and revoked == ["rt"]
+    from app.core.accounts import USER_OWNED_TABLES
+    assert {t for t, uid in store.deleted_from if uid == a.id} == set(USER_OWNED_TABLES)
+
+
+def test_last_active_admin_cannot_delete_themselves(store):
+    a = store.create(email="boss@x.com", name="", password_hash=None, email_verified=True, now=NOW)
+    store.set_role(a.id, "admin")
+    with pytest.raises(HTTPException) as e:
+        flows.delete_account(store, a.id, revoke=lambda rt: None)
+    assert e.value.status_code == 409
+    assert store.by_id(a.id) is not None
+
+
+def test_invite_creates_unverified_passwordless_and_emails_set_password(store, mailer):
+    acc = flows.invite(store, mailer, email=" Sara@X.com", name="Sara", inviter="Mark", now=NOW)
+    assert acc.email == "sara@x.com" and not acc.email_verified and acc.password_hash is None
+    assert "Mark invited you" in mailer.sent[-1]["subject"]
+    done = flows.set_password(store, token=mailer.last_link(), password="sara-pw-123", now=NOW)
+    assert done.email_verified
+
+
+def test_invite_for_an_existing_email_is_409(store, mailer):
+    store.create(email="sara@x.com", name="", password_hash=None, email_verified=True, now=NOW)
+    with pytest.raises(HTTPException) as e:
+        flows.invite(store, mailer, email="sara@x.com", name="", inviter="", now=NOW)
+    assert e.value.status_code == 409
+
+
+def test_admin_send_reset_picks_invite_or_reset(store, mailer):
+    invited = flows.invite(store, mailer, email="i@x.com", name="", inviter="", now=NOW)
+    assert flows.admin_send_reset(store, mailer, user_id=invited.id, now=LATER) == "invite"
+    full = store.create(email="f@x.com", name="", password_hash=hash_password("pw-pw-pw-pw"), email_verified=True, now=NOW)
+    assert flows.admin_send_reset(store, mailer, user_id=full.id, now=LATER) == "reset"
+    with pytest.raises(HTTPException) as e:
+        flows.admin_send_reset(store, mailer, user_id=full.id, now=LATER)
+    assert e.value.status_code == 429
+
+
+def test_admin_send_reset_unknown_user_is_404(store, mailer):
+    with pytest.raises(HTTPException) as e:
+        flows.admin_send_reset(store, mailer, user_id="nope", now=NOW)
+    assert e.value.status_code == 404

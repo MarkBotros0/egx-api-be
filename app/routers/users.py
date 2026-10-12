@@ -1,89 +1,59 @@
 """
 User administration — the admin tab's backend.
 
-GET    /api/users                  — list every user
-POST   /api/users                  — create one, generating a password
-POST   /api/users/{id}/password    — reset a password
-PATCH  /api/users/{id}             — enable / disable
-DELETE /api/users/{id}             — delete the user and everything they own
+GET    /api/users                   — list every user
+POST   /api/users                   — invite {email, name?}: creates the account, emails a set-password link
+POST   /api/users/{id}/send-reset   — email a reset link (an invite link if they never set up)
+PATCH  /api/users/{id}              — enable / disable
+DELETE /api/users/{id}              — delete the user and everything they own
 
 Every route requires an admin. `role` is NOT settable here: admin status comes
 only from the AUTH_ADMINS env var at boot (core/auth.seed_users_from_env), so
 privilege escalation through this API is structurally impossible.
-
-A generated password is returned EXACTLY ONCE, in the response to the call that
-created it. Only the bcrypt hash is stored, so it can never be read back.
+No password ever passes through this API.
 """
 
-import re
-import uuid
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import Optional
 
-from app.core.auth import (
-    ROLE_ADMIN,
-    ROLE_USER,
-    CurrentUser,
-    generate_password,
-    hash_password,
-    require_admin,
-)
-from app.core.db import get_db
+from app.core import auth_flows as flows
+from app.core.auth import ROLE_ADMIN, CurrentUser, require_admin
+from app.core.email import Mailer, get_mailer
+from app.routers.auth import get_store
 
 router = APIRouter()
 
-_USERNAME_RE = re.compile(r"^[a-z0-9._-]{3,32}$")
-_MIN_PASSWORD_LENGTH = 8
 
-
-class UserCreate(BaseModel):
-    username: str
-    password: Optional[str] = None
-
-
-class PasswordReset(BaseModel):
-    password: Optional[str] = None
+class InviteRequest(BaseModel):
+    email: str
+    name: Optional[str] = ""
 
 
 class UserPatch(BaseModel):
     is_active: bool
 
 
-def _clean_username(raw: str) -> str:
-    username = (raw or "").strip().lower()
-    if not _USERNAME_RE.match(username):
-        raise HTTPException(
-            status_code=400,
-            detail="Username must be 3–32 characters, using a–z, 0–9, dot, dash or underscore.",
-        )
-    return username
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-def _clean_password(raw: Optional[str]) -> tuple:
-    """Return (password, was_generated). Generates when none was supplied."""
-    if raw is None or not raw.strip():
-        return generate_password(), True
-    password = raw.strip()
-    if len(password) < _MIN_PASSWORD_LENGTH:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Password must be at least {_MIN_PASSWORD_LENGTH} characters.",
-        )
-    return password, False
+def _out(account, holdings: dict) -> dict:
+    return {
+        "id": account.id, "email": account.email, "name": account.name,
+        "role": account.role, "is_active": account.is_active,
+        "email_verified": account.email_verified, "methods": account.methods,
+        "created_at": account.created_at, "holdings_count": holdings.get(account.id, 0),
+    }
 
 
-def _fetch_user(db, user_id: str):
-    row = db.execute(
-        "SELECT id, username, role, is_active FROM users WHERE id = %s",
-        (user_id,),
-    ).fetchone()
-    if not row:
+def _target(store, user_id: str):
+    account = store.by_id(user_id)
+    if account is None:
         raise HTTPException(status_code=404, detail=f"User not found: {user_id}")
-    return {"id": row[0], "username": row[1], "role": row[2] or ROLE_USER,
-            "is_active": bool(row[3])}
+    return account
 
 
 def _guard_not_self(target_id: str, admin: CurrentUser, verb: str) -> None:
@@ -91,176 +61,50 @@ def _guard_not_self(target_id: str, admin: CurrentUser, verb: str) -> None:
         raise HTTPException(status_code=400, detail=f"You cannot {verb} your own account.")
 
 
-def _guard_not_last_admin(db, target: dict, verb: str) -> None:
+def _guard_not_last_admin(store, target, verb: str) -> None:
     """An app with no active admin can never be administered again."""
-    if target["role"] != ROLE_ADMIN or not target["is_active"]:
-        return
-    row = db.execute(
-        "SELECT COUNT(*) FROM users WHERE role = %s AND is_active = TRUE",
-        (ROLE_ADMIN,),
-    ).fetchone()
-    if row and int(row[0]) <= 1:
+    if target.role == ROLE_ADMIN and target.is_active and store.count_active_admins() <= 1:
         raise HTTPException(
             status_code=400,
-            detail=f"You cannot {verb} the last active admin — no one could administer the app.",
-        )
+            detail=f"You cannot {verb} the last active admin — no one could administer the app.")
 
 
 @router.get("/api/users")
-def list_users(admin: CurrentUser = Depends(require_admin)):
-    try:
-        db = get_db()
-        # LEFT JOIN so a user with no holdings still appears, and counting only
-        # open positions (quantity > 0) to match what the portfolio page shows.
-        rows = db.execute(
-            "SELECT u.id, u.username, u.role, u.is_active, u.created_at, "
-            "       COUNT(p.id) FILTER (WHERE p.quantity > 0) "
-            "FROM users u LEFT JOIN portfolio p ON p.user_id = u.id "
-            "GROUP BY u.id, u.username, u.role, u.is_active, u.created_at "
-            "ORDER BY u.created_at ASC"
-        ).fetchall()
-        return {
-            "users": [
-                {
-                    "id": r[0],
-                    "username": r[1],
-                    "role": r[2] or ROLE_USER,
-                    "is_active": bool(r[3]),
-                    "created_at": r[4],
-                    "holdings_count": int(r[5] or 0),
-                }
-                for r in rows
-            ]
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def list_users(admin: CurrentUser = Depends(require_admin), store=Depends(get_store)):
+    holdings = store.holdings_counts()
+    return {"users": [_out(a, holdings) for a in store.list_all()]}
 
 
 @router.post("/api/users", status_code=201)
-def create_user(body: UserCreate, admin: CurrentUser = Depends(require_admin)):
-    try:
-        username = _clean_username(body.username)
-        password, generated = _clean_password(body.password)
-
-        db = get_db()
-        if db.execute(
-            "SELECT id FROM users WHERE username = %s", (username,)
-        ).fetchone():
-            raise HTTPException(status_code=409, detail=f"Username already taken: {username}")
-
-        user_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat() + "Z"
-        db.execute(
-            "INSERT INTO users (id, username, password_hash, created_at, role, is_active) "
-            "VALUES (%s, %s, %s, %s, %s, TRUE)",
-            (user_id, username, hash_password(password), now, ROLE_USER),
-        )
-        db.commit()
-
-        return {
-            "user": {
-                "id": user_id,
-                "username": username,
-                "role": ROLE_USER,
-                "is_active": True,
-                "created_at": now,
-                "holdings_count": 0,
-            },
-            # Returned once and never again — only the hash is stored.
-            "generated_password": password if generated else None,
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def invite_user(body: InviteRequest, admin: CurrentUser = Depends(require_admin),
+                store=Depends(get_store), mailer: Mailer = Depends(get_mailer)):
+    account = flows.invite(store, mailer, email=body.email, name=body.name or "",
+                           inviter=admin.name or admin.email, now=_now())
+    return {"user": _out(account, {})}
 
 
-@router.post("/api/users/{user_id}/password")
-def reset_password(
-    user_id: str,
-    body: PasswordReset,
-    admin: CurrentUser = Depends(require_admin),
-):
-    try:
-        password, generated = _clean_password(body.password)
-        db = get_db()
-        target = _fetch_user(db, user_id)
-
-        db.execute(
-            "UPDATE users SET password_hash = %s WHERE id = %s",
-            (hash_password(password), user_id),
-        )
-        db.commit()
-
-        return {
-            "id": user_id,
-            "username": target["username"],
-            "generated_password": password if generated else None,
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@router.post("/api/users/{user_id}/send-reset")
+def send_reset(user_id: str, admin: CurrentUser = Depends(require_admin),
+               store=Depends(get_store), mailer: Mailer = Depends(get_mailer)):
+    sent = flows.admin_send_reset(store, mailer, user_id=user_id, now=_now())
+    return {"id": user_id, "sent": sent}
 
 
 @router.patch("/api/users/{user_id}")
-def set_user_active(
-    user_id: str,
-    body: UserPatch,
-    admin: CurrentUser = Depends(require_admin),
-):
-    try:
-        db = get_db()
-        target = _fetch_user(db, user_id)
-
-        if not body.is_active:
-            _guard_not_self(user_id, admin, "disable")
-            _guard_not_last_admin(db, target, "disable")
-
-        db.execute(
-            "UPDATE users SET is_active = %s WHERE id = %s",
-            (bool(body.is_active), user_id),
-        )
-        db.commit()
-        return {**target, "is_active": bool(body.is_active)}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def set_user_active(user_id: str, body: UserPatch, admin: CurrentUser = Depends(require_admin),
+                    store=Depends(get_store)):
+    target = _target(store, user_id)
+    if not body.is_active:
+        _guard_not_self(user_id, admin, "disable")
+        _guard_not_last_admin(store, target, "disable")
+    store.update(user_id, is_active=bool(body.is_active))
+    return _out(store.by_id(user_id), store.holdings_counts())
 
 
 @router.delete("/api/users/{user_id}")
-def delete_user(user_id: str, admin: CurrentUser = Depends(require_admin)):
-    try:
-        db = get_db()
-        target = _fetch_user(db, user_id)
-        _guard_not_self(user_id, admin, "delete")
-        _guard_not_last_admin(db, target, "delete")
-
-        # No table has a foreign key to `users`, so nothing cascades — without
-        # this the rows survive as invisible orphans. Sales and dividends go
-        # before holdings, matching the direction the undo path depends on,
-        # and it is all one transaction so a half-deleted user is impossible.
-        with db.transaction() as tx:
-            tx.execute("DELETE FROM portfolio_sales WHERE user_id = %s", (user_id,))
-            tx.execute("DELETE FROM portfolio_dividends WHERE user_id = %s", (user_id,))
-            tx.execute("DELETE FROM portfolio WHERE user_id = %s", (user_id,))
-            tx.execute("DELETE FROM watchlist WHERE user_id = %s", (user_id,))
-            tx.execute("DELETE FROM user_settings WHERE user_id = %s", (user_id,))
-            # Score alerts: their devices, preferences and queued/sent pushes.
-            tx.execute("DELETE FROM push_devices WHERE user_id = %s", (user_id,))
-            tx.execute("DELETE FROM alert_preferences WHERE user_id = %s", (user_id,))
-            tx.execute("DELETE FROM alert_log WHERE user_id = %s", (user_id,))
-            tx.execute("DELETE FROM users WHERE id = %s", (user_id,))
-
-        return {"deleted": user_id, "username": target["username"]}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def delete_user(user_id: str, admin: CurrentUser = Depends(require_admin), store=Depends(get_store)):
+    target = _target(store, user_id)
+    _guard_not_self(user_id, admin, "delete")
+    _guard_not_last_admin(store, target, "delete")
+    flows.delete_account(store, user_id)
+    return {"deleted": user_id, "email": target.email}

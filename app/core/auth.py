@@ -9,7 +9,6 @@ through /api/auth/login.
 
 import hashlib
 import os
-import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -27,12 +26,6 @@ TOKEN_LIFETIME_DAYS = 30
 ROLE_USER = "user"
 ROLE_ADMIN = "admin"
 
-# Ambiguous glyphs removed: a generated password gets read off a screen and
-# typed by hand, so 0/O and 1/l/I cost support time for no entropy worth
-# keeping. 16 chars of this alphabet is ~91 bits.
-_PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
-GENERATED_PASSWORD_LENGTH = 16
-
 
 @dataclass
 class CurrentUser:
@@ -46,11 +39,6 @@ class CurrentUser:
     @property
     def is_admin(self) -> bool:
         return self.role == ROLE_ADMIN
-
-
-def generate_password(length: int = GENERATED_PASSWORD_LENGTH) -> str:
-    """A random password for an admin to hand to a user. Never stored raw."""
-    return "".join(secrets.choice(_PASSWORD_ALPHABET) for _ in range(length))
 
 
 def _prehash(password: str) -> bytes:

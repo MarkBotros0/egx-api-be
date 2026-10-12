@@ -6,6 +6,7 @@ Run from egx-api-be:  python -m pytest tests/test_users_and_roles.py -v
 
 import re
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -15,12 +16,11 @@ from app.core.auth import (
     ROLE_ADMIN,
     ROLE_USER,
     CurrentUser,
-    generate_password,
-    hash_password,
     require_admin,
     seed_users_from_env,
-    verify_password,
 )
+from account_fakes import MemoryAccountStore, OutboxMailer
+import app.routers.users as users_mod
 
 
 # ---------------------------------------------------------------------------
@@ -175,249 +175,139 @@ def test_get_current_user_does_not_trust_role_from_the_token():
 
 
 # ---------------------------------------------------------------------------
-# Guards — you cannot lock everyone out of the app
+# The admin API — route functions called directly over a MemoryAccountStore
 # ---------------------------------------------------------------------------
 
-def _users_mod():
-    import app.routers.users as m
-    return m
+T0 = datetime(2026, 10, 12, tzinfo=timezone.utc)
 
 
-def test_cannot_disable_the_last_active_admin(monkeypatch):
-    m = _users_mod()
-    db = _patch_db(monkeypatch, FakeDB([
-        ("FROM users WHERE id", [("admin-2", "other", ROLE_ADMIN, True)]),
-        ("COUNT(*)", [(1,)]),
-    ]))
+def _store_with(*roles):
+    s = MemoryAccountStore()
+    accs = []
+    for i, role in enumerate(roles):
+        a = s.create(email=f"u{i}@x.com", name="", password_hash=None, email_verified=True, now=T0)
+        if role == "admin":
+            s.set_role(a.id, "admin")
+        accs.append(s.users[a.id])
+    return s, accs
 
+
+def _admin(acc):
+    return CurrentUser(id=acc.id, email=acc.email, role=ROLE_ADMIN)
+
+
+def test_cannot_disable_or_delete_yourself():
+    s, (me, _) = _store_with("admin", "admin")
+    for call in (lambda: users_mod.set_user_active(me.id, users_mod.UserPatch(is_active=False), _admin(me), s),
+                 lambda: users_mod.delete_user(me.id, _admin(me), s)):
+        with pytest.raises(HTTPException) as e:
+            call()
+        assert e.value.status_code == 400
+        assert "your own account" in e.value.detail
+    assert s.by_id(me.id) is not None and s.by_id(me.id).is_active
+
+
+def test_cannot_disable_the_last_active_admin():
+    s, (boss, other_admin) = _store_with("admin", "admin")
+    s.update(other_admin.id, is_active=False)
+    actor = CurrentUser(id="someone-else", email="x@x.com", role=ROLE_ADMIN)
     with pytest.raises(HTTPException) as e:
-        m.set_user_active("admin-2", m.UserPatch(is_active=False), admin=ADMIN)
+        users_mod.set_user_active(boss.id, users_mod.UserPatch(is_active=False), actor, s)
+    assert e.value.status_code == 400 and "last active admin" in e.value.detail
+    assert s.by_id(boss.id).is_active
+
+
+def test_cannot_delete_the_last_active_admin_and_nothing_is_deleted():
+    s, (boss, other_admin) = _store_with("admin", "admin")
+    s.update(other_admin.id, is_active=False)
+    actor = CurrentUser(id="someone-else", email="x@x.com", role=ROLE_ADMIN)
+    with pytest.raises(HTTPException) as e:
+        users_mod.delete_user(boss.id, actor, s)
     assert e.value.status_code == 400
-    assert "last active admin" in e.value.detail
+    assert s.deleted_from == [] and s.by_id(boss.id) is not None
 
 
-def test_cannot_delete_the_last_active_admin(monkeypatch):
-    m = _users_mod()
-    db = _patch_db(monkeypatch, FakeDB([
-        ("FROM users WHERE id", [("admin-2", "other", ROLE_ADMIN, True)]),
-        ("COUNT(*)", [(1,)]),
-    ]))
-
-    with pytest.raises(HTTPException) as e:
-        m.delete_user("admin-2", admin=ADMIN)
-    assert e.value.status_code == 400
-    assert db.tx_log == [], "nothing may be deleted when the guard trips"
+def test_a_second_active_admin_makes_deletion_allowed():
+    s, (boss, other_admin) = _store_with("admin", "admin")
+    out = users_mod.delete_user(other_admin.id, _admin(boss), s)
+    assert out["deleted"] == other_admin.id and s.by_id(other_admin.id) is None
 
 
-def test_a_second_active_admin_makes_deletion_allowed(monkeypatch):
-    m = _users_mod()
-    db = _patch_db(monkeypatch, FakeDB([
-        ("FROM users WHERE id", [("admin-2", "other", ROLE_ADMIN, True)]),
-        ("COUNT(*)", [(2,)]),
-    ]))
-
-    out = m.delete_user("admin-2", admin=ADMIN)
-    assert out["deleted"] == "admin-2"
-
-
-def test_cannot_disable_yourself(monkeypatch):
-    m = _users_mod()
-    _patch_db(monkeypatch, FakeDB([
-        ("FROM users WHERE id", [(ADMIN.id, ADMIN.email, ROLE_ADMIN, True)]),
-        ("COUNT(*)", [(5,)]),
-    ]))
-
-    with pytest.raises(HTTPException) as e:
-        m.set_user_active(ADMIN.id, m.UserPatch(is_active=False), admin=ADMIN)
-    assert "your own account" in e.value.detail
-
-
-def test_cannot_delete_yourself(monkeypatch):
-    m = _users_mod()
-    _patch_db(monkeypatch, FakeDB([
-        ("FROM users WHERE id", [(ADMIN.id, ADMIN.email, ROLE_ADMIN, True)]),
-        ("COUNT(*)", [(5,)]),
-    ]))
-
-    with pytest.raises(HTTPException) as e:
-        m.delete_user(ADMIN.id, admin=ADMIN)
-    assert "your own account" in e.value.detail
-
-
-def test_re_enabling_a_user_is_never_blocked(monkeypatch):
+def test_re_enabling_a_user_is_never_blocked():
     """The guards exist to preserve access, so they must not block restoring it."""
-    m = _users_mod()
-    _patch_db(monkeypatch, FakeDB([
-        ("FROM users WHERE id", [("u9", "dormant", ROLE_USER, False)]),
-    ]))
-    out = m.set_user_active("u9", m.UserPatch(is_active=True), admin=ADMIN)
+    s, (boss, dormant) = _store_with("admin", "user")
+    s.update(dormant.id, is_active=False)
+    out = users_mod.set_user_active(dormant.id, users_mod.UserPatch(is_active=True), _admin(boss), s)
     assert out["is_active"] is True
 
 
-# ---------------------------------------------------------------------------
-# Deleting a user must not leave orphans — no table has an FK to `users`
-# ---------------------------------------------------------------------------
-
-def test_deleting_a_user_removes_everything_they_own(monkeypatch):
-    m = _users_mod()
-    db = _patch_db(monkeypatch, FakeDB([
-        ("FROM users WHERE id", [("u2", "sara", ROLE_USER, True)]),
-        ("COUNT(*)", [(2,)]),
-    ]))
-
-    m.delete_user("u2", admin=ADMIN)
-
-    deleted_from = [sql for sql, _ in db.tx_log]
-    for table in ("portfolio_sales", "portfolio", "watchlist", "user_settings",
-                  "push_devices", "alert_preferences", "alert_log", "users"):
-        assert any(f"DELETE FROM {table} " in s for s in deleted_from), (
-            f"deleting a user left {table} rows behind — nothing cascades, "
-            "there is no FK to users"
-        )
-    assert all(p[-1] == "u2" for _, p in db.tx_log)
-
-
-def test_sales_are_deleted_before_holdings(monkeypatch):
-    """Matches the direction the sale-undo path depends on."""
-    m = _users_mod()
-    db = _patch_db(monkeypatch, FakeDB([
-        ("FROM users WHERE id", [("u2", "sara", ROLE_USER, True)]),
-        ("COUNT(*)", [(2,)]),
-    ]))
-    m.delete_user("u2", admin=ADMIN)
-
-    order = [s for s, _ in db.tx_log]
-    sales_at = next(i for i, s in enumerate(order) if "portfolio_sales" in s)
-    holdings_at = next(i for i, s in enumerate(order) if "DELETE FROM portfolio " in s)
-    users_at = next(i for i, s in enumerate(order) if "DELETE FROM users" in s)
-    assert sales_at < holdings_at < users_at
-
-
-def test_user_deletion_is_one_transaction(monkeypatch):
-    """A half-deleted user is worse than an undeleted one."""
-    m = _users_mod()
-    db = _patch_db(monkeypatch, FakeDB([
-        ("FROM users WHERE id", [("u2", "sara", ROLE_USER, True)]),
-        ("COUNT(*)", [(2,)]),
-    ]))
-    m.delete_user("u2", admin=ADMIN)
-    assert len(db.tx_log) == 9, "every delete must run inside transaction()"
-
-
-# ---------------------------------------------------------------------------
-# Passwords
-# ---------------------------------------------------------------------------
-
-def test_generated_password_is_random_and_unambiguous():
-    a, b = generate_password(), generate_password()
-    assert a != b
-    assert len(a) == 16
-    # 0/O and 1/l/I get misread off a screen; they cost support time for no
-    # entropy worth keeping.
-    assert not set(a) & set("0O1lI")
-
-
-@pytest.mark.skip(reason="rewritten in Task 6")
-def test_created_user_gets_a_generated_password_returned_once(monkeypatch):
-    m = _users_mod()
-    db = _patch_db(monkeypatch, FakeDB([("FROM users WHERE username", [])]))
-
-    out = m.create_user(m.UserCreate(username="newbie"), admin=ADMIN)
-    generated = out["generated_password"]
-    assert generated and len(generated) == 16
-
-    # Only the hash is stored, and it verifies against the returned password.
-    insert = next(p for s, p in db.log if "INSERT INTO users" in s)
-    stored_hash = insert[2]
-    assert stored_hash != generated
-    assert verify_password(generated, stored_hash)
-
-
-@pytest.mark.skip(reason="rewritten in Task 6")
-def test_an_explicit_password_is_not_echoed_back(monkeypatch):
-    m = _users_mod()
-    _patch_db(monkeypatch, FakeDB([("FROM users WHERE username", [])]))
-
-    out = m.create_user(
-        m.UserCreate(username="newbie", password="hunter2-hunter2"), admin=ADMIN
-    )
-    assert out["generated_password"] is None
-
-
-@pytest.mark.skip(reason="rewritten in Task 6")
-def test_short_explicit_password_is_rejected(monkeypatch):
-    m = _users_mod()
-    _patch_db(monkeypatch, FakeDB([("FROM users WHERE username", [])]))
+def test_unknown_user_is_404():
+    s, (boss,) = _store_with("admin")
     with pytest.raises(HTTPException) as e:
-        m.create_user(m.UserCreate(username="newbie", password="short"), admin=ADMIN)
-    assert e.value.status_code == 400
+        users_mod.set_user_active("nope", users_mod.UserPatch(is_active=False), _admin(boss), s)
+    assert e.value.status_code == 404
 
 
-@pytest.mark.skip(reason="rewritten in Task 6")
-def test_reset_password_stores_a_new_hash(monkeypatch):
-    m = _users_mod()
-    db = _patch_db(monkeypatch, FakeDB([
-        ("FROM users WHERE id", [("u2", "sara", ROLE_USER, True)]),
-    ]))
-
-    out = m.reset_password("u2", m.PasswordReset(), admin=ADMIN)
-    update = next(p for s, p in db.log if "UPDATE users SET password_hash" in s)
-    assert verify_password(out["generated_password"], update[0])
+def test_delete_user_removes_every_owned_table():
+    s, (boss, victim) = _store_with("admin", "user")
+    users_mod.delete_user(victim.id, _admin(boss), s)
+    from app.core.accounts import USER_OWNED_TABLES
+    assert {t for t, uid in s.deleted_from if uid == victim.id} == set(USER_OWNED_TABLES)
 
 
-@pytest.mark.skip(reason="rewritten in Task 6")
-def test_listing_users_never_exposes_a_password(monkeypatch):
-    m = _users_mod()
-    db = _patch_db(monkeypatch, FakeDB([
-        ("FROM users u", [("u1", "mark", ROLE_ADMIN, True, "2026-01-01", 3)]),
-    ]))
-
-    out = m.list_users(admin=ADMIN)
-    assert out["users"][0]["username"] == "mark"
-    assert "password" not in str(out).lower()
-    assert "password_hash" not in db.sql_text()
+def test_listing_shows_methods_and_never_a_password_hash():
+    s, (boss,) = _store_with("admin")
+    s.update(boss.id, password_hash="secret-hash", google_sub="g")
+    out = users_mod.list_users(_admin(boss), s)["users"][0]
+    assert out["methods"] == ["password", "google"]
+    assert "secret-hash" not in str(out) and "password_hash" not in out
+    assert set(out) == {"id", "email", "name", "role", "is_active", "email_verified",
+                        "methods", "created_at", "holdings_count"}
 
 
-@pytest.mark.skip(reason="rewritten in Task 6")
-def test_duplicate_username_is_rejected(monkeypatch):
-    m = _users_mod()
-    _patch_db(monkeypatch, FakeDB([("FROM users WHERE username", [("existing",)])]))
-    with pytest.raises(HTTPException) as e:
-        m.create_user(m.UserCreate(username="taken"), admin=ADMIN)
-    assert e.value.status_code == 409
-
-
-@pytest.mark.skip(reason="rewritten in Task 6")
-@pytest.mark.parametrize("bad", ["ab", "has space", "UPPER!", "x" * 33, ""])
-def test_invalid_usernames_are_rejected(bad, monkeypatch):
-    m = _users_mod()
-    _patch_db(monkeypatch, FakeDB([("FROM users WHERE username", [])]))
-    with pytest.raises(HTTPException) as e:
-        m.create_user(m.UserCreate(username=bad), admin=ADMIN)
-    assert e.value.status_code == 400
-
-
-@pytest.mark.skip(reason="rewritten in Task 6")
-def test_username_is_normalised_to_lowercase(monkeypatch):
-    m = _users_mod()
-    db = _patch_db(monkeypatch, FakeDB([("FROM users WHERE username", [])]))
-    out = m.create_user(m.UserCreate(username="  Sara.B  "), admin=ADMIN)
-    assert out["user"]["username"] == "sara.b"
-
-
-@pytest.mark.skip(reason="rewritten in Task 6")
-def test_the_admin_api_cannot_grant_admin(monkeypatch):
-    """
-    Admin status comes only from AUTH_ADMINS at boot. If create_user could set
-    a role, privilege escalation through this API would be one request away.
-    """
-    m = _users_mod()
-    db = _patch_db(monkeypatch, FakeDB([("FROM users WHERE username", [])]))
-    out = m.create_user(m.UserCreate(username="newbie"), admin=ADMIN)
+def test_invite_route_uses_admin_name_as_inviter(monkeypatch):
+    monkeypatch.setenv("FE_BASE_URL", "https://app.test")
+    s, (boss,) = _store_with("admin")
+    mailer = OutboxMailer()
+    actor = CurrentUser(id=boss.id, email=boss.email, name="Mark", role=ROLE_ADMIN)
+    out = users_mod.invite_user(users_mod.InviteRequest(email="NEW@x.com", name="N"), actor, s, mailer)
+    assert out["user"]["email"] == "new@x.com" and "Mark invited you" in mailer.sent[-1]["subject"]
     assert out["user"]["role"] == ROLE_USER
 
+
+def test_send_reset_route_emails_a_link_and_writes_no_password(monkeypatch):
+    monkeypatch.setenv("FE_BASE_URL", "https://app.test")
+    s, (boss, target) = _store_with("admin", "user")
+    s.update(target.id, password_hash="old-hash")
+    mailer = OutboxMailer()
+    out = users_mod.send_reset(target.id, _admin(boss), s, mailer)
+    assert out == {"id": target.id, "sent": "reset"}
+    assert mailer.last_link() and s.by_id(target.id).password_hash == "old-hash"
+
+
+def test_the_admin_api_cannot_grant_admin():
+    """
+    Admin status comes only from AUTH_ADMINS at boot. No file under
+    app/routers may write a role, so privilege escalation through the API
+    is structurally impossible.
+    """
+    routers = Path(__file__).resolve().parents[1] / "app" / "routers"
+    files = sorted(routers.glob("*.py"))
+    assert len(files) > 10, "router scan found too few files"
+    for f in files:
+        assert "SET role" not in f.read_text(encoding="utf-8"), f"{f.name} may not write a role"
+
+
+def test_the_admin_api_writes_no_passwords():
+    """set_password (auth_flows) is the only password writer, and it revokes sessions."""
     src = (Path(__file__).resolve().parents[1] / "app" / "routers" / "users.py").read_text(encoding="utf-8")
-    assert "SET role" not in src, "no route may write a role"
+    assert "password_hash" not in src
+    assert "hash_password" not in src
+
+
+def test_generate_password_is_gone():
+    import app.core.auth as auth_mod
+    assert not hasattr(auth_mod, "generate_password")
 
 
 # ---------------------------------------------------------------------------

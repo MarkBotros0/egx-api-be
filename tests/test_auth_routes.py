@@ -100,3 +100,25 @@ def test_apple_route_stores_refresh_token_once(ctx, monkeypatch):
         assert client.post("/api/auth/apple", json={"identityToken": "t", "authorizationCode": "c", "name": "Ann"}).status_code == 200
     acc = store.by_provider("apple", "a1")
     assert acc.apple_refresh_token == "rt-1" and acc.name == "Ann" and calls == ["c"]
+
+
+def test_delete_me_requires_a_token(ctx):
+    client, _, _ = ctx
+    assert client.delete("/api/auth/me").status_code == 401
+
+
+def test_delete_me_deletes_the_caller_and_answers_204(ctx, monkeypatch):
+    from datetime import datetime, timezone
+    import app.core.auth as auth_mod
+    client, store, _ = ctx
+    acc = store.create(email="gone@x.com", name="", password_hash=None, email_verified=True,
+                       now=datetime(2026, 10, 12, tzinfo=timezone.utc))
+    # The real token and the real middleware / get_current_user run; only the
+    # row lookup is pointed at the memory store.
+    monkeypatch.setattr(auth_mod, "_load_user", lambda uid: (
+        auth_mod.CurrentUser(id=uid, email=store.by_id(uid).email) if store.by_id(uid) else None))
+    headers = {"Authorization": f"Bearer {auth_mod.create_access_token(acc.id)}"}
+    r = client.delete("/api/auth/me", headers=headers)
+    assert r.status_code == 204 and r.content == b""
+    assert store.by_id(acc.id) is None
+    assert client.delete("/api/auth/me", headers=headers).status_code == 401

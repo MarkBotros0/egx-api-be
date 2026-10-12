@@ -263,25 +263,28 @@ def test_summarize_sales_is_gone_so_there_is_only_one_summariser():
 def test_deleting_a_user_also_deletes_their_dividends():
     """
     No table has an FK to users, so nothing cascades. A missed table leaves
-    invisible orphan rows behind every deleted account.
+    invisible orphan rows behind every deleted account. Deletion lives in
+    AccountStore.delete_account (driven by USER_OWNED_TABLES); both the admin
+    DELETE /api/users and the self-service DELETE /api/auth/me go through it.
     """
-    source = Path(__file__).resolve().parents[1] / "app" / "routers" / "users.py"
-    text = source.read_text(encoding="utf-8")
-    assert "portfolio_dividends" in text, (
-        "DELETE /api/users must clear portfolio_dividends inside its transaction"
-    )
+    from app.core.accounts import USER_OWNED_TABLES
+    assert "portfolio_dividends" in USER_OWNED_TABLES
+    assert USER_OWNED_TABLES.index("portfolio_sales") < USER_OWNED_TABLES.index("portfolio")
+    root = Path(__file__).resolve().parents[1] / "app"
+    for rel in ("routers/users.py", "routers/auth.py"):
+        assert "flows.delete_account(" in (root / rel).read_text(encoding="utf-8"), rel
 
 
 def test_every_user_scoped_table_is_cleared_in_one_transaction():
-    """All five deletes must be inside the same db.transaction() block."""
-    source = Path(__file__).resolve().parents[1] / "app" / "routers" / "users.py"
+    """Every table delete and the users row must be inside the same db.transaction() block."""
+    source = Path(__file__).resolve().parents[1] / "app" / "core" / "accounts.py"
     tree = ast.parse(source.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.With):
-            body = ast.dump(node)
-            if "portfolio_sales" in body:
-                for table in ("portfolio_dividends", "portfolio", "watchlist",
-                              "user_settings", "users"):
-                    assert table in body, f"{table} is outside the transaction"
-                return
-    raise AssertionError("no transaction block deleting portfolio_sales was found")
+    for fn in ast.walk(tree):
+        if isinstance(fn, ast.FunctionDef) and fn.name == "delete_account":
+            for node in ast.walk(fn):
+                if isinstance(node, ast.With):
+                    body = ast.dump(node)
+                    assert "USER_OWNED_TABLES" in body, "table deletes are outside the transaction"
+                    assert "DELETE FROM users" in body, "the users row is outside the transaction"
+                    return
+    raise AssertionError("no transaction block in AccountStore.delete_account was found")
