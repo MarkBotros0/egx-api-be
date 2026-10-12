@@ -73,7 +73,7 @@ def send_link(store, mailer, account: Account, purpose: str, now: datetime,
     token = store.issue_token(account.id, purpose, now, pending_password_hash, pending_name)
     url = mail.link(path, token)
     if purpose == PURPOSE_VERIFY:
-        message = mail.verify_message(account.name, url)
+        message = mail.verify_message(url)
     elif purpose == PURPOSE_RESET:
         message = mail.reset_message(account.name, url)
     else:
@@ -87,14 +87,16 @@ def signup(store, mailer, *, name: str, email: str, password: str, now: datetime
     The password and name asked for live on the emailed verify link, never on
     the account: whoever clicks the link proves the inbox AND chooses the
     password, so a stranger re-signing-up with a victim's address cannot
-    swap in their own password under the victim's pending link.
+    swap in their own password under the victim's pending link. The account
+    is created nameless and the verify email greets no one, so a stranger's
+    chosen "name" is neither mailed to the inbox nor left on the account.
     """
     email = normalize_email(email)
     password = clean_password(password)
     name = clean_name(name)
     existing = store.by_email(email)
     if existing is None:
-        account = store.create(email=email, name=name, password_hash=None,
+        account = store.create(email=email, name="", password_hash=None,
                                email_verified=False, now=now)
         send_link(store, mailer, account, PURPOSE_VERIFY, now,
                   pending_password_hash=hash_password(password), pending_name=name)

@@ -44,9 +44,36 @@ def _signup(store, mailer, email="Mark@Gmail.com ", now=NOW):
 def test_signup_creates_unverified_and_emails_a_verify_link(store, mailer):
     _signup(store, mailer)
     acc = store.by_email("mark@gmail.com")
-    assert acc and not acc.email_verified and acc.name == "Mark"
+    assert acc and not acc.email_verified
     assert mailer.sent[-1]["to"] == "mark@gmail.com"
     assert "/verify-email?token=" in mailer.sent[-1]["text"]
+
+
+def test_signup_name_waits_on_the_link_and_never_reaches_the_email(store, mailer):
+    # A stranger's sign-up name must not stick to the account (the real owner
+    # may later recover it through Forgot password) nor be mailed to the inbox.
+    flows.signup(store, mailer, name="Visit evil.example now", email="v@x.com",
+                 password="correct-horse", now=NOW)
+    assert store.by_email("v@x.com").name == ""
+    assert mailer.sent[-1]["text"].startswith("Hi,\n")
+    assert "evil.example" not in mailer.sent[-1]["text"] + mailer.sent[-1]["html"]
+    flows.verify_email(store, token=mailer.last_link(), now=NOW)
+    assert store.by_email("v@x.com").name == "Visit evil.example now"
+
+
+def test_verify_emails_never_greet_by_name(store, mailer):
+    acc = store.create(email="i@x.com", name="Invited Name", password_hash=None,
+                       email_verified=False, now=NOW)
+    flows.signup(store, mailer, name="", email="i@x.com", password="correct-horse", now=NOW)
+    assert mailer.sent[-1]["text"].startswith("Hi,\n") and "Invited Name" not in mailer.sent[-1]["text"]
+    assert store.by_id(acc.id).name == "Invited Name"
+
+
+def test_password_reset_does_not_inherit_a_strangers_signup_name(store, mailer):
+    flows.signup(store, mailer, name="Evil", email="v@x.com", password="attacker-pass", now=NOW)
+    flows.forgot_password(store, mailer, email="v@x.com", now=LATER)
+    acc = flows.set_password(store, token=mailer.last_link(), password="victim-secret", now=LATER)
+    assert acc.name == ""
 
 
 def test_login_before_verifying_is_403_email_not_verified(store, mailer):

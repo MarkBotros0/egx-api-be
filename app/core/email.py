@@ -153,9 +153,11 @@ def _render(name: str, paragraphs: list, button_label: str, url: str, footer: st
     return text, html
 
 
-def verify_message(name: str, url: str):
+def verify_message(url: str):
+    # No name: it would be whatever the person signing up typed, mailed to an
+    # inbox that may not be theirs.
     text, html = _render(
-        name, [f"Confirm your email address to finish creating your {APP_NAME} account."],
+        "", [f"Confirm your email address to finish creating your {APP_NAME} account."],
         "Confirm email", url, "This link expires in 24 hours. If you did not sign up, ignore this email.")
     return f"Confirm your {APP_NAME} email", text, html
 

@@ -139,7 +139,7 @@ def test_fe_base_url_is_no_longer_read(monkeypatch):
 
 
 @pytest.mark.parametrize("build", [
-    lambda: verify_message("Mark", "https://x/verify-email?token=t"),
+    lambda: verify_message("https://x/verify-email?token=t"),
     lambda: reset_message("", "https://x/set-password?token=t"),
     lambda: invite_message("Sara", "Mark", "https://x/set-password?token=t"),
     lambda: already_registered_message("", "https://x/login", "https://x/forgot-password"),
@@ -155,8 +155,13 @@ def test_html_escapes_names():
     assert "<script>" not in html and "&lt;script&gt;" in html
 
 
+def test_verify_message_greets_no_one():
+    _, text, html = verify_message("https://x/verify-email?token=t")
+    assert text.startswith("Hi,\n") and "<p>Hi,</p>" in html
+
+
 def test_greeting_falls_back_when_name_is_empty():
-    _, text, _ = verify_message("", "https://x/verify-email?token=t")
+    _, text, _ = reset_message("", "https://x/set-password?token=t")
     assert text.startswith("Hi,")
 
 
