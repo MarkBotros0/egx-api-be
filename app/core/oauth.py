@@ -4,11 +4,19 @@ Google and Apple sign-in: verify the provider's signed ID token ourselves
 
 Env:
   GOOGLE_CLIENT_IDS  comma-separated OAuth client ids (web, Android, iOS)
-  APPLE_CLIENT_IDS   comma-separated audiences: the bundle id, plus
-                     host.exp.Exponent so Expo Go works in development
+  APPLE_CLIENT_IDS   comma-separated audiences. Production: the iOS bundle
+                     id ONLY. The exchange/revoke calls use the first entry
+                     that is not host.exp.Exponent.
+  APPLE_ALLOW_EXPO_GO  "1" accepts Expo Go's shared audience
+                     (host.exp.Exponent, if also listed) — a DEV backend only.
+                     Every Expo Go project on iOS gets tokens with that
+                     audience, so accepting it in production would let any
+                     Expo Go app's user be linked to our account with the same
+                     email (account takeover). Without the flag such a token
+                     is a 401 even when listed.
   APPLE_TEAM_ID, APPLE_KEY_ID, APPLE_PRIVATE_KEY (.p8 contents)
-                     optional; enable the code→refresh-token exchange that
-                     lets account deletion revoke Apple's grant
+                     enable the code→refresh-token exchange that lets account
+                     deletion revoke Apple's grant (App Store review expects it)
 """
 
 import json
@@ -30,6 +38,7 @@ APPLE_JWKS = "https://appleid.apple.com/auth/keys"
 APPLE_ISSUER = "https://appleid.apple.com"
 APPLE_TOKEN_URL = "https://appleid.apple.com/auth/token"
 APPLE_REVOKE_URL = "https://appleid.apple.com/auth/revoke"
+EXPO_GO_AUDIENCE = "host.exp.Exponent"
 
 
 @dataclass(frozen=True)
@@ -86,11 +95,21 @@ def verify_apple(identity_token: str, jwks=None) -> Identity:
     if not audiences:
         raise HTTPException(status_code=503, detail="Apple sign-in is not configured")
     claims = _decode(identity_token, jwks or _jwks(APPLE_JWKS), audiences, (APPLE_ISSUER,), "Apple")
+    aud = claims.get("aud")
+    if EXPO_GO_AUDIENCE in (aud if isinstance(aud, list) else [aud]) \
+            and os.environ.get("APPLE_ALLOW_EXPO_GO", "").strip() != "1":
+        raise HTTPException(status_code=401, detail="Apple sign-in failed")
     email = (claims.get("email") or "").strip().lower() or None
     if claims.get("email_verified") not in (True, "true"):
         email = None   # an unverified address must never link or create accounts
     # Apple never puts the name in the token; the app sends it (first sign-in only).
     return Identity(sub=str(claims["sub"]), email=email, name="")
+
+
+def _apple_client_id() -> Optional[str]:
+    """Our own client id for Apple's token/revoke endpoints: the first listed
+    audience that is not Expo Go's, so the list order does not matter."""
+    return next((c for c in _client_ids("APPLE_CLIENT_IDS") if c != EXPO_GO_AUDIENCE), None)
 
 
 def _apple_configured() -> bool:
@@ -102,7 +121,7 @@ def _apple_client_secret() -> str:
     key = os.environ["APPLE_PRIVATE_KEY"].replace("\\n", "\n")
     return jwt.encode(
         {"iss": os.environ["APPLE_TEAM_ID"], "iat": now, "exp": now + 300,
-         "aud": APPLE_ISSUER, "sub": _client_ids("APPLE_CLIENT_IDS")[0]},
+         "aud": APPLE_ISSUER, "sub": _apple_client_id()},
         key, algorithm="ES256", headers={"kid": os.environ["APPLE_KEY_ID"]},
     )
 
@@ -118,11 +137,12 @@ def _apple_post(url: str, fields: dict) -> dict:
 
 def exchange_apple_code(code: str) -> Optional[str]:
     """Trade the one-time authorization code for a refresh token, or None."""
-    if not code or not _apple_configured() or not _client_ids("APPLE_CLIENT_IDS"):
+    client_id = _apple_client_id()
+    if not code or not _apple_configured() or not client_id:
         return None
     try:
         out = _apple_post(APPLE_TOKEN_URL, {
-            "client_id": _client_ids("APPLE_CLIENT_IDS")[0],
+            "client_id": client_id,
             "client_secret": _apple_client_secret(),
             "code": code,
             "grant_type": "authorization_code",
@@ -135,11 +155,12 @@ def exchange_apple_code(code: str) -> Optional[str]:
 
 def revoke_apple_token(refresh_token: str) -> None:
     """Best-effort: account deletion must never fail because Apple is down."""
-    if not refresh_token or not _apple_configured():
+    client_id = _apple_client_id()
+    if not refresh_token or not _apple_configured() or not client_id:
         return
     try:
         _apple_post(APPLE_REVOKE_URL, {
-            "client_id": _client_ids("APPLE_CLIENT_IDS")[0],
+            "client_id": client_id,
             "client_secret": _apple_client_secret(),
             "token": refresh_token,
             "token_type_hint": "refresh_token",

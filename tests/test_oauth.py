@@ -84,8 +84,66 @@ def test_apple_happy_path_and_missing_email():
     assert oauth.verify_apple(_token(no_email), jwks=StubJWKS(KEY)).email is None
 
 
-def test_apple_accepts_expo_go_audience():
+def test_apple_rejects_the_expo_go_audience_by_default_even_when_listed(monkeypatch):
+    # Every Expo Go project receives tokens with this audience; accepting it
+    # would let any Expo Go app's user be linked to our account by email.
+    monkeypatch.delenv("APPLE_ALLOW_EXPO_GO", raising=False)
+    with pytest.raises(HTTPException) as e:
+        oauth.verify_apple(_token({**GOOD_APPLE, "aud": "host.exp.Exponent"}), jwks=StubJWKS(KEY))
+    assert e.value.status_code == 401 and e.value.detail == "Apple sign-in failed"
+
+
+@pytest.mark.parametrize("flag", ["0", "true", "yes", ""])
+def test_apple_expo_go_flag_must_be_exactly_1(monkeypatch, flag):
+    monkeypatch.setenv("APPLE_ALLOW_EXPO_GO", flag)
+    with pytest.raises(HTTPException):
+        oauth.verify_apple(_token({**GOOD_APPLE, "aud": "host.exp.Exponent"}), jwks=StubJWKS(KEY))
+
+
+def test_apple_accepts_expo_go_audience_only_with_the_dev_flag(monkeypatch):
+    monkeypatch.setenv("APPLE_ALLOW_EXPO_GO", "1")
     assert oauth.verify_apple(_token({**GOOD_APPLE, "aud": "host.exp.Exponent"}), jwks=StubJWKS(KEY)).sub == "a-1"
+
+
+def test_the_bundle_id_audience_needs_no_flag(monkeypatch):
+    monkeypatch.delenv("APPLE_ALLOW_EXPO_GO", raising=False)
+    assert oauth.verify_apple(_token(GOOD_APPLE), jwks=StubJWKS(KEY)).sub == "a-1"
+
+
+@pytest.mark.parametrize("ids,expected", [
+    ("com.markbotros.borsacompass,host.exp.Exponent", "com.markbotros.borsacompass"),
+    ("host.exp.Exponent, com.markbotros.borsacompass", "com.markbotros.borsacompass"),
+    ("host.exp.Exponent", None),
+    ("", None),
+])
+def test_apple_client_id_is_the_first_audience_that_is_not_expo_go(monkeypatch, ids, expected):
+    monkeypatch.setenv("APPLE_CLIENT_IDS", ids)
+    assert oauth._apple_client_id() == expected
+
+
+def _apple_configured_env(monkeypatch, sent):
+    monkeypatch.setenv("APPLE_TEAM_ID", "T"); monkeypatch.setenv("APPLE_KEY_ID", "K")
+    monkeypatch.setenv("APPLE_PRIVATE_KEY", "pem")
+    monkeypatch.setattr(oauth, "_apple_client_secret", lambda: "secret")
+    monkeypatch.setattr(oauth, "_apple_post", lambda url, fields: sent.append(fields) or {"refresh_token": "rt"})
+
+
+def test_exchange_and_revoke_use_the_bundle_id_whatever_the_list_order(monkeypatch):
+    sent = []
+    _apple_configured_env(monkeypatch, sent)
+    monkeypatch.setenv("APPLE_CLIENT_IDS", "host.exp.Exponent,com.markbotros.borsacompass")
+    assert oauth.exchange_apple_code("code") == "rt"
+    oauth.revoke_apple_token("rt")
+    assert [f["client_id"] for f in sent] == ["com.markbotros.borsacompass"] * 2
+
+
+def test_exchange_is_skipped_with_only_the_expo_go_audience(monkeypatch):
+    sent = []
+    _apple_configured_env(monkeypatch, sent)
+    monkeypatch.setenv("APPLE_CLIENT_IDS", "host.exp.Exponent")
+    assert oauth.exchange_apple_code("code") is None
+    oauth.revoke_apple_token("rt")
+    assert sent == []
 
 
 @pytest.mark.parametrize("bad", [{"aud": "com.other.app"}, {"iss": "https://accounts.google.com"}])
