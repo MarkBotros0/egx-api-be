@@ -985,6 +985,12 @@ when unauthenticated so the signed-out pages stand alone. That redirect is UX
 only — the `egx.auth.present` cookie is set by client JS and carries no
 signature, so the backend gate is the real guard.
 
+**Maintenance mode:** `src/maintenance.ts` `MAINTENANCE_MODE = true` makes the
+middleware 307 every page (signed in or not) to `/maintenance`; static assets
+still load, the nav bars hide on that path, and `/maintenance` redirects home
+when the flag is off. It is a code constant, not an env var — flip it and
+redeploy. Switched on 2026-10-12 for the email-accounts rollout.
+
 **Logout wipes Cache Storage** (`clearStoredAuth` → `clearCachedResponses`).
 `sw.js` is network-first but FALLS BACK to cache, so without the wipe a
 signed-out person on a shared phone could go offline and have the worker
