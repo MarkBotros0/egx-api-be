@@ -27,27 +27,17 @@ An educational stock market analysis and portfolio tracker for the **Egyptian Ex
   It is vendored because its upstream repo (`github.com/egxlytics/egxpy`) was deleted or made private — GitHub returns "Repository not found" even to an authenticated account that previously installed from it, and there is no PyPI release. Vercel builds failed at `uv lock` with `could not read Username`; deploys had been surviving on a warm build cache holding an already-cloned copy. There is no upstream to pull from, so **treat `app/vendor/egxpy` as our code** — edit it directly and note any deviation from v1.1.0 in its `__init__.py`. It is a thin wrapper over `tvDatafeed`, which is still public and installs from git normally. MIT licensed, © 2025 EGXLytics, LICENSE retained alongside the source.
 
 Environment variables: `DATABASE_URL` (Neon connection string, includes
-`sslmode=require`), `AUTH_SECRET`, `AUTH_USERS`, `AUTH_ADMINS`,
-`PE_REFRESH_SECRET`, and **`CRON_SECRET`** (guards
-`POST /api/cron/risk_snapshot`; scheduling is external, see that endpoint).
+`sslmode=require`), `AUTH_SECRET`, `AUTH_ADMINS`, `PE_REFRESH_SECRET`, and
+**`CRON_SECRET`** (guards `POST /api/cron/risk_snapshot`; scheduling is
+external, see that endpoint). The email-account variables (`FE_BASE_URL`,
+`SMTP_*`, `GOOGLE_CLIENT_IDS`, `APPLE_*`) are listed under *Auth, roles and
+user management*.
 
 **Frontend environment variables** live in `egx-api-fe/.env`:
-`NEXT_PUBLIC_API_BASE_URL` (the backend's `/api` base) and **`FE_BASE_URL`** —
-the app's own public address, which `PasswordRevealDialog` pastes into the
-credentials block so a new user is handed somewhere to go along with who they
-are.
-
-`FE_BASE_URL` is read by a CLIENT component, and Next ships only `NEXT_PUBLIC_*`
-names to the browser by default. It is therefore listed in **`next.config.js`'s
-`env` map**, which inlines it at build time under its own name — that map is
-the only reason the variable can stay spelled `FE_BASE_URL` in `.env` and in the
-Vercel dashboard rather than being renamed `NEXT_PUBLIC_*`. It holds a public
-URL, not a secret. Verified inlined into the built admin chunk.
-
-Unset, the dialog falls back to `window.location.origin`, resolved in an effect
-so server and client markup match on first paint. **The link is never blank**,
-so set the variable only where the origin the admin happens to be browsing
-would be the wrong address to send.
+`NEXT_PUBLIC_API_BASE_URL` (the backend's `/api` base) and
+**`NEXT_PUBLIC_GOOGLE_CLIENT_ID`** (the Google web OAuth client; unset hides
+`GoogleSignInButton`). The web no longer reads `FE_BASE_URL` — it is a BACKEND
+variable now, the address the emailed links point at.
 
 ## Directory Layout
 
@@ -104,8 +94,8 @@ egx-api-be/                     # Python FastAPI backend
       news.py                   # GET /api/news (on-demand, no table)
       dividend_history.py       # GET /api/dividend_history (Yahoo) ; /api/dividend_calendar (pe_data)
       watchlist.py              # GET/POST/DELETE /api/watchlist
-      auth.py                   # POST /api/auth/login ; GET /api/auth/me
-      users.py                  # Admin-only user management (/api/users)
+      auth.py                   # /api/auth/*: signup, login, verify/reset links, Google/Apple, /me (HTTP only; logic in core/auth_flows.py)
+      users.py                  # Admin-only user management (/api/users): invite, send reset, enable/disable, delete
       alerts.py                 # Score alerts: /api/push/devices, /api/alerts/preferences, /api/alerts
     schemas/                    # (empty — Pydantic response shapes are inline dicts)
 
@@ -943,7 +933,14 @@ valid, active user. The policy itself lives in `core/auth.py`:
 
 ```python
 PUBLIC_ENDPOINTS = frozenset({
-    ("POST", "/api/auth/login"),          # the way in
+    ("POST", "/api/auth/login"),                  # the ways in (8 auth routes):
+    ("POST", "/api/auth/signup"),                 #   none returns data without a
+    ("POST", "/api/auth/resend-verification"),    #   credential or an emailed link
+    ("POST", "/api/auth/verify-email"),
+    ("POST", "/api/auth/forgot-password"),
+    ("POST", "/api/auth/set-password"),
+    ("POST", "/api/auth/google"),
+    ("POST", "/api/auth/apple"),
     ("POST", "/api/pe/refresh"),          # scheduled; guarded by PE_REFRESH_SECRET
     ("POST", "/api/cron/risk_snapshot"),  # scheduled; guarded by CRON_SECRET
 })
@@ -976,12 +973,15 @@ Routers that need the caller's identity still declare
 `Depends(get_current_user)`. The middleware is a second layer, not a
 replacement — do not remove those.
 
-**Frontend:** `src/middleware.ts` is deny-by-default too. Only `/login` and
-static assets (`/_next`, `/icons`, `/manifest.json`, `/sw.js`, favicons) are
-reachable signed out; everything else redirects to `/login?next=…`. `Navbar`
-and `BottomTabBar` return `null` when unauthenticated so the login page stands
-alone. That redirect is UX only — the `egx.auth.present` cookie is set by
-client JS and carries no signature, so the backend gate is the real guard.
+**Frontend:** `src/middleware.ts` is deny-by-default too. Signed-out pages are
+`/login`, `/signup` and `/forgot-password` (a signed-in visitor is bounced
+home), plus `/verify-email` and `/set-password`, which are **always
+reachable** — an emailed link must work whoever is signed in — and static
+assets (`/_next`, `/icons`, `/manifest.json`, `/sw.js`, favicons). Everything
+else redirects to `/login?next=…`. `Navbar` and `BottomTabBar` return `null`
+when unauthenticated so the signed-out pages stand alone. That redirect is UX
+only — the `egx.auth.present` cookie is set by client JS and carries no
+signature, so the backend gate is the real guard.
 
 **Logout wipes Cache Storage** (`clearStoredAuth` → `clearCachedResponses`).
 `sw.js` is network-first but FALLS BACK to cache, so without the wipe a
@@ -999,26 +999,89 @@ not break.
 
 ### Auth, roles and user management
 
-**The app is multi-user with JWT auth.** Login is `POST /api/auth/login`
-(bcrypt over a SHA-256 pre-hash, HS256 token, 30-day life); `GET /api/auth/me`
-returns `{id, username, role}`. There is no registration endpoint — accounts
-come from an admin or from the env seed.
+**Accounts are emails** (trimmed, stored lower-case; passwords 8–128 chars,
+bcrypt over a SHA-256 pre-hash). Ways in: email + password (the email must be
+verified first), Google (`POST /api/auth/google`, web + mobile) and Apple
+(`POST /api/auth/apple`, iOS app only). Every one answers
+`{access_token, token_type: "bearer", user: {id, email, name, role}}` — the same
+shape `GET /api/auth/me` returns for `user` — and the same 30-day HS256 JWT
+whose claims are `{sub, iat, exp}` only.
 
-Two roles, `user` and `admin`, on `users.role`.
+**Sign-up is open, and never reveals who has an account.** `signup`,
+`resend-verification` and `forgot-password` always answer
+`{"status": "check_email"}` whatever exists. A right password on an unverified
+account is the only thing that earns `403 email_not_verified` at login; a wrong
+one is `401 "Invalid email or password"`, same as an unknown email or a
+passwordless account (which still pay a dummy bcrypt check, so timing does not
+tell them apart). `forgot-password` and `resend-verification` send in the
+background (`BackgroundMailer`) so known and unknown emails take the same time —
+an SMTP failure there is logged, not a 502. `signup`, admin invite and admin
+send-reset send synchronously (502 on SMTP failure).
 
-**Admin status comes ONLY from the `AUTH_ADMINS` env var**, applied at boot by
+**Sign-up credentials ride on the verify link, not the account.** A new
+email+password sign-up creates the user with `password_hash` NULL; the password
+and name are parked on the `verify` row of `auth_tokens`
+(`pending_password_hash`, `pending_name`) and applied only when that link is
+used. So whoever clicks proves the inbox AND chooses the password, and a
+stranger re-signing-up with someone else's address cannot swap a password in.
+Consequences, all test-pinned:
+- Re-signing-up for an unverified email never edits the account: outside the
+  cooldown it emails a NEW verify link (older unused ones die) carrying the new
+  pending password; inside it nothing happens; a disabled account gets nothing.
+  A verified email gets an "you already have an account" email instead.
+- `resend-verification` re-sends the pending password of the newest live verify
+  link; with none live it sends nothing (sign up again).
+- `verify-email` on an already-verified account consumes the link and changes
+  nothing. `set-password` (reset or invite) also deletes any unused verify
+  links, so an old sign-up link can never overwrite a password set later.
+- Login on an unverified account checks the live pending password.
+- Accepted residual: if someone signs up with your email and you click that
+  unsolicited confirmation, you confirm THEIR password; resetting your password
+  evicts them.
+
+**Emailed links.** `auth_tokens` stores only the SHA-256 of the raw
+`secrets.token_urlsafe(32)`. Lifetimes: verify 24 h, reset 1 h, invite 7 days.
+The newest link of a purpose wins (issuing deletes the user's older unused ones),
+each is single use (one `UPDATE … RETURNING`, so a double click works once), and
+anything else is `400 invalid_or_expired_link`. Links point at the WEB —
+`{FE_BASE_URL}/verify-email?token=…` and `…/set-password?token=…`. At most one
+email per user per 60 s (`users.last_email_at`); inside it nothing is sent and
+the normal response is returned (admin send-reset answers 429). `set-password`
+validates the new password BEFORE burning the link, and also verifies the email.
+
+**Password set/reset revokes sessions.** `set-password` stamps
+`users.sessions_valid_after`; `get_current_user` rejects tokens whose `iat` is
+earlier (`401 "Session expired — sign in again"`), so resetting a password ends
+whoever held the old one.
+
+**Google / Apple linking** (`flows.oauth_sign_in`): provider `sub` →
+else the account with the same verified email (linked) → else create one
+(verified, no password). A disabled account is rejected before any write.
+**Linking to an UNVERIFIED account clears its password and deletes its pending
+verify links** (and takes the provider's name) — otherwise whoever pre-registered
+the address would keep a working password after the real owner signs in with
+Google. Tokens are decoded with 60 s of clock leeway; a JWKS fetch failure is
+`503 "<Provider> sign-in is temporarily unavailable"` (5 s timeout), not a 401.
+Apple's email is used only when Apple marks it `email_verified` (otherwise the
+login is `sub`-only, and an unknown `sub` without an email is `400`); Apple
+sends the name from the app, never in the token. On the first Apple sign-in the
+`authorizationCode` is traded for a refresh token, kept in
+`users.apple_refresh_token` for revocation.
+
+Two roles, `user` and `admin`, on `users.role`. **Admin status comes ONLY from
+the `AUTH_ADMINS` env var** (comma-separated emails), applied at boot by
 `core/auth.seed_users_from_env` and re-asserted on every boot, so it survives a
-DB reset and cannot be fumbled in the database. No API route writes a role —
-`tests/test_users_and_roles.py::test_the_admin_api_cannot_grant_admin` greps for
-`SET role` and fails if one appears. That makes privilege escalation through
-`/api/users` structurally impossible, and it is why the admin tab has no
-role picker. Demotion of unlisted users happens **only when `AUTH_ADMINS` is
-non-empty** — a blank var must never strip every admin and leave the app
-unmanageable.
-
-**`AUTH_USERS=alice:pw1,bob:pw2` only CREATES users that don't exist.** It no
-longer refreshes password hashes on boot. It used to, and that would silently
-revert every admin password reset on the next cold start.
+DB reset and cannot be fumbled in the database. A listed email with no account
+gets one — verified, no password (sign in with Google or use Forgot password).
+`AUTH_USERS` no longer exists and no password lives in an env var. No API route
+writes a role — `tests/test_users_and_roles.py::test_the_admin_api_cannot_grant_admin`
+scans every file under `app/routers/` for `SET role` and fails if one appears
+(and `users.py` is pinned to write no password). That makes privilege
+escalation through `/api/users` structurally impossible, and it is why the admin
+tab has no role picker. Demotion of unlisted users happens **only when
+`AUTH_ADMINS` is non-empty** — a blank var must never strip every admin and
+leave the app unmanageable. If `users` still has the old `username` column,
+seeding prints a warning and stops until the reset script below is run.
 
 **Role and active-state are read from the DB on every request, never from the
 token** (`core/auth.get_current_user` → `_load_user`). A 30-day token means
@@ -1026,7 +1089,8 @@ claims would let a disabled user keep working for a month, so "disable" would
 be a lie. Cost is one indexed PK lookup on a pooled connection.
 
 Dependencies in `core/auth.py`:
-- `get_current_user` — 401 unless a valid token maps to an **active** row
+- `get_current_user` — 401 unless a valid token maps to an **active** row issued
+  after `sessions_valid_after`
 - `require_admin` — the above plus 403 for non-admins
 - `get_optional_user` — returns `None` instead of raising. **Currently unused:**
   `/api/analysis` used it while the dashboard was public, and now requires a
@@ -1039,20 +1103,59 @@ Note the **anonymous WEIGHTS context is a different thing** and still exists:
 the market-regime average stays on the default weights its bands were
 calibrated at. That is about whose sliders apply, not about who may call.
 
+**Deleting an account.** `DELETE /api/auth/me` (and the admin's
+`DELETE /api/users/{id}`) goes through `flows.delete_account` →
+`AccountStore.delete_account`: one `db.transaction()` that clears every table in
+`accounts.USER_OWNED_TABLES` (sales and dividends before holdings, matching the
+sale-undo path; `auth_tokens` included) and then the `users` row. No table has an
+FK to `users`, so nothing cascades — a table missing from that tuple leaves
+invisible orphans, which is why `tests/test_accounts_store.py` fails if
+`init_db` grows a `user_id` table that is not listed. Apple's grant is revoked
+best-effort (Apple being down never blocks a deletion). **The last active admin
+cannot be deleted** (`409` on `/me`; `400` on the admin route, which also stops
+you disabling or deleting yourself).
+
+**Code map.** `core/accounts.py` — validation, the `Account` row, `AccountStore`
+(all SQL for `users` / `auth_tokens`), `USER_OWNED_TABLES`; `core/auth_flows.py`
+— every flow as plain functions over a store and a `Mailer`; `core/oauth.py` —
+Google/Apple token verification and Apple code exchange/revoke; `core/email.py`
+— `SmtpMailer` (STARTTLS with a verified certificate; non-numeric `SMTP_PORT` →
+503), `BackgroundMailer`, link builders and message templates; `core/auth.py` —
+hashing, JWT, the dependencies, the gate and the admin seed; `routers/auth.py` /
+`routers/users.py` — HTTP only. Tests drive the flows through
+`tests/account_fakes.py` (`MemoryAccountStore`, `OutboxMailer`) and never touch
+the network; real SQL is covered by `tests/test_accounts_pg.py`, opt-in via
+`TEST_DATABASE_URL`.
+
+**Env vars** (backend): `AUTH_SECRET`, `AUTH_ADMINS`, `FE_BASE_URL` (the web's
+public origin — emailed links; unset → email routes answer `503 "Email is not
+configured"`), `SMTP_HOST` (default `smtp.gmail.com`), `SMTP_PORT` (587),
+`SMTP_USER`, `SMTP_PASSWORD` (a Gmail app password), `SMTP_FROM` (default
+`Borsa Compass <SMTP_USER>`), `GOOGLE_CLIENT_IDS` (comma-separated web / Android
+/ iOS client ids = accepted audiences), `APPLE_CLIENT_IDS` (the iOS bundle id),
+`APPLE_TEAM_ID`, `APPLE_KEY_ID`, `APPLE_PRIVATE_KEY` (the `.p8`; `\n` escapes
+accepted — the last three are only needed to exchange/revoke Apple's grant).
+Unconfigured providers answer 503. Web: `NEXT_PUBLIC_GOOGLE_CLIENT_ID`.
+
+**One-off migration:** `scripts/reset_users_for_email_auth.py` deletes ALL users
+and their data (typed confirmation) so `init_db` can recreate `users` with the
+email schema. Run it once, before deploying the email-accounts release.
+
 ### /api/users — admin only
 
-`GET` list · `POST` create · `POST /{id}/password` reset · `PATCH /{id}`
-enable/disable · `DELETE /{id}`.
+`GET` list (with `email_verified`, `methods` and `holdings_count`) · `POST`
+invite `{email, name?}` (creates the account unverified and emails a
+set-password link, `409` if the email exists) · `POST /{id}/send-reset` · `PATCH
+/{id}` enable/disable · `DELETE /{id}`.
 
-- A generated password (`core/auth.generate_password`, 16 chars, no `0O1lI`) is
-  returned **exactly once**, in the response to the call that created it. Only
-  the bcrypt hash is stored, so it can never be read back — `PasswordRevealDialog`
-  says so on screen.
-- **`DELETE` removes `portfolio_sales`, `portfolio_dividends`, `portfolio`,
-  `watchlist` and `user_settings` first, then the user, all in one
-  `db.transaction()`.** No table has an FK to `users`, so nothing cascades and
-  the rows would otherwise survive as invisible orphans. Sales and dividends go
-  before holdings, matching the direction the sale-undo path depends on.
+- **No password ever passes through this API** — nothing is generated, returned
+  or read back. An invited person sets their own from the emailed link.
+- `send-reset` emails an `invite` link when the account has no password and is
+  unverified, otherwise a `reset` link; the response is `{id, sent}` where
+  `sent` is the purpose. Inside the 60 s cooldown it is `429`.
+- `methods` is derived from the row: `password`, `google`, `apple`.
+- `DELETE` is the same deletion as above, so the admin cannot leave orphaned
+  rows either.
 - Guards: you cannot disable or delete **yourself**, or the **last active
   admin** — either would leave the app with nobody able to administer it.
 
@@ -2189,9 +2292,8 @@ Components in `src/app/components/`:
 - `RealizedSection` — **everything banked, in one collapsed section**, replacing `RealizedGainsCard` / `ClosedPositionsTable` / `DividendsTable` (all three deleted). The header is the combined gains + dividends headline, stated as two separate figures. Inside: the record/proceeds/best/worst row, the T-bill count, then tabs — **Closed** (rendered from `orders`, so one submit is one line; a `N lots` pill and a Show-purchases toggle expose the parts, each with its own basis and annualized figure), **Dividends**, **By stock**. The tab opened first is the first non-empty one. Undo on a closed row removes the WHOLE order and says how many purchases that is. Rows in all three tabs name the COMPANY beside the ticker — four opaque letters are not what a reader recognises — truncated rather than wrapped, and dropped entirely when the stored name is just the symbol again (`_bucket` in `core/dividends.py` falls back to it), which would otherwise render as "COMI COMI".
 
 **Admin (admin role only):**
-- `AdminUsersTable` — desktop table / mobile cards. Actions per user: reset password, disable/enable, delete. Hides the destructive actions on your own row (the backend guards them anyway).
-- `CreateUserModal` — full-screen on mobile, card on desktop. Leaving the password blank is the intended path; the backend generates one.
-- `PasswordRevealDialog` — shows a generated password ONCE and says plainly that it cannot be shown again. Used by both create and reset. **Copy puts the LINK, the username AND the password in one block** (`Link: …\nUsername: x\nPassword: y`) because it gets pasted into a single message; copying the password alone left the admin retyping the username into the same chat, and credentials with no address are a login the recipient cannot act on. A secondary **Copy password only** button sits below it for the WhatsApp case — the combined block arrives as one message, so a recipient long-pressing it copies all three lines; sending the bare password as its OWN message lets them copy it in one tap. The combined block stays the PRIMARY action, for the reason just given. The on-screen block mirrors the copied text exactly, so what is sent is what was checked. The link comes from **`FE_BASE_URL`** — see *Frontend environment variables*.
+- `AdminUsersTable` — desktop table / mobile cards. Each row shows a method badge (Password / Google / Apple, Invited, Unverified). Actions per user: **Send reset email**, disable/enable, delete. Hides the destructive actions on your own row (the backend guards them anyway).
+- Invite form (`CreateUserModal`) — email + optional name. The server emails the person a link to choose their own password; the admin never sees or relays a password.
 - Page at `src/app/admin/page.tsx`, gated on `isAdmin` from `useAuth()`.
 
 **Learn page (`src/app/components/learn/`):**
@@ -2212,6 +2314,9 @@ Components in `src/app/components/`:
 **UI helpers:**
 - `Navbar`, `BottomTabBar` — mobile bottom nav, desktop top nav. **Neither carries a "Users" destination any more.** Administering accounts is not a place in the app, it is an account action, so it renders as a button beside Log out at the right-hand end of `Navbar` — icon-only on mobile where it pairs with the log-out icon, icon + label at `md:`, the same shape the dashboard's Compare button uses. It is **36px tall, not the project's usual 44px target**, deliberately: the nav row is 61px and `--top-nav-clearance` IS that number, so a taller control here silently pushes every sticky element on every page down out of alignment. **The two navs no longer carry the same destinations:** Compare left the mobile pill for a button in the dashboard header (see *Dashboard*) and stayed in the desktop top nav, which has room for it. So the pill is Dashboard / Portfolio / Learn / News **for everyone, admin or not** — it holds the places every user has, and its tab count no longer changes with a role. On `/admin` it shows no highlight at all (`activeIndex` is -1, so the travelling span is not rendered), which is correct for a page it does not contain.
 - `AuthProvider` — token + user in localStorage, an `egx.auth.present` cookie for middleware, `useAuth()` → `{user, isAuthenticated, isAdmin, login, logout}`. Re-reads the role from `/api/auth/me` on every load, so a role change lands on next refresh.
+- `AuthCard` — the shared chrome (logo, card, footer links) for the five signed-out pages: `/login`, `/signup`, `/forgot-password`, `/verify-email`, `/set-password`. `/verify-email` and `/set-password` read `?token=`, call the matching endpoint and sign the user in from the session it returns.
+- `GoogleSignInButton` — Google Identity Services; posts the ID token to `/api/auth/google`. Renders nothing without `NEXT_PUBLIC_GOOGLE_CLIENT_ID`.
+- `/account` page (`src/app/account/page.tsx`) — name, email, Log out, and Delete account (the user must type `DELETE`; calls `DELETE /api/auth/me`). Reached from the name in `Navbar`.
 - `LearnTooltip` — dashed-underline hover tooltip used everywhere for inline education
 - `LoadingSkeleton` — Card/Chart/Table skeletons
 - `StockCard`, `Watchlist`, `IndexFilter`, `SectorFilter`, `StatsPanel`
@@ -2378,12 +2483,23 @@ Fonts: Outfit (sans), JetBrains Mono (mono).
 ## Database Schema (`app/core/db.py`)
 
 ```sql
-users (id, username UNIQUE, password_hash, created_at, role, is_active)
+users (id, email UNIQUE, name, password_hash NULL, email_verified, google_sub UNIQUE,
+       apple_sub UNIQUE, apple_refresh_token, role, is_active, last_email_at,
+       created_at, sessions_valid_after)
+                 -- email is stored lower-case. password_hash is NULL for
+                 -- Google/Apple/invited accounts and for a sign-up whose link
+                 -- has not been clicked yet.
                  -- role: 'user' | 'admin'. Stamped from the AUTH_ADMINS env
                  -- var at boot and NEVER written by an API route.
                  -- is_active: FALSE blocks login AND invalidates any token
                  -- already issued, because get_current_user re-reads this row.
-                 -- Both added by ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
+                 -- sessions_valid_after: stamped by set-password; older
+                 -- tokens (by iat) are rejected.
+auth_tokens (token_hash PK, user_id, purpose 'verify'|'reset'|'invite',
+             expires_at, used_at, created_at, pending_password_hash, pending_name)
+                 -- Only the SHA-256 of the emailed token. pending_* exist on
+                 -- verify rows only: the sign-up password/name, applied when
+                 -- the link is used. Listed in USER_OWNED_TABLES.
 user_settings (user_id, key, value, PRIMARY KEY (user_id, key))
                  -- Per-user overrides of the `settings` keys that are a
                  -- PREFERENCE rather than a fact — today only weight_*.
@@ -2697,7 +2813,7 @@ Synced to Turso via `/api/watchlist` and exposed through `WatchlistProvider` (wr
 - **All P&L in EGP.** Egypt's currency is the Egyptian pound.
 - **EGX trading hours:** Sun–Thu, 10:00 AM – 2:30 PM Cairo time. EGX30 only updates during these hours.
 - **T+2 settlement:** mentioned on Learn page but not enforced in portfolio logic
-- **Auth:** every router scopes its queries by `user.id` from a JWT Bearer token (`app/routers/portfolio.py` and the rest); `app/main.py` calls `seed_users_from_env` to provision users.
+- **Auth:** every router scopes its queries by `user.id` from a JWT Bearer token (`app/routers/portfolio.py` and the rest); `app/main.py` calls `seed_users_from_env` to provision the `AUTH_ADMINS` accounts.
 - **The app is closed — see *The app is CLOSED*.** A new router is denied by default; opening it means editing `PUBLIC_ENDPOINTS` in `core/auth.py`, and `tests/test_auth_gate.py` will tell you if you leave something open by accident.
 - **Pushing: switch to the `MarkBotros0` GitHub account first.** Both repos are
   owned by `MarkBotros0`, but the machine has several `gh` accounts
@@ -2714,13 +2830,13 @@ Synced to Turso via `/api/watchlist` and exposed through `WatchlistProvider` (wr
 
 ## Not Present / Deliberately Missing
 
-- **Any public/anonymous surface.** No landing page, no public dashboard, no demo mode, no read-only guest. Signed out, the only thing that exists is the login form.
+- **Any public/anonymous surface.** No landing page, no public dashboard, no demo mode, no read-only guest. Signed out, the only things that exist are the sign-in, sign-up and emailed-link pages.
 - Real-time streaming quotes (egxpy is polling, not streaming)
 - Order placement (this is analysis-only; user trades through Thndr app separately)
 - External TA libraries (ta-lib, pandas-ta) — everything is from-scratch for learning
 - Per-stock composite score on the dashboard (StockCard accepts the prop but dashboard doesn't batch-fetch scores — out of scope)
 - A single "max buy price" number (removed — see *Removed: Max Buy Price*)
-- **Self-service password change.** Only an admin can set or reset a password; there is no "change my password" screen and no forced change on first login.
+- **A "change my password" screen.** A password is set or replaced only through an emailed link (Forgot password, an admin's Send reset, an invite); there is no in-app change form.
 - **Role editing in the UI.** Admin status is `AUTH_ADMINS` only — deliberate, see *Auth, roles and user management*.
 - **Per-user `risk_free_rate` or `currency`.** The T-bill rate is the Sharpe hurdle, the CBE policy rate on the macro card, AND the bar realized trades are graded against — a market fact, not a preference. Per-user values would mean each user grading their own trades against a different bar.
 

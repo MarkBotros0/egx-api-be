@@ -89,16 +89,16 @@ Email validation: trimmed, lowercased, one `@`, a dot in the domain, ≤ 254 cha
 |---|---|---|
 | `POST /api/auth/signup` | `{name, email, password}` | Always `200 {"status":"check_email"}`. New email → create unverified user + send verify email. Existing **unverified** email → replace its password hash and name, resend verify. Existing **verified** email → send an "you already have an account — sign in or reset your password" email. |
 | `POST /api/auth/resend-verification` | `{email}` | Always `200`. Sends a new verify link if the account exists and is unverified. |
-| `POST /api/auth/verify-email` | `{token}` | Marks verified, consumes token, returns `{token, user}` (signed in). |
-| `POST /api/auth/login` | `{email, password}` | `200 {token, user}`; `401 "Invalid email or password"` (same message for unknown email, wrong password, no password set); `403 {"detail":"email_not_verified"}` when the password is right but email unverified; `403` for disabled. |
+| `POST /api/auth/verify-email` | `{token}` | Marks verified, consumes token, returns `{access_token, token_type, user}` (signed in). |
+| `POST /api/auth/login` | `{email, password}` | `200 {access_token, token_type, user}`; `401 "Invalid email or password"` (same message for unknown email, wrong password, no password set); `403 {"detail":"email_not_verified"}` when the password is right but email unverified; `403` for disabled. |
 | `POST /api/auth/forgot-password` | `{email}` | Always `200`. Sends a `reset` link if an active account exists. |
-| `POST /api/auth/set-password` | `{token, password}` | Accepts `reset` and `invite` tokens. Sets the hash, sets `email_verified=TRUE`, consumes the token, returns `{token, user}`. |
-| `POST /api/auth/google` | `{idToken, name?}` | `200 {token, user}`. |
-| `POST /api/auth/apple` | `{identityToken, authorizationCode?, name?}` | `200 {token, user}`. |
+| `POST /api/auth/set-password` | `{token, password}` | Accepts `reset` and `invite` tokens. Sets the hash, sets `email_verified=TRUE`, consumes the token, returns `{access_token, token_type, user}`. |
+| `POST /api/auth/google` | `{idToken, name?}` | `200 {access_token, token_type, user}`. |
+| `POST /api/auth/apple` | `{identityToken, authorizationCode?, name?}` | `200 {access_token, token_type, user}`. |
 | `GET /api/auth/me` | — | `{id, email, name, role}` |
 | `DELETE /api/auth/me` | — | Deletes the caller and all their rows; revokes the Apple token if stored. `204`. The **last active admin cannot delete themselves** (`409`). |
 
-`user` in responses is the same `{id, email, name, role}` shape as `/me`.
+Every session response is `{access_token, token_type: "bearer", user}` (the shape clients already parse); `user` is the same `{id, email, name, role}` as `/me`.
 
 Token errors (`verify-email`, `set-password`): unknown, used, expired, or wrong purpose →
 `400 {"detail":"invalid_or_expired_link"}`. Disabled user → `403`.
@@ -231,3 +231,20 @@ Gmail app password; Google Cloud OAuth consent screen + 3 OAuth clients (web wit
 Android with the EAS SHA-1, iOS with the bundle id); Apple Developer: enable Sign in with Apple
 on `com.markbotros.borsacompass`, create a Sign in with Apple key (`.p8`); set env vars on Vercel
 (backend + web) and EAS (mobile).
+
+## Changes during implementation
+
+Review of the backend tasks changed the behaviour below; it supersedes the text above where they differ. (The session response shape correction `{token, user}` -> `{access_token, token_type, user}` is already applied in §3.)
+
+1. **Sign-up credentials live on the verify link, not the account.** `auth_tokens` gained `pending_password_hash` and `pending_name`. A new email+password sign-up creates the user with `password_hash` NULL; the password and name are applied only when that link is used (`verify-email`). This replaces §3's "existing unverified email: replace its password hash and name":
+   - Re-signing-up for an unverified email never changes the account: outside the 60 s cooldown it emails a NEW verify link (older unused ones are deleted) carrying the new pending password; inside the cooldown nothing happens; a disabled account gets nothing.
+   - `resend-verification` re-sends the pending password of the newest live verify link; with none live it sends nothing.
+   - `verify-email` on an already-verified account consumes the link and changes nothing.
+   - Login of an unverified account returns `403 email_not_verified` only if the password matches the live pending password, otherwise `401`. Unknown emails and passwordless accounts still run a dummy bcrypt check (timing).
+   - `set-password` (reset or invite) also deletes any unused verify links, so an old sign-up link can never overwrite a password set later.
+   - Accepted residual: if someone signs up with your email and you click that unsolicited confirmation, you confirm their password; resetting your password evicts them.
+2. **Password set/reset revokes sessions.** `users.sessions_valid_after` is stamped by `set-password`; `get_current_user` rejects tokens whose `iat` is earlier (`401 "Session expired — sign in again"`).
+3. **Background email for enumeration-sensitive routes.** `forgot-password` and `resend-verification` send through `BackgroundMailer`, so known and unknown emails respond in the same time; SMTP failures there are logged, not `502`. `signup`, admin invite and admin send-reset stay synchronous (`502` on failure).
+4. **SMTP** uses STARTTLS with a certificate-verifying context; a non-numeric `SMTP_PORT` answers `503`.
+5. **OAuth hardening.** Tokens are decoded with 60 s clock leeway; JWKS fetch failures answer `503 "<Provider> sign-in is temporarily unavailable"` (not `401`), with a 5 s JWKS timeout. Apple's email is used only when Apple marks it `email_verified` (otherwise `sub`-only; an unknown `sub` without an email is `400`). Disabled accounts are rejected before any linking write. Linking an unverified account also deletes its pending verify links and takes the provider's name.
+6. **Account deletion** lives in `AccountStore.delete_account` (one transaction over `USER_OWNED_TABLES`, then `users`) and `flows.delete_account`, shared by `DELETE /api/auth/me` and admin `DELETE /api/users/{id}`. The `SET role` grep test now scans every file in `app/routers/`; `users.py` writes no password (test-pinned).
