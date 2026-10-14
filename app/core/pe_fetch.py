@@ -370,13 +370,13 @@ def _append_fundamentals_history(db, rows: list, now: str) -> int:
     return appended
 
 
-def get_pe_for_symbol(db, symbol: str) -> Optional[dict]:
+def get_pe_for_symbol(db, symbol: str, market_code: str = EG.code) -> Optional[dict]:
     """Read-side helper. Returns the last stored fundamentals row, or None."""
     row = db.execute(
         "SELECT company_name, pe_ratio, dividend_yield, loss_making, updated_at, "
         "dividend_ex_date_recent, dividend_amount_recent "
-        "FROM pe_data WHERE symbol = %s",
-        (symbol.upper(),),
+        "FROM pe_data WHERE market = %s AND symbol = %s",
+        (market_code, symbol.upper()),
     ).fetchone()
     if not row:
         return None
@@ -391,7 +391,7 @@ def get_pe_for_symbol(db, symbol: str) -> Optional[dict]:
     }
 
 
-def get_pe_for_symbols(db, symbols: list) -> dict:
+def get_pe_for_symbols(db, symbols: list, market_code: str = EG.code) -> dict:
     """
     The same read for a whole batch, in ONE query. {SYMBOL: row}.
 
@@ -412,8 +412,8 @@ def get_pe_for_symbols(db, symbols: list) -> dict:
     rows = db.execute(
         "SELECT symbol, company_name, pe_ratio, dividend_yield, loss_making, "
         "updated_at, dividend_ex_date_recent, dividend_amount_recent "
-        "FROM pe_data WHERE symbol = ANY(%s)",
-        (wanted,),
+        "FROM pe_data WHERE market = %s AND symbol = ANY(%s)",
+        (market_code, wanted),
     ).fetchall()
     return {
         r[0]: {

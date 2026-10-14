@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.core.auth import CurrentUser, get_current_user
 from app.core.benchmark import get_benchmark_close
 from app.core.cache import get, set, make_key
-from app.core.markets import EG
+from app.core.markets import EG, MarketConfig, market_param
 from app.core.constants import (
     BATCH_DEADLINE_SECONDS,
     BATCH_MAX_SYMBOLS,
@@ -69,16 +69,6 @@ def _last_non_null(seq):
 _read_risk_free_rate = read_risk_free_rate
 
 
-def _get_egx30_close(exchange: str, interval: str, bars: int):
-    """
-    Benchmark closes for beta / relative strength, TTL-cached.
-
-    The cache key is shared with the portfolio endpoint so every page scores
-    against the identical benchmark series.
-    """
-    return get_benchmark_close(EG, interval, bars)
-
-
 router = APIRouter()
 
 
@@ -89,7 +79,8 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict,
                        pe_ratio: Optional[float] = None,
                        dividend_yield: Optional[float] = None,
                        loss_making: Optional[bool] = None,
-                       index_membership: Optional[str] = None) -> tuple:
+                       index_membership: Optional[str] = None,
+                       market: MarketConfig = EG) -> tuple:
     """
     Score one symbol for the dashboard grid.
 
@@ -101,7 +92,7 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict,
     try:
         from app.vendor.egxpy import get_OHLCV_data
 
-        df = get_OHLCV_data(symbol, "EGX", interval, INTERNAL_BARS_MIN)
+        df = get_OHLCV_data(symbol, market.primary_exchange, interval, INTERNAL_BARS_MIN)
         if df is None or df.empty:
             return symbol, {"error": "no data"}, None
 
@@ -211,13 +202,15 @@ def scoring_cache_context(user_id: str = None):
     return db, weights, macro, risk_free_rate_pct, tags
 
 
-def composite_cache_key(symbol: str, interval: str, tags) -> str:
+def composite_cache_key(symbol: str, interval: str, tags,
+                        market_code: str = EG.code) -> str:
     """The one place a per-symbol composite cache key is spelled."""
     w_hash, macro_tag, rfr_tag = tags
-    return make_key(EG.code, "composite", symbol.upper(), interval, w_hash, macro_tag, rfr_tag)
+    return make_key(market_code, "composite", symbol.upper(), interval, w_hash, macro_tag, rfr_tag)
 
 
-def read_cached_scores(symbols: list, interval: str = "Daily") -> dict:
+def read_cached_scores(symbols: list, interval: str = "Daily",
+                       market: MarketConfig = EG) -> dict:
     """
     Composite scores for `symbols` that are ALREADY cached. Never fetches.
 
@@ -237,7 +230,7 @@ def read_cached_scores(symbols: list, interval: str = "Daily") -> dict:
     out = {}
     missing = []
     for sym in symbols:
-        cached = get(composite_cache_key(sym, interval, tags))
+        cached = get(composite_cache_key(sym, interval, tags, market.code))
         if cached is not None and "error" not in cached and cached.get("score") is not None:
             out[sym.upper()] = cached
         else:
@@ -257,7 +250,7 @@ def read_cached_scores(symbols: list, interval: str = "Daily") -> dict:
             from app.core.card_snapshot import read_rows, to_card
 
             wanted = {s.upper() for s in missing}
-            for row in read_rows(db):
+            for row in read_rows(db, market.code):
                 if row["symbol"].upper() not in wanted:
                     continue
                 card = to_card(row, DEFAULT_WEIGHTS, macro)
@@ -271,7 +264,8 @@ def read_cached_scores(symbols: list, interval: str = "Daily") -> dict:
     return out
 
 
-def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
+def _handle_batch(symbols_str: str, interval: str, user_id: str = None,
+                  market: MarketConfig = EG):
     symbols = [s.strip().upper() for s in symbols_str.split(",") if s.strip()]
     if not symbols:
         raise HTTPException(status_code=400, detail="Missing required parameter: symbols")
@@ -287,10 +281,10 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
     # spell the same key differently and silently find nothing.
     db, weights, macro, risk_free_rate_pct, tags = scoring_cache_context(user_id)
 
-    # EGX30 fetched ONCE for the whole batch (not per symbol) and under the
-    # same cache key /api/analysis uses, so relative strength is measured
-    # against an identical benchmark series on both pages.
-    egx30_close = _get_egx30_close("EGX", interval, INTERNAL_BARS_MIN)
+    # The market's benchmark fetched ONCE for the whole batch (not per symbol)
+    # and under the same cache key /api/analysis uses, so relative strength is
+    # measured against an identical benchmark series on both pages.
+    egx30_close = get_benchmark_close(market, interval, INTERNAL_BARS_MIN)
 
     # Symbols the feed has refused often enough to be demoted. Asking for them
     # costs ~6 seconds EACH — the vendored client wraps every call in
@@ -312,8 +306,8 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
         try:
             rows = db.execute(
                 "SELECT symbol FROM risk_snapshot "
-                "WHERE COALESCE(consecutive_failures, 0) >= %s",
-                (FAILURE_DEMOTION_THRESHOLD,),
+                "WHERE market = %s AND COALESCE(consecutive_failures, 0) >= %s",
+                (market.code, FAILURE_DEMOTION_THRESHOLD),
             ).fetchall()
             unfetchable = {r[0].upper() for r in rows}
         except Exception:
@@ -324,7 +318,7 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
     todo = []
 
     for sym in symbols:
-        ck = composite_cache_key(sym, interval, tags)
+        ck = composite_cache_key(sym, interval, tags, market.code)
         cached = get(ck)
         if cached is not None:
             if "error" in cached:
@@ -340,7 +334,7 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
         pool = ThreadPoolExecutor(max_workers=BATCH_WORKERS)
         try:
             def _cache_on_done(sym: str):
-                ck = composite_cache_key(sym, interval, tags)
+                ck = composite_cache_key(sym, interval, tags, market.code)
                 def _cb(f):
                     try:
                         _s, r, _snap = f.result()
@@ -366,7 +360,7 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
             fundamentals = {}
             if db is not None:
                 try:
-                    fundamentals = get_pe_for_symbols(db, todo)
+                    fundamentals = get_pe_for_symbols(db, todo, market.code)
                 except Exception:
                     fundamentals = {}
 
@@ -379,7 +373,7 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
                 f = pool.submit(_compute_batch_one, s, interval, weights, macro,
                                 egx30_close, risk_free_rate_pct, pe_ratio,
                                 dividend_yield, loss_making,
-                                get_index_membership(s))
+                                get_index_membership(s), market)
                 # Stragglers that finish AFTER we've returned still self-cache
                 # via this callback — a frontend retry a few seconds later hits
                 # a warm cache and fills in the '--' cards.
@@ -428,6 +422,7 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
                         upsert_snapshot(
                             db, sym, written_at, snap["stats"],
                             bool(snap["tradeable"]), True, snap,
+                            market_code=market.code,
                         )
                     except Exception:
                         pass
@@ -435,13 +430,16 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None):
             # Don't block on stuck threads — Vercel recycles the container.
             pool.shutdown(wait=False)
 
-    return {"scores": scores, "errors": errors}
+    return {"scores": scores, "errors": errors,
+            "market": market.code, "currency": market.currency}
 
 
 @router.get("/api/analysis")
 def get_analysis(
     symbol: Optional[str] = Query(None),
-    exchange: str = Query("EGX"),
+    # Override for a symbol off the market's primary exchange; absent means
+    # the market's primary.
+    exchange: Optional[str] = Query(None),
     interval: str = Query("Daily"),
     bars: int = Query(200),
     mode: Optional[str] = Query(None),
@@ -452,19 +450,20 @@ def get_analysis(
     # market-regime average stays on the default weights its bands were
     # calibrated at.
     user: CurrentUser = Depends(get_current_user),
+    market: MarketConfig = Depends(market_param),
 ):
     try:
         user_id = user.id
 
         # Batch mode
         if mode == "batch":
-            return _handle_batch(symbols or "", interval.capitalize(), user_id)
+            return _handle_batch(symbols or "", interval.capitalize(), user_id, market)
 
         if not symbol:
             raise HTTPException(status_code=400, detail="Missing required parameter: symbol")
 
         symbol = symbol.upper()
-        exchange = exchange.upper()
+        exchange = (exchange or market.primary_exchange).upper()
         interval = interval.capitalize()
         bars = min(max(bars, USER_BARS_MIN), USER_BARS_MAX)
 
@@ -489,7 +488,7 @@ def get_analysis(
         risk_free_rate_pct = _read_risk_free_rate(db)
         rfr_tag = f"rfr{risk_free_rate_pct:g}"
 
-        cache_key = make_key(EG.code, "analysis", symbol, exchange, interval, bars,
+        cache_key = make_key(market.code, "analysis", symbol, exchange, interval, bars,
                              w_hash, macro_tag, rfr_tag)
         cached = get(cache_key)
         if cached:
@@ -537,12 +536,12 @@ def get_analysis(
         close = df_trimmed["close"]
 
         # Benchmark series, shared cache key with the batch + portfolio paths.
-        egx30_close = _get_egx30_close(exchange, interval, internal_bars)
+        egx30_close = get_benchmark_close(market, interval, internal_bars)
 
         # Fundamentals from the nightly feed; None when no stored row.
         pe_info = None
         try:
-            pe_info = get_pe_for_symbol(db, symbol)
+            pe_info = get_pe_for_symbol(db, symbol, market.code)
         except Exception:
             pe_info = None
 
@@ -671,6 +670,8 @@ def get_analysis(
             "trendlines": trendlines,
             "pe": pe_info,
             "forecast": forecast,
+            "market": market.code,
+            "currency": market.currency,
         }
 
         set(cache_key, result)

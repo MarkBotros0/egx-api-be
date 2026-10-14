@@ -70,17 +70,18 @@ _READ_COLUMNS = (
 ) + CATEGORY_COLUMNS
 
 
-def read_rows(db) -> list:
+def read_rows(db, market_code: str = EG.code) -> list:
     """
     Every snapshot row, as dicts. The one spelling of this SELECT.
 
-    Deliberately unfiltered: a symbol the feed refuses still has a row (the
+    Unfiltered within the market: a symbol the feed refuses still has a row (the
     cron records EVERY attempt, which is what keeps stalest-first selection
     from re-picking it forever), and the dashboard needs those rows to show
     "no price feed" instead of a card that loads for ever.
     """
     result = db.execute(
-        f"SELECT {', '.join(_READ_COLUMNS)} FROM risk_snapshot"
+        f"SELECT {', '.join(_READ_COLUMNS)} FROM risk_snapshot WHERE market = %s",
+        (market_code,),
     ).fetchall()
 
     out = []
@@ -209,7 +210,8 @@ def attach_risk_bands(rows: list, cards: list) -> None:
         card["risk_band_label"] = (g or {}).get("band_label")
 
 
-def _capture_baseline(db, symbol: str, now: str, session: str) -> None:
+def _capture_baseline(db, symbol: str, now: str, session: str,
+                      market_code: str = EG.code) -> None:
     """
     Score alerts: save the row's CURRENT category scores as `session`'s
     baseline, just before a card carrying a new bar date overwrites them.
@@ -237,7 +239,7 @@ def _capture_baseline(db, symbol: str, now: str, session: str) -> None:
             "AND last_bar_date IS DISTINCT FROM %s "
             f"AND ({any_scored}) "
             "ON CONFLICT (market, symbol, session_date) DO NOTHING",
-            (session, now, EG.code, symbol, session),
+            (session, now, market_code, symbol, session),
         )
     except Exception as e:
         print(f"[alerts] baseline capture failed for {symbol}: {e}")
@@ -245,7 +247,8 @@ def _capture_baseline(db, symbol: str, now: str, session: str) -> None:
 
 def upsert_snapshot(db, symbol: str, now: str, stats: Optional[dict],
                     tradeable: bool, ok: bool,
-                    card: Optional[dict] = None) -> None:
+                    card: Optional[dict] = None,
+                    market_code: str = EG.code) -> None:
     """
     Write one symbol's row. THE one spelling of this INSERT.
 
@@ -272,7 +275,7 @@ def upsert_snapshot(db, symbol: str, now: str, stats: Optional[dict],
     this statement replaces them.
     """
     if card is not None and card.get("last_bar_date"):
-        _capture_baseline(db, symbol, now, card["last_bar_date"])
+        _capture_baseline(db, symbol, now, card["last_bar_date"], market_code)
 
     card_cols, card_vals = [], []
     if card is not None:
@@ -290,7 +293,7 @@ def upsert_snapshot(db, symbol: str, now: str, stats: Optional[dict],
         "above_sma200", "rsi_14", "consecutive_failures",
     ] + card_cols
     values = [
-        EG.code, symbol, now,
+        market_code, symbol, now,
         (stats or {}).get("sigma_63_ann_pct"),
         (stats or {}).get("sigma_ewma_ann_pct"),
         (stats or {}).get("beta"),
