@@ -1,44 +1,38 @@
 """
-GET /api/tickers — Returns the list of EGX-listed stocks.
+GET /api/tickers — Returns the list of stocks listed on the requested market.
 """
 
-from urllib.parse import urlparse, parse_qs
 import json
 import os
 import time
 from typing import Optional
+from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.core.cache import get as cache_get, set as cache_set
+from app.core.cache import get as cache_get, make_key, set as cache_set
 from app.core.constants import TICKERS_CACHE_TTL_SECONDS
 from app.core.db import get_db
-from app.core.markets import EG
-from app.core.tradingview import _exchange_filter
+from app.core.markets import MarketConfig, market_param
+from app.core.tradingview import HEADERS as _TV_HEADERS, _exchange_filter, scan_url
 
 router = APIRouter()
 
-_tickers_cache = None
-_tickers_cache_ts = 0
+# Per-market ticker lists: market code -> (list, fetched_at).
+_tickers_cache: dict[str, tuple[list, float]] = {}
 _TICKERS_TTL = TICKERS_CACHE_TTL_SECONDS
 
-_TV_SCAN_URL = "https://scanner.tradingview.com/egypt/scan"
 _TV_SEARCH = (
     "https://symbol-search.tradingview.com/symbol_search/"
-    "?text={symbol}&exchange=EGX&lang=en&type=stock&domain=production"
+    "?text={symbol}&exchange={exchange}&lang=en&type=stock&domain=production"
 )
-_TV_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json",
-    "Content-Type": "application/json",
-    "Origin": "https://www.tradingview.com",
-    "Referer": "https://www.tradingview.com/",
-}
+
+
+def exchange_of(scanner_symbol: str) -> Optional[str]:
+    """`"NASDAQ:AAPL"` -> `"NASDAQ"`; no prefix -> None."""
+    if not scanner_symbol or ":" not in scanner_symbol:
+        return None
+    return scanner_symbol.split(":", 1)[0].upper() or None
 
 
 def _load_static_json():
@@ -47,15 +41,15 @@ def _load_static_json():
         return json.load(f)
 
 
-def _fetch_live_tickers():
+def _fetch_live_tickers(market: MarketConfig):
     try:
         import urllib.request
         body = json.dumps({
             "columns": ["name", "description", "sector", "type"],
-            "filter": [_exchange_filter(EG)],
+            "filter": [_exchange_filter(market)],
             "range": [0, 500],
         }).encode("utf-8")
-        req = urllib.request.Request(_TV_SCAN_URL, data=body, headers=_TV_HEADERS)
+        req = urllib.request.Request(scan_url(market), data=body, headers=_TV_HEADERS)
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
 
@@ -78,6 +72,7 @@ def _fetch_live_tickers():
                 "symbol": symbol.upper(),
                 "name": name or symbol,
                 "sector": sector or "Unknown",
+                "exchange": exchange_of(row.get("s") or "") or market.primary_exchange,
             })
         return results or None
     except Exception:
@@ -111,61 +106,83 @@ def _merge_lists(live, static_list):
     return merged
 
 
-def _load_tickers():
-    global _tickers_cache, _tickers_cache_ts
+def _live_only(live, market: MarketConfig):
+    """A market with no hand-maintained file: the scanner list as-is. `index`
+    is the exchange the scanner reported, the closest analogue to EGX's tier."""
+    return [{
+        "symbol": t["symbol"],
+        "name": t["name"],
+        "sector": t.get("sector") or "Unknown",
+        "index": t.get("exchange") or market.primary_exchange,
+    } for t in live]
 
+
+def _load_tickers(market: MarketConfig):
     now = time.time()
-    if _tickers_cache is not None and (now - _tickers_cache_ts) < _TICKERS_TTL:
-        return _tickers_cache
+    hit = _tickers_cache.get(market.code)
+    if hit is not None and (now - hit[1]) < _TICKERS_TTL:
+        return hit[0]
 
-    static_list = _load_static_json()
-    live = _fetch_live_tickers()
+    live = _fetch_live_tickers(market)
 
-    if live:
-        result = _merge_lists(live, static_list)
+    # data/egx_tickers.json is EGX's hand-maintained universe; it says nothing
+    # about any other market.
+    if market.code == "EG":
+        static_list = _load_static_json()
+        result = _merge_lists(live, static_list) if live else list(static_list)
     else:
-        result = list(static_list)
+        result = _live_only(live, market) if live else []
 
     try:
         db = get_db()
         known = {t["symbol"].upper() for t in result}
         rows = db.execute(
-            "SELECT symbol, name, sector, index_name FROM discovered_tickers"
+            "SELECT symbol, name, sector, index_name, exchange FROM discovered_tickers "
+            "WHERE market = %s",
+            (market.code,),
         ).fetchall()
-        for symbol, name, sector, index_name in rows:
+        for symbol, name, sector, index_name, exchange in rows:
             if symbol.upper() not in known:
                 result.append({
                     "symbol": symbol,
                     "name": name,
                     "sector": sector or "Unknown",
-                    "index": index_name or "EGX",
+                    "index": (index_name if market.code == "EG" else exchange)
+                             or index_name or market.primary_exchange,
                 })
     except Exception:
         pass
 
-    _tickers_cache = result
-    _tickers_cache_ts = now
+    _tickers_cache[market.code] = (result, now)
     return result
 
 
-def _validate_symbol(symbol: str):
-    cache_key = f"validate:{symbol}"
+def _search_exchange(market: MarketConfig, symbol: str):
+    """TradingView symbol-search over every exchange of `market`. The search
+    endpoint takes one exchange per query, so a multi-exchange market asks each
+    in turn and stops at the first exact match."""
+    import urllib.request
+    for exchange in market.exchanges:
+        url = _TV_SEARCH.format(symbol=quote(symbol), exchange=exchange)
+        req = urllib.request.Request(url, headers=_TV_HEADERS)
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            results = json.loads(resp.read())
+        for r in results:
+            sym = (r.get("symbol") or "").replace("<em>", "").replace("</em>", "").upper()
+            if sym == symbol:
+                return r, (r.get("exchange") or exchange).upper()
+    return None, None
+
+
+def _validate_symbol(symbol: str, market: MarketConfig):
+    cache_key = make_key(market.code, "validate", symbol)
     cached = cache_get(cache_key)
     if cached is not None:
         return cached
 
+    exchange = None
     try:
-        import urllib.request
-        url = _TV_SEARCH.format(symbol=symbol)
-        req = urllib.request.Request(url, headers=_TV_HEADERS)
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            results = json.loads(resp.read())
-        match = None
-        for r in results:
-            sym = (r.get("symbol") or "").replace("<em>", "").replace("</em>", "").upper()
-            if sym == symbol:
-                match = r
-                break
+        match, exchange = _search_exchange(market, symbol)
         result = (
             {"valid": True, "name": match.get("description", symbol)}
             if match
@@ -180,12 +197,16 @@ def _validate_symbol(symbol: str):
         try:
             from datetime import datetime
             db = get_db()
+            # index_name keeps its 'EGX' default meaning only for EG rows; other
+            # markets have no index tiers yet, so it stays NULL there.
             db.execute(
                 """INSERT INTO discovered_tickers
-                   (market, symbol, name, sector, index_name, added_at)
-                   VALUES (%s, %s, %s, 'Unknown', 'EGX', %s)
+                   (market, symbol, name, sector, index_name, exchange, added_at)
+                   VALUES (%s, %s, %s, 'Unknown', %s, %s, %s)
                    ON CONFLICT (market, symbol) DO NOTHING""",
-                (EG.code, symbol, result["name"], datetime.utcnow().isoformat()),
+                (market.code, symbol, result["name"],
+                 "EGX" if market.code == "EG" else None,
+                 exchange, datetime.utcnow().isoformat()),
             )
             db.commit()
         except Exception:
@@ -200,18 +221,19 @@ def get_tickers(
     sector: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     validate: Optional[str] = Query(None),
+    market: MarketConfig = Depends(market_param),
 ):
     try:
         if validate:
             sym = validate.strip().upper()
-            tickers = _load_tickers()
+            tickers = _load_tickers(market)
             known = next((t for t in tickers if t["symbol"].upper() == sym), None)
             if known:
                 return {"symbol": sym, "valid": True, "name": known["name"]}
-            result = _validate_symbol(sym)
+            result = _validate_symbol(sym, market)
             return {"symbol": sym, **result}
 
-        tickers = _load_tickers()
+        tickers = _load_tickers(market)
 
         if index:
             tickers = [t for t in tickers if t["index"].lower() == index.lower()]

@@ -46,11 +46,12 @@ from app.core.constants import (
     NEWS_RECENCY_DAYS,
     NEWS_REQUEST_TIMEOUT_SECONDS,
 )
+from app.core.markets import EG
 from app.core.tradingview import HEADERS
 
 NEWS_URL = (
     "https://news-headlines.tradingview.com/v2/headlines"
-    "?client=web&lang=en&symbol=EGX%3A{symbol}"
+    "?client=web&lang=en&symbol={exchange}%3A{symbol}"
 )
 
 # The whole of a NewsItem. Deliberately excludes every body-ish field the
@@ -62,21 +63,22 @@ NEWS_ITEM_FIELDS = frozenset(
 STORY_BASE = "https://www.tradingview.com"
 
 
-def _egx_symbols(raw: dict, fallback: str) -> list[str]:
-    """EGX tickers a story is tagged with, bare and sorted. Never empty."""
+def _market_symbols(raw: dict, fallback: str, exchanges=EG.exchanges) -> list[str]:
+    """Tickers on `exchanges` a story is tagged with, bare and sorted. Never empty."""
+    prefixes = tuple(f"{ex}:" for ex in exchanges)
     out = {fallback.upper()}
     for rel in raw.get("relatedSymbols") or []:
         if not isinstance(rel, dict):
             continue
         sym = (rel.get("symbol") or "")
-        if sym.startswith("EGX:"):
+        if sym.startswith(prefixes):
             bare = sym.split(":", 1)[1].strip().upper()
             if bare:
                 out.add(bare)
     return sorted(out)
 
 
-def normalize_item(raw, symbol: str) -> Optional[dict]:
+def normalize_item(raw, symbol: str, exchanges=EG.exchanges) -> Optional[dict]:
     """
     One upstream story -> a NewsItem, or None if it cannot be one.
 
@@ -110,7 +112,7 @@ def normalize_item(raw, symbol: str) -> Optional[dict]:
         "provider": (raw.get("provider") or "").strip() or None,
         "published_at": published_at,
         "url": f"{STORY_BASE}{path}",
-        "symbols": _egx_symbols(raw, symbol),
+        "symbols": _market_symbols(raw, symbol, exchanges),
     }
 
 
@@ -198,16 +200,23 @@ def select_news_symbols(
     return yours, market_only, dropped
 
 
+def _get_json(url: str, timeout: float):
+    """The one HTTP call in this module (also the test seam)."""
+    req = urllib.request.Request(url, headers={**HEADERS, "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def news_url(symbol: str, exchange: str = EG.primary_exchange) -> str:
+    return NEWS_URL.format(exchange=exchange, symbol=symbol.upper())
+
+
 def fetch_symbol_news(
-    symbol: str, timeout: float = NEWS_REQUEST_TIMEOUT_SECONDS
+    symbol: str, timeout: float = NEWS_REQUEST_TIMEOUT_SECONDS,
+    exchange: str = EG.primary_exchange,
 ) -> list[dict]:
     """One GET for one symbol. Returns the raw `items` array. Raises on error."""
-    req = urllib.request.Request(
-        NEWS_URL.format(symbol=symbol.upper()),
-        headers={**HEADERS, "Accept": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        payload = json.loads(resp.read())
+    payload = _get_json(news_url(symbol, exchange), timeout)
     return payload.get("items") or []
 
 
@@ -261,7 +270,8 @@ def fetch_many(
 
 
 def build_feed(
-    fetched: dict, yours: list[str], now: datetime, dropped=(), extra=()
+    fetched: dict, yours: list[str], now: datetime, dropped=(), extra=(),
+    exchanges=EG.exchanges,
 ) -> dict:
     """
     Raw per-symbol items -> {your_stocks, market, coverage}.
@@ -291,7 +301,7 @@ def build_feed(
     for symbol, raw_items in (fetched or {}).items():
         kept = 0
         for raw in raw_items or []:
-            item = normalize_item(raw, symbol)
+            item = normalize_item(raw, symbol, exchanges)
             if item is None or not is_recent(item, now):
                 continue
             shaped.append(item)

@@ -40,12 +40,12 @@ def row_to_holding(row) -> dict:
     }
 
 
-def fetch_open_holdings(db, user_id: str) -> list[dict]:
-    """Every holding the user still owns at least one share of."""
+def fetch_open_holdings(db, user_id: str, market_code: str = "EG") -> list[dict]:
+    """Every holding the user still owns at least one share of, in one market."""
     rows = db.execute(
         f"SELECT {HOLDING_COLUMNS} FROM portfolio "
-        "WHERE user_id = %s AND quantity > 0 ORDER BY created_at",
-        (user_id,),
+        "WHERE user_id = %s AND market = %s AND quantity > 0 ORDER BY created_at",
+        (user_id, market_code),
     ).fetchall()
     return [row_to_holding(r) for r in rows]
 

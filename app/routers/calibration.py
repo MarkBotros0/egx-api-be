@@ -22,7 +22,7 @@ does not.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import get_current_user
 from app.core.forecast import (
@@ -36,15 +36,24 @@ from app.core.regime import (
     REGIME_ASSOCIATION_SIGNIFICANT,
     REGIME_ASSOCIATION_T,
 )
+from app.core.markets import MarketConfig, market_param
 from app.core.risk_grade import RISK_CALIBRATION
 
 router = APIRouter()
 
 
 @router.get("/api/calibration")
-def get_calibration(user=Depends(get_current_user)):
+def get_calibration(user=Depends(get_current_user),
+                    market: MarketConfig = Depends(market_param)):
     """Every measured claim the app makes, with what it actually delivered."""
+    # Every constant below was fitted on EGX data; quoting it for another
+    # market would be a claim nobody measured.
+    if market.code != "EG":
+        raise HTTPException(status_code=400,
+                            detail="Calibration is EGX-only until US is calibrated")
     return {
+        "market": market.code,
+        "currency": market.currency,
         "forecast": {
             "fitted_at": CALIBRATION["fitted_at"],
             "n_observations": CALIBRATION["n_observations"],

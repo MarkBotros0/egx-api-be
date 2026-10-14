@@ -2,17 +2,22 @@
 GET /api/macro — Fetch Egyptian macro indicators (EGX30, USD/EGP, CBE rate).
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from app.core.constants import DEFAULT_RISK_FREE_RATE_PCT
 from app.core.currency import EGX30_TWENTY_YEAR
 from app.core.db import get_db
 from app.core.macro_fetch import fetch_macro
+from app.core.markets import MarketConfig, market_param
 
 router = APIRouter()
 
 
 @router.get("/api/macro")
-def get_macro():
+def get_macro(market: MarketConfig = Depends(market_param)):
+    # Egyptian macro only in this sub-project; a US reading is sub-project 3.
+    if market.code != "EG":
+        return {"market": market.code, "currency": market.currency,
+                "egx30": None, "usd_egp": None, "interest_rate": None}
     try:
         db = get_db()
         data = fetch_macro(db)
@@ -34,6 +39,8 @@ def get_macro():
         # context beside the live rate so the user has a yardstick for their own
         # numbers. Both figures are true; they answer different questions.
         data["currency_context"] = EGX30_TWENTY_YEAR
+        data["market"] = market.code
+        data["currency"] = market.currency
 
         return data
 
