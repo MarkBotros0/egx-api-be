@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core import cache
+from app.core.markets import EG
 from app.core.auth import CurrentUser, get_current_user
 from app.core.constants import DIVIDEND_HISTORY_TTL_SECONDS
 from app.core.db import get_db
@@ -47,7 +48,7 @@ def get_dividend_history(
     if not sym:
         raise HTTPException(status_code=400, detail="Missing required query parameter: symbol")
 
-    key = cache.make_key("divhist", sym)
+    key = cache.make_key(EG.code, "divhist", sym)
     hit = cache.get(key)
     if hit is not None:
         return hit
@@ -91,7 +92,7 @@ def get_dividend_history(
 
 @router.get("/api/dividend_calendar")
 def get_dividend_calendar(user: CurrentUser = Depends(get_current_user)):
-    key = cache.make_key("divcal")
+    key = cache.make_key(EG.code, "divcal")
     hit = cache.get(key)
     if hit is not None:
         return hit

@@ -9,6 +9,7 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Query
 
 from app.core.cache import get, set, make_key
+from app.core.markets import EG
 from app.core.constants import (
     COMPARE_DEFAULT_LOOKBACK_DAYS,
     COMPARE_MAX_SYMBOLS,
@@ -63,7 +64,7 @@ def get_compare(
         start_date = _parse_date(start or "", today - timedelta(days=COMPARE_DEFAULT_LOOKBACK_DAYS))
         end_date = _parse_date(end or "", today)
 
-        cache_key = make_key("compare", ",".join(syms), interval, str(start_date), str(end_date))
+        cache_key = make_key(EG.code, "compare", ",".join(syms), interval, str(start_date), str(end_date))
         cached = get(cache_key)
         if cached:
             return cached

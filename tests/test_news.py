@@ -447,13 +447,13 @@ def test_the_cache_key_includes_dropped_so_one_users_cap_overflow_never_leaks_to
     yours = ["A", "B", "C"]
     market = ["D"]
 
-    key_a = cache.make_key("news", ",".join(yours), ",".join(market), ",".join([]))
-    key_b = cache.make_key("news", ",".join(yours), ",".join(market), ",".join(["E"]))
+    key_a = cache.make_key("EG", "news", ",".join(yours), ",".join(market), ",".join([]))
+    key_b = cache.make_key("EG", "news", ",".join(yours), ",".join(market), ",".join(["E"]))
     assert key_a != key_b, (
         "identical yours/market but different dropped must produce different keys"
     )
 
-    key_a_again = cache.make_key("news", ",".join(yours), ",".join(market), ",".join([]))
+    key_a_again = cache.make_key("EG", "news", ",".join(yours), ",".join(market), ",".join([]))
     assert key_a == key_a_again, (
         "identical yours/market/dropped must produce the same key"
     )

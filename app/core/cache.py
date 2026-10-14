@@ -5,7 +5,7 @@ Each warm container keeps its own cache. On cold start the cache is empty.
 Default TTL is 15 minutes — keeps dashboard/composite scores warm long
 enough that repeat visits within a session skip the slow upstream fetch.
 EGX trades Sun-Thu 10:00-14:30 Cairo time, so intraday data changes
-slowly relative to this window.
+slowly relative to this window. (Trading hours live in app/core/markets.py.)
 """
 
 import time
@@ -19,9 +19,18 @@ _DEFAULT_TTL = DEFAULT_CACHE_TTL_SECONDS
 _store: dict[str, tuple[float, Any]] = {}
 
 
-def make_key(*args) -> str:
-    """Build a deterministic cache key from arguments."""
-    return ":".join(str(a) for a in args)
+def make_key(market_code: str, *args) -> str:
+    """
+    Build a deterministic cache key, ALWAYS scoped by market.
+
+    The same ticker can exist on two markets, and a benchmark key that forgot
+    its market would hand EGX30 closes to a US beta. So the market is a
+    required first argument, validated here.
+    """
+    from app.core.markets import MARKETS
+    if market_code not in MARKETS:
+        raise ValueError(f"make_key needs a market code first, got {market_code!r}")
+    return ":".join(str(a) for a in (market_code, *args))
 
 
 def get(key: str) -> Optional[Any]:

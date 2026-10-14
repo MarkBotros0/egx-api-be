@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends
 
 from app.core import cache
+from app.core.markets import EG
 from app.core.arabfinance import fetch_stories as fetch_arabfinance
 from app.core.auth import CurrentUser, get_current_user
 from app.core.constants import DEFAULT_CACHE_TTL_SECONDS
@@ -53,7 +54,7 @@ def get_news(user: CurrentUser = Depends(get_current_user)):
     # the other holds the same 40 plus a watchlist symbol that overflows) —
     # without `dropped` here they'd collide on one key and whoever populates
     # the cache first would silently decide the other's symbols_over_cap.
-    key = cache.make_key("news", ",".join(yours), ",".join(market), ",".join(dropped))
+    key = cache.make_key(EG.code, "news", ",".join(yours), ",".join(market), ",".join(dropped))
     hit = cache.get(key)
     if hit is not None:
         return hit

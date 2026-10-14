@@ -22,6 +22,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 
 from app.core.cache import get as cache_get, make_key, set as cache_set
+from app.core.markets import EG
 from app.core.db import get_db
 from app.core.breadth import compute_breadth, describe as describe_breadth
 from app.core.regime import classify_regime
@@ -109,7 +110,7 @@ def get_market_regime(interval: str = "Daily"):
             raise HTTPException(status_code=500, detail="No regime universe available")
 
         interval = interval.capitalize()
-        ck = make_key("regime", interval, len(universe))
+        ck = make_key(EG.code, "regime", interval, len(universe))
         hit = cache_get(ck)
         if hit is not None:
             return hit

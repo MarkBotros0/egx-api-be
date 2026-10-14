@@ -186,6 +186,7 @@ def _analyze(holdings, user_id: str = None):
 
     from app.vendor.egxpy import get_OHLCV_data
     from app.core.cache import get as cache_get, set as cache_set, make_key
+    from app.core.markets import EG
     import pandas as pd
     import numpy as np
 
@@ -230,7 +231,7 @@ def _analyze(holdings, user_id: str = None):
         # strength are computed against an identical benchmark series on
         # every page. A shorter window here gave the same stock a different
         # beta on the portfolio page than on its detail page.
-        egx30_cache_key = make_key("egx30", "EGX", "Daily", INTERNAL_BARS_MIN)
+        egx30_cache_key = make_key(EG.code, "benchmark", "Daily", INTERNAL_BARS_MIN)
         egx30_df = cache_get(egx30_cache_key)
         if egx30_df is None:
             egx30_raw = get_OHLCV_data("EGX30", "EGX", "Daily", INTERNAL_BARS_MIN)

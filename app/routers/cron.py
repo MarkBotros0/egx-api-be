@@ -52,6 +52,7 @@ from fastapi import APIRouter, Header, HTTPException, Query
 
 from app.core.alert_store import prune_baselines, run_detection
 from app.core.cache import get as cache_get, make_key, set as cache_set
+from app.core.markets import EG
 from app.core.card_snapshot import SPARKLINE_BARS, upsert_snapshot
 from app.core.composite import CATEGORY_ORDER, score_categories
 from app.core.constants import (
@@ -265,7 +266,7 @@ def _benchmark_close():
     """EGX30 closes for beta, through the shared cache key every path uses."""
     try:
         from app.vendor.egxpy import get_OHLCV_data
-        ck = make_key("egx30", "EGX", "Daily", INTERNAL_BARS_MIN)
+        ck = make_key(EG.code, "benchmark", "Daily", INTERNAL_BARS_MIN)
         df = cache_get(ck)
         if df is None:
             raw = get_OHLCV_data("EGX30", "EGX", "Daily", INTERNAL_BARS_MIN)

@@ -4,6 +4,7 @@ GET /api/ohlcv — Fetch OHLCV data for a single stock.
 
 from fastapi import APIRouter, HTTPException, Query
 from app.core.cache import get, set, make_key
+from app.core.markets import EG
 
 router = APIRouter()
 
@@ -29,7 +30,7 @@ def get_ohlcv(
                 detail=f"Invalid interval: {interval}. Use Daily, Weekly, or Monthly.",
             )
 
-        cache_key = make_key("ohlcv", symbol, exchange, interval, bars)
+        cache_key = make_key(EG.code, "ohlcv", symbol, exchange, interval, bars)
         cached = get(cache_key)
         if cached:
             return cached

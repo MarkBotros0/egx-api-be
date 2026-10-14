@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.auth import CurrentUser, get_current_user
 from app.core.cache import get, set, make_key
+from app.core.markets import EG
 from app.core.constants import (
     BATCH_DEADLINE_SECONDS,
     BATCH_MAX_SYMBOLS,
@@ -76,7 +77,7 @@ def _get_egx30_close(exchange: str, interval: str, bars: int):
     """
     try:
         from app.vendor.egxpy import get_OHLCV_data
-        ck = make_key("egx30", exchange, interval, bars)
+        ck = make_key(EG.code, "benchmark", interval, bars)
         egx30_df = get(ck)
         if egx30_df is None:
             raw = get_OHLCV_data("EGX30", "EGX", interval, bars)
@@ -226,7 +227,7 @@ def scoring_cache_context(user_id: str = None):
 def composite_cache_key(symbol: str, interval: str, tags) -> str:
     """The one place a per-symbol composite cache key is spelled."""
     w_hash, macro_tag, rfr_tag = tags
-    return make_key("composite", symbol.upper(), interval, w_hash, macro_tag, rfr_tag)
+    return make_key(EG.code, "composite", symbol.upper(), interval, w_hash, macro_tag, rfr_tag)
 
 
 def read_cached_scores(symbols: list, interval: str = "Daily") -> dict:
@@ -501,7 +502,7 @@ def get_analysis(
         risk_free_rate_pct = _read_risk_free_rate(db)
         rfr_tag = f"rfr{risk_free_rate_pct:g}"
 
-        cache_key = make_key("analysis", symbol, exchange, interval, bars,
+        cache_key = make_key(EG.code, "analysis", symbol, exchange, interval, bars,
                              w_hash, macro_tag, rfr_tag)
         cached = get(cache_key)
         if cached:

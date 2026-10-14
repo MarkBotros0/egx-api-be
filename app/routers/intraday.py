@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from app.core.cache import get, set, make_key
+from app.core.markets import EG
 
 router = APIRouter()
 
@@ -44,7 +45,7 @@ def get_intraday(
         start_date = _parse_date(start or "", today - timedelta(days=5))
         end_date = _parse_date(end or "", today)
 
-        cache_key = make_key("intraday", ",".join(syms), interval, str(start_date), str(end_date))
+        cache_key = make_key(EG.code, "intraday", ",".join(syms), interval, str(start_date), str(end_date))
         cached = get(cache_key)
         if cached:
             return cached
