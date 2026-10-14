@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.auth import get_current_user
 from app.core.db import get_db
+from app.core.markets import EG, MarketConfig, market_param
 from app.core.risk_grade import (
     LIQUID_MIN_TURNOVER_EGP,
     RISK_CALIBRATION,
@@ -32,11 +33,12 @@ from app.core.risk_grade import (
 router = APIRouter()
 
 
-def _rows(db) -> list:
+def _rows(db, market_code: str = EG.code) -> list:
     result = db.execute(
         "SELECT symbol, measured_at, sigma_63_ann_pct, sigma_ewma_ann_pct, "
         "beta, turnover, traded_share, last_price, tradeable "
-        "FROM risk_snapshot"
+        "FROM risk_snapshot WHERE market = %s",
+        (market_code,),
     ).fetchall()
     return [{
         "symbol": r[0], "measured_at": r[1], "sigma_63_ann_pct": r[2],
@@ -47,7 +49,8 @@ def _rows(db) -> list:
 
 @router.get("/api/risk")
 def get_risk(symbol: Optional[str] = Query(default=None),
-             user=Depends(get_current_user)):
+             user=Depends(get_current_user),
+             market: MarketConfig = Depends(market_param)):
     """
     The whole graded universe, or one symbol's grade.
 
@@ -60,12 +63,13 @@ def get_risk(symbol: Optional[str] = Query(default=None),
     """
     try:
         db = get_db()
-        rows = _rows(db)
+        rows = _rows(db, market.code)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
     if not rows:
-        return {"data": [], "n_symbols": 0, "coverage": 0,
+        return {"market": market.code, "currency": market.currency,
+                "data": [], "n_symbols": 0, "coverage": 0,
                 "calibration": RISK_CALIBRATION,
                 "note": "No snapshot yet — the scheduled risk_snapshot job has "
                         "not run."}
@@ -80,6 +84,8 @@ def get_risk(symbol: Optional[str] = Query(default=None),
     measured = [r["measured_at"] for r in rows if r.get("measured_at")]
 
     payload = {
+        "market": market.code,
+        "currency": market.currency,
         "data": sorted(data, key=lambda r: (r.get("pct_rank") is None,
                                             r.get("pct_rank") or 0)),
         "n_symbols": len(rows),

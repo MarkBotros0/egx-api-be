@@ -29,13 +29,15 @@ from app.core.card_snapshot import attach_risk_bands, read_rows, to_card
 from app.core.composite import get_weights_from_db
 from app.core.db import get_db
 from app.core.macro_fetch import fetch_macro
+from app.core.markets import MarketConfig, market_param
 from app.core.pe_fetch import get_pe_for_symbols
 
 router = APIRouter()
 
 
 @router.get("/api/dashboard")
-def get_dashboard(user: CurrentUser = Depends(get_current_user)):
+def get_dashboard(user: CurrentUser = Depends(get_current_user),
+                  market: MarketConfig = Depends(market_param)):
     """
     Every symbol the snapshot holds, scored with the caller's own weights.
 
@@ -52,7 +54,7 @@ def get_dashboard(user: CurrentUser = Depends(get_current_user)):
     """
     try:
         db = get_db()
-        rows = read_rows(db)
+        rows = read_rows(db, market.code)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -62,6 +64,7 @@ def get_dashboard(user: CurrentUser = Depends(get_current_user)):
         # scoring path on this, which is what makes deploying the backend ahead
         # of the first cron pass safe.
         return {
+            "market": market.code, "currency": market.currency,
             "rows": [], "n_symbols": 0, "n_available": 0,
             "oldest_measurement": None, "newest_measurement": None,
             "note": "No snapshot yet — the scheduled risk_snapshot job has "
@@ -89,7 +92,7 @@ def get_dashboard(user: CurrentUser = Depends(get_current_user)):
     # pe_data has never seen is simply absent from the map — the card then
     # carries nulls and sinks in the sort, same as any unmeasured value.
     try:
-        pe = get_pe_for_symbols(db, [c["symbol"] for c in cards])
+        pe = get_pe_for_symbols(db, [c["symbol"] for c in cards], market.code)
     except Exception:
         pe = {}
     for c in cards:
@@ -103,6 +106,8 @@ def get_dashboard(user: CurrentUser = Depends(get_current_user)):
     scored_at = [r["scored_at"] for r in rows if r.get("scored_at")]
 
     return {
+        "market": market.code,
+        "currency": market.currency,
         "rows": cards,
         "n_symbols": len(cards),
         "n_available": sum(1 for c in cards if c["available"]),
