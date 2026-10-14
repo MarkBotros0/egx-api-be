@@ -23,11 +23,11 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from app.core.composite import CATEGORY_ORDER, blend_categories, classify_signal
+from app.core.markets import EG
 from app.core.constants import (
     ALERT_DAILY_CAP,
     ALERT_QUIET_END_HOUR,
     ALERT_QUIET_START_HOUR,
-    ALERT_TIMEZONE,
 )
 
 BANNED_WORDS = ("buy", "sell", "opportunity", "risk", "recommend")
@@ -117,5 +117,5 @@ def alert_copy(signal: Signal) -> tuple[str, str]:
 
 
 def in_quiet_hours(now_utc: datetime) -> bool:
-    hour = now_utc.astimezone(ZoneInfo(ALERT_TIMEZONE)).hour
+    hour = now_utc.astimezone(ZoneInfo(EG.timezone)).hour
     return hour >= ALERT_QUIET_START_HOUR or hour < ALERT_QUIET_END_HOUR

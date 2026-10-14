@@ -59,6 +59,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from app.core.markets import EG, MarketConfig
+
 # Fitted by scripts/calibrate.py on 2026-09-02. Regenerate whenever the cache
 # is refreshed; the script prints this table directly.
 RISK_CALIBRATION = {
@@ -100,9 +102,10 @@ RISK_BANDS = {
 # The tradeable universe the calibration was fitted on. Ranking a stock nobody
 # can enter or exit against names that trade is meaningless, and the percentile
 # it produces would be a fiction.
-LIQUID_MIN_TURNOVER_EGP = 1_000_000
+# The turnover and price floors are per-market facts and live in the registry
+# (MarketConfig.liquid_min_turnover / liquid_min_price): EG's are 1M EGP/day and
+# 0.5 EGP. The traded-share and window rules are market-agnostic.
 LIQUID_MIN_TRADED_SHARE = 0.80
-LIQUID_MIN_PRICE_EGP = 0.5
 LIQUIDITY_WINDOW_BARS = 60
 
 VOL_LOOKBACK_BARS = 63
@@ -184,7 +187,8 @@ def annualized(sigma_daily: float) -> float:
     return sigma_daily * math.sqrt(TRADING_DAYS_PER_YEAR) * 100.0
 
 
-def is_tradeable(close: pd.Series, volume: pd.Series) -> bool:
+def is_tradeable(close: pd.Series, volume: pd.Series,
+                 market: MarketConfig = EG) -> bool:
     """
     Would a retail investor actually be able to enter and exit this?
 
@@ -193,15 +197,22 @@ def is_tradeable(close: pd.Series, volume: pd.Series) -> bool:
     has no rows at all rather than zero-volume rows, so a row-based test can
     under-detect it. The universe filter in the snapshot job pairs this with a
     freshness check against the benchmark calendar.
+
+    A market whose floors are not calibrated yet (None) admits nothing: a
+    ranking over an unfiltered universe would be the fiction this gate exists
+    to prevent.
     """
+    min_turnover, min_price = market.liquid_min_turnover, market.liquid_min_price
+    if min_turnover is None or min_price is None:
+        return False
     if close is None or volume is None or len(close) < LIQUIDITY_WINDOW_BARS:
         return False
     price = float(close.iloc[-1])
-    if not math.isfinite(price) or price <= LIQUID_MIN_PRICE_EGP:
+    if not math.isfinite(price) or price <= min_price:
         return False
     window = slice(-LIQUIDITY_WINDOW_BARS, None)
     turnover = float((close * volume).iloc[window].mean())
-    if not math.isfinite(turnover) or turnover < LIQUID_MIN_TURNOVER_EGP:
+    if not math.isfinite(turnover) or turnover < min_turnover:
         return False
     traded = float((volume.iloc[window] > 0).mean())
     return traded >= LIQUID_MIN_TRADED_SHARE

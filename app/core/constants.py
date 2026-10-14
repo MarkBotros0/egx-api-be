@@ -8,7 +8,13 @@ remain as defaults in `indicators.py` — they're standard, self-documenting
 at call sites, and centralizing them adds boilerplate without clarity.
 Per-algorithm thresholds with self-documenting locals (RSI overbought=70,
 ADX strong-trend=25, etc.) also stay inline.
+
+Per-MARKET facts (currency, timezone, liquidity floors, benchmark) live in
+`core/markets.py`, not here; the few names below that alias one are kept
+because existing code and tests import them.
 """
+
+from app.core.markets import EG
 
 # === Cache TTLs (seconds) ===
 
@@ -146,6 +152,8 @@ TRENDLINE_MAX_VIOLATION_SHARE = 0.05       # More than this share of closes thro
 # Phase 3 replaces this constant with a dated series in `macro_series`, fed from
 # ECONOMICS:EGINTR (keyless, and reachable through the already-vendored client),
 # so historical dates get the rate that was actually in force instead of today's.
+# EG's fallback, and equal to EG.risk_free_fallback_pct in the market registry.
+# Kept as its own name because the settings seed and macro fallback read it.
 DEFAULT_RISK_FREE_RATE_PCT = 19            # CBE overnight deposit, as of 2026-08-20
 
 # The value that shipped before the correction above. `init_db` upgrades rows
@@ -264,7 +272,7 @@ ALERT_DAILY_CAP = 10
 ALERT_MAX_ATTEMPTS = 3
 ALERT_QUIET_START_HOUR = 22
 ALERT_QUIET_END_HOUR = 8
-ALERT_TIMEZONE = "Africa/Cairo"
+ALERT_TIMEZONE = EG.timezone   # kept for importers; the zone is the market's
 ALERT_BASELINE_RETENTION_DAYS = 10
 ALERT_CHANNEL_ID = "score-alerts"
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"

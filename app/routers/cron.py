@@ -48,12 +48,12 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from app.core.alert_store import prune_baselines, run_detection
 from app.core.benchmark import get_benchmark_close
 from app.core.cache import get as cache_get, make_key, set as cache_set
-from app.core.markets import EG
+from app.core.markets import EG, MarketConfig, market_param
 from app.core.card_snapshot import SPARKLINE_BARS, upsert_snapshot
 from app.core.composite import CATEGORY_ORDER, score_categories
 from app.core.constants import (
@@ -130,8 +130,10 @@ ALERTS_SEND_DEADLINE_SECONDS = 26.0
 
 def run_alerts(db, scored: dict, now_iso: str, elapsed: float,
                deliver=deliver_pending,
-               deadline: Optional[float] = None) -> dict:
-    """`deadline` is a time.monotonic() value; by default 26s after `elapsed` began."""
+               deadline: Optional[float] = None,
+               market_code: str = EG.code) -> dict:
+    """`deadline` is a time.monotonic() value; by default 26s after `elapsed` began.
+    `scored` symbols all belong to `market_code`."""
     out = {"queued": 0, "sent": 0, "skipped": None, "error": None}
     if elapsed > ALERTS_START_LIMIT_SECONDS:
         out["skipped"] = "deadline"
@@ -140,7 +142,8 @@ def run_alerts(db, scored: dict, now_iso: str, elapsed: float,
         deadline = time.monotonic() - elapsed + ALERTS_SEND_DEADLINE_SECONDS
     try:
         macro = read_cached_macro(db) if scored else None
-        out["queued"] = run_detection(db, scored, macro, now_iso)
+        out["queued"] = run_detection(db, scored, macro, now_iso,
+                                      market_code=market_code)
         prune_baselines(db, now_iso[:10])
         delivered = deliver(db, datetime.fromisoformat(now_iso), deadline=deadline)
         out["sent"] = delivered.get("sent", 0)
@@ -201,27 +204,14 @@ def select_stalest(universe: list, measured: dict, limit: int,
     return sorted(universe, key=rank)[:limit]
 
 
-def _snapshot_state(db) -> tuple:
+def _snapshot_state(db, market_code: str = EG.code) -> tuple:
     """({symbol: measured_at}, {symbol: consecutive_failures}) in one query."""
     rows = db.execute(
         "SELECT symbol, measured_at, COALESCE(consecutive_failures, 0) "
-        "FROM risk_snapshot"
+        "FROM risk_snapshot WHERE market = %s",
+        (market_code,),
     ).fetchall()
     return ({r[0]: r[1] for r in rows}, {r[0]: r[2] for r in rows})
-
-
-def is_isin(symbol: str) -> bool:
-    """
-    Bonds and structured instruments, whose "symbol" is really an ISIN
-    (EGS30AJ1C016, EGS48271C018-EGP). They are not common stocks and would
-    pollute a cross-sectional ranking.
-
-    The test is LENGTH, not the "EGS" prefix. An Egyptian ISIN is 12 characters
-    (EG + 10), sometimes with a -EGP suffix, while **EGSA is a real
-    four-character EGX ticker** that a prefix rule silently discards.
-    """
-    s = symbol.upper()
-    return len(s) >= 12 and s.startswith("EG")
 
 
 def plan_chunk(universe: list, cursor: int, limit: int) -> dict:
@@ -250,22 +240,31 @@ def plan_chunk(universe: list, cursor: int, limit: int) -> dict:
     }
 
 
-def _universe() -> list:
+def _universe(market: MarketConfig = EG) -> list:
     """
-    Every EGX symbol worth measuring, from the static ticker file.
+    Every symbol of `market` worth measuring.
 
-    Reads `data/egx_tickers.json` through index_membership rather than through
-    `tickers._load_tickers()`, which can fire a 10-second TradingView POST on a
-    cold container — the same trap documented for the scoring hot path.
+    EG reads the static ticker file `data/egx_tickers.json` through
+    index_membership rather than through `tickers._load_tickers()`, which can
+    fire a 10-second TradingView POST on a cold container — the same trap
+    documented for the scoring hot path. Other markets have no universe yet
+    (sub-project 3), so they measure nothing.
+
+    Bonds and structured products whose "symbol" is really an ISIN are dropped
+    by `market.is_valid_symbol` — matched on LENGTH, because EGSA is a real
+    four-character EGX ticker that a prefix rule silently discards.
     """
+    if market.code != EG.code:
+        return []
     from app.core.index_membership import _load
 
-    return [s for s in sorted(_load().keys()) if not is_isin(s)]
+    return [s for s in sorted(_load().keys()) if market.is_valid_symbol(s)]
 
 
-def _benchmark_close():
-    """EGX30 closes for beta, through the shared cache key every path uses."""
-    return get_benchmark_close(EG, "Daily", INTERNAL_BARS_MIN)
+def _benchmark_close(market: MarketConfig = EG):
+    """The market's benchmark closes for beta, through the shared cache key
+    every path uses."""
+    return get_benchmark_close(market, "Daily", INTERNAL_BARS_MIN)
 
 
 @router.post("/api/cron/risk_snapshot")
@@ -273,6 +272,7 @@ def risk_snapshot(
     cursor: Optional[int] = Query(default=None, ge=0),
     limit: int = Query(DEFAULT_CHUNK, ge=1, le=MAX_CHUNK),
     x_cron_secret: Optional[str] = Header(default=None),
+    market: MarketConfig = Depends(market_param),
 ):
     """
     Measure one slice of the universe and upsert it.
@@ -292,12 +292,16 @@ def risk_snapshot(
 
     from app.vendor.egxpy import get_OHLCV_data
 
-    universe = _universe()
+    universe = _universe(market)
     if not universe:
+        if market.code != EG.code:
+            return {"market": market.code, "processed": 0, "written": 0,
+                    "failed": [], "universe": 0,
+                    "note": f"no universe for market {market.code} yet"}
         raise HTTPException(status_code=500, detail="No universe available")
 
     db = get_db()
-    measured_at_map, failure_map = _snapshot_state(db)
+    measured_at_map, failure_map = _snapshot_state(db, market.code)
     if cursor is None:
         slice_ = select_stalest(universe, measured_at_map, limit, failure_map)
         plan = {"cursor": None, "remaining": None, "universe": len(universe)}
@@ -306,11 +310,11 @@ def risk_snapshot(
         slice_ = plan["symbols"]
 
     if not slice_:
-        return {"processed": 0, "written": 0, "failed": [],
+        return {"market": market.code, "processed": 0, "written": 0, "failed": [],
                 "cursor": 0, "remaining": 0, "universe": len(universe),
                 "note": "nothing to measure"}
 
-    benchmark = _benchmark_close()
+    benchmark = _benchmark_close(market)
     now = datetime.now(timezone.utc).isoformat()
 
     # Fundamentals for the whole chunk in ONE query rather than one lookup per
@@ -318,7 +322,7 @@ def risk_snapshot(
     # same values the detail page scores with or the card would disagree with
     # the page it links to.
     try:
-        fundamentals = get_pe_for_symbols(db, slice_)
+        fundamentals = get_pe_for_symbols(db, slice_, market.code)
     except Exception:
         fundamentals = {}
 
@@ -342,7 +346,8 @@ def risk_snapshot(
         because the dashboard's live upgrade writes the same row and two
         spellings of that INSERT would drift.
         """
-        upsert_snapshot(db, symbol, now, stats, tradeable, ok, card)
+        upsert_snapshot(db, symbol, now, stats, tradeable, ok, card,
+                        market_code=market.code)
 
     def _score_card(symbol: str, df) -> Optional[dict]:
         """
@@ -408,7 +413,8 @@ def risk_snapshot(
             timed_out = True
             break
         try:
-            df = get_OHLCV_data(symbol, "EGX", "Daily", INTERNAL_BARS_MIN)
+            df = get_OHLCV_data(symbol, market.primary_exchange, "Daily",
+                                INTERNAL_BARS_MIN)
         except Exception:
             df = None
 
@@ -446,18 +452,19 @@ def risk_snapshot(
             _upsert(symbol, None, False, ok=False, card=card)
             continue
 
-        _upsert(symbol, stats, is_tradeable(close, volume), ok=True, card=card)
+        _upsert(symbol, stats, is_tradeable(close, volume, market), ok=True, card=card)
         written += 1
 
     alerts = run_alerts(db, scored_for_alerts, now,
                         time.monotonic() - started,
-                        deadline=call_started + ALERTS_SEND_DEADLINE_SECONDS)
+                        deadline=call_started + ALERTS_SEND_DEADLINE_SECONDS,
+                        market_code=market.code)
 
     # How much of the universe is still carrying a measurement from before this
     # run started. This is the number to watch on the scheduler: it should fall
     # to 0 within a pass and stay there. If it never reaches 0, some symbols are
     # failing every time and `failed` names them.
-    after, after_failures = _snapshot_state(db)   # one query, not one per symbol
+    after, after_failures = _snapshot_state(db, market.code)   # one query, not one per symbol
     stale_remaining = sum(1 for s in universe if (after.get(s) or "") < now)
     # Symbols the feed keeps refusing. Expected to be large on this market:
     # roughly half the ticker file has never resolved. It is reported so a
@@ -467,6 +474,7 @@ def risk_snapshot(
 
     elapsed = round(time.monotonic() - started, 1)
     return {
+        "market": market.code,
         "requested": len(slice_),
         "processed": written + skipped + len(failed),
         "written": written,

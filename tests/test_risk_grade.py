@@ -97,6 +97,17 @@ def test_thin_turnover_fails_the_gate_even_when_it_trades_daily():
     assert rg.is_tradeable(close, volume) is False
 
 
+def test_the_gate_reads_its_floors_from_the_market():
+    """Floors are per-market facts in the registry, and a market with no
+    calibrated floors yet (US until sub-project 3) admits nothing."""
+    from app.core.markets import EG, US
+    close = _prices()
+    volume = pd.Series([500_000] * len(close))
+    assert rg.is_tradeable(close, volume, EG) is True
+    assert US.liquid_min_turnover is None
+    assert rg.is_tradeable(close, volume, US) is False
+
+
 # ---------------------------------------------------------------------------
 # Cross-sectional grading
 # ---------------------------------------------------------------------------
@@ -196,7 +207,8 @@ def test_annualized_scales_with_sigma(sigma, expected_more):
 # slicing independent of its writes.
 # ---------------------------------------------------------------------------
 
-from app.routers.cron import is_isin, plan_chunk  # noqa: E402
+from app.core.markets import EG  # noqa: E402
+from app.routers.cron import plan_chunk  # noqa: E402
 
 
 def test_chunking_walks_the_whole_universe_exactly_once():
@@ -235,10 +247,10 @@ def test_isin_rows_are_excluded_but_egsa_survives():
     EGSA is a real four-character EGX ticker. A startswith("EGS") rule — the
     obvious implementation — silently deletes it from the universe.
     """
-    assert is_isin("EGS30AJ1C016-EGP") is True
-    assert is_isin("EGS370O1C013") is True
-    assert is_isin("EGSA") is False
-    assert is_isin("COMI") is False
+    assert (not EG.is_valid_symbol("EGS30AJ1C016-EGP")) is True
+    assert (not EG.is_valid_symbol("EGS370O1C013")) is True
+    assert (not EG.is_valid_symbol("EGSA")) is False
+    assert (not EG.is_valid_symbol("COMI")) is False
 
 
 # ---------------------------------------------------------------------------

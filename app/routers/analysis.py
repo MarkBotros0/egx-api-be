@@ -159,7 +159,7 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict,
             "sparkline_json": json.dumps([round(float(x), 4) for x in sparkline]),
             "last_bar_date": str(df.index[-1])[:10],
             "stats": measure(close, volume, benchmark_close=egx30_close),
-            "tradeable": is_tradeable(close, volume),
+            "tradeable": is_tradeable(close, volume, market),
         }
 
     except Exception as e:

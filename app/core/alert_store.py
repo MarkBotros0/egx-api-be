@@ -26,8 +26,10 @@ def prune_baselines(db, today: str) -> None:
     db.execute("DELETE FROM score_baseline WHERE session_date < %s", (cutoff.isoformat(),))
 
 
-def load_subscribers(db, symbols: list) -> dict:
-    """{symbol: [Subscriber]} for users who would hear about that symbol now."""
+def load_subscribers(db, symbols: list, market_code: str = EG.code) -> dict:
+    """{symbol: [Subscriber]} for users who would hear about that symbol now.
+    Watchlist and holdings are matched in `market_code` only: the same ticker
+    on another market is a different stock."""
     if not symbols:
         return {}
     prefs = db.execute(
@@ -44,10 +46,11 @@ def load_subscribers(db, symbols: list) -> dict:
     if watch_users:
         rows = db.execute(
             "SELECT user_id, symbol FROM watchlist "
-            "WHERE user_id = ANY(%s) AND symbol = ANY(%s) "
+            "WHERE market = %s AND user_id = ANY(%s) AND symbol = ANY(%s) "
             "UNION SELECT user_id, symbol FROM portfolio "
-            "WHERE user_id = ANY(%s) AND symbol = ANY(%s)",
-            (watch_users, list(symbols), watch_users, list(symbols)),
+            "WHERE market = %s AND user_id = ANY(%s) AND symbol = ANY(%s)",
+            (market_code, watch_users, list(symbols),
+             market_code, watch_users, list(symbols)),
         ).fetchall()
         follows = {(r[0], r[1]) for r in rows}
 
@@ -60,24 +63,25 @@ def load_subscribers(db, symbols: list) -> dict:
     return out
 
 
-def _read_baselines(db, scored: dict) -> dict:
+def _read_baselines(db, scored: dict, market_code: str = EG.code) -> dict:
     rows = db.execute(
         f"SELECT symbol, session_date, {', '.join(CATEGORY_COLUMNS)} FROM score_baseline "
-        "WHERE symbol = ANY(%s) AND session_date = ANY(%s)",
-        (list(scored), sorted({v["session_date"] for v in scored.values()})),
+        "WHERE market = %s AND symbol = ANY(%s) AND session_date = ANY(%s)",
+        (market_code, list(scored), sorted({v["session_date"] for v in scored.values()})),
     ).fetchall()
     return {(r[0], r[1]): _categories(r[2:]) for r in rows}
 
 
 def run_detection(db, scored: dict, macro: Optional[dict], now: str,
-                  new_id=lambda: uuid4().hex) -> int:
-    """Queue alert_log rows for every qualifying move among `scored` symbols."""
+                  new_id=lambda: uuid4().hex, market_code: str = EG.code) -> int:
+    """Queue alert_log rows for every qualifying move among `scored` symbols,
+    all of which belong to `market_code`."""
     if not scored:
         return 0
-    subscribers = load_subscribers(db, list(scored))
+    subscribers = load_subscribers(db, list(scored), market_code)
     if not subscribers:
         return 0
-    baselines = _read_baselines(db, scored)
+    baselines = _read_baselines(db, scored, market_code)
 
     by_session: dict = {}
     for symbol, info in scored.items():
@@ -87,8 +91,8 @@ def run_detection(db, scored: dict, macro: Optional[dict], now: str,
     for session, symbols in sorted(by_session.items()):
         logged = db.execute(
             "SELECT user_id, symbol, direction FROM alert_log "
-            "WHERE session_date = %s AND symbol = ANY(%s)",
-            (session, symbols + [SUMMARY_SYMBOL]),
+            "WHERE session_date = %s AND market = %s AND symbol = ANY(%s)",
+            (session, market_code, symbols + [SUMMARY_SYMBOL]),
         ).fetchall()
         already = {(r[0], r[1], r[2]) for r in logged}
         counts = db.execute(
@@ -115,7 +119,7 @@ def run_detection(db, scored: dict, macro: Optional[dict], now: str,
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s) "
                 "ON CONFLICT (user_id, market, symbol, session_date, direction) "
                 "DO NOTHING RETURNING id",
-                (new_id(), sig.user_id, EG.code, sig.symbol, sig.session_date, sig.direction,
+                (new_id(), sig.user_id, market_code, sig.symbol, sig.session_date, sig.direction,
                  sig.before, sig.after, status, now),
             ).fetchone()
             if row:

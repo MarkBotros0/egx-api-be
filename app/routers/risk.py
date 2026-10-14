@@ -24,11 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.core.auth import get_current_user
 from app.core.db import get_db
 from app.core.markets import EG, MarketConfig, market_param
-from app.core.risk_grade import (
-    LIQUID_MIN_TURNOVER_EGP,
-    RISK_CALIBRATION,
-    grade_universe,
-)
+from app.core.risk_grade import RISK_CALIBRATION, grade_universe
 
 router = APIRouter()
 
@@ -95,7 +91,10 @@ def get_risk(symbol: Optional[str] = Query(default=None),
         # that stalled halfway through the universe.
         "oldest_measurement": min(measured) if measured else None,
         "newest_measurement": max(measured) if measured else None,
-        "liquidity_floor_egp": LIQUID_MIN_TURNOVER_EGP,
+        # Per-market turnover floor, in `currency`. None for a market whose
+        # floors are not calibrated yet. (Was `liquidity_floor_egp`; no web or
+        # mobile code read it.)
+        "liquidity_floor": market.liquid_min_turnover,
         "calibration": RISK_CALIBRATION,
     }
 
