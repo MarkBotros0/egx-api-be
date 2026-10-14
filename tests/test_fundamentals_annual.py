@@ -174,7 +174,7 @@ def test_a_truncated_response_is_refused_without_writing():
 
     db = _DB()
     thin = fetch_annual_rows([_row(f"S{i:03d}", [2024, 2023]) for i in range(10)])
-    result = refresh_annual_fundamentals(db, thin)
+    result = refresh_annual_fundamentals(db, rows=thin)
     assert result["success"] is False
     assert db.writes == 0, "a truncated response was partially written"
     assert str(MIN_EXPECTED_SYMBOLS) in result["error"]
@@ -200,7 +200,7 @@ def test_a_full_response_writes_every_record():
     rows = fetch_annual_rows(
         [_row(f"S{i:03d}", [2024, 2023]) for i in range(MIN_EXPECTED_SYMBOLS + 5)]
     )
-    result = refresh_annual_fundamentals(db, rows)
+    result = refresh_annual_fundamentals(db, rows=rows)
     assert result["success"] is True
     assert result["written"] == len(rows)
 
@@ -217,7 +217,7 @@ def test_the_archive_is_written_in_BATCHES_not_one_row_at_a_time():
     rows = fetch_annual_rows(
         [_row(f"S{i:03d}", [2024, 2023]) for i in range(MIN_EXPECTED_SYMBOLS + 5)]
     )
-    result = refresh_annual_fundamentals(db, rows)
+    result = refresh_annual_fundamentals(db, rows=rows)
 
     assert result["written"] == len(rows), "every record must still be written"
     expected_batches = (len(rows) + WRITE_BATCH - 1) // WRITE_BATCH
@@ -240,7 +240,7 @@ def test_a_repeated_symbol_year_cannot_abort_its_batch():
         [_row(f"S{i:03d}", [2024, 2023]) for i in range(MIN_EXPECTED_SYMBOLS + 5)]
     )
     duplicated = rows + rows[:5]          # five records arrive twice
-    result = refresh_annual_fundamentals(db, duplicated)
+    result = refresh_annual_fundamentals(db, rows=duplicated)
 
     assert result["success"] is True
     assert result["written"] == len(rows), "duplicates must collapse, not double"

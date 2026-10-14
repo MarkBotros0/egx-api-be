@@ -36,7 +36,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from app.core.markets import EG
+from app.core.markets import EG, MarketConfig
 from app.core.tradingview import scan
 
 # Positional column request. `d` in each returned row aligns to this order.
@@ -129,14 +129,14 @@ def _clean_float(value, maximum: Optional[float] = None) -> Optional[float]:
     return f
 
 
-def fetch_fundamentals_rows() -> list:
+def fetch_fundamentals_rows(market: MarketConfig = EG) -> list:
     """
-    One POST for the whole EGX universe. Returns
+    One POST for the whole universe of `market`. Returns
         [{"symbol", "company_name", "pe_ratio", "dividend_yield", "loss_making"}]
 
     Raises on HTTP/JSON error — the caller owns the never-wipe guarantee.
     """
-    raw = scan(TV_COLUMNS)
+    raw = scan(TV_COLUMNS, market=market)
 
     out = []
     for row in raw:
@@ -178,9 +178,10 @@ def fetch_fundamentals_rows() -> list:
 # DB writes / reads
 # ---------------------------------------------------------------------------
 
-def refresh_pe_data(db, rows: Optional[list] = None) -> dict:
+def refresh_pe_data(db, market: MarketConfig = EG,
+                    rows: Optional[list] = None) -> dict:
     """
-    Refresh the fundamentals feed and upsert into pe_data.
+    Refresh the fundamentals feed for `market` and upsert into pe_data.
 
     Passing `rows` skips the HTTP call — the seam used by tests and local dev.
 
@@ -192,7 +193,7 @@ def refresh_pe_data(db, rows: Optional[list] = None) -> dict:
 
     try:
         if rows is None:
-            rows = fetch_fundamentals_rows()
+            rows = fetch_fundamentals_rows(market)
     except Exception as e:
         _write_setting(db, "pe_last_attempt_status", f"error: {type(e).__name__}: {e}")
         return {"success": False, "count": 0, "error": str(e)}
@@ -241,7 +242,7 @@ def refresh_pe_data(db, rows: Optional[list] = None) -> dict:
                 dividend_amount_recent  = EXCLUDED.dividend_amount_recent,
                 updated_at              = EXCLUDED.updated_at
             """,
-            (EG.code, row["symbol"], row.get("company_name"), row.get("pe_ratio"),
+            (market.code, row["symbol"], row.get("company_name"), row.get("pe_ratio"),
              row.get("dividend_yield"), row.get("loss_making"),
              row.get("market_cap"), row.get("shares_outstanding"),
              row.get("beta_1y"), row.get("value_traded"),
@@ -250,8 +251,10 @@ def refresh_pe_data(db, rows: Optional[list] = None) -> dict:
         )
         written += 1
 
-    appended = _append_fundamentals_history(db, rows, now)
-    dividends_appended = _append_dividend_events(db, rows)
+    # fundamentals_history carries no market column yet, so only EG feeds it.
+    appended = (_append_fundamentals_history(db, rows, now)
+                if market.code == EG.code else 0)
+    dividends_appended = _append_dividend_events(db, rows, market)
 
     _write_setting(db, "pe_last_successful_fetch", now)
     _write_setting(db, "pe_last_attempt_status", "ok")
@@ -266,7 +269,7 @@ def refresh_pe_data(db, rows: Optional[list] = None) -> dict:
     }
 
 
-def _append_dividend_events(db, rows: list) -> int:
+def _append_dividend_events(db, rows: list, market: MarketConfig = EG) -> int:
     """
     Append the scanner's ONE latest coupon per symbol into `dividend_events`.
     The table's PRIMARY KEY makes this idempotent — only a NEW (symbol, ex_date)
@@ -286,6 +289,7 @@ def _append_dividend_events(db, rows: list) -> int:
                 db, row["symbol"],
                 [{"ex_date": ex, "amount": row.get("dividend_amount_recent")}],
                 source="scanner",
+                market_code=market.code,
             )
         except Exception:
             continue
@@ -429,7 +433,7 @@ def get_pe_for_symbols(db, symbols: list, market_code: str = EG.code) -> dict:
     }
 
 
-def get_dividend_payers(db) -> list[dict]:
+def get_dividend_payers(db, market_code: str = EG.code) -> list[dict]:
     """
     Every stock with a known last ex-date, for the dividend calendar. Sourced
     from pe_data (NOT the risk snapshot), so it covers every payer regardless
@@ -438,8 +442,9 @@ def get_dividend_payers(db) -> list[dict]:
     rows = db.execute(
         "SELECT symbol, company_name, dividend_yield, dividend_ex_date_recent, "
         "dividend_amount_recent FROM pe_data "
-        "WHERE dividend_ex_date_recent IS NOT NULL "
-        "ORDER BY dividend_ex_date_recent DESC, symbol ASC"
+        "WHERE market = %s AND dividend_ex_date_recent IS NOT NULL "
+        "ORDER BY dividend_ex_date_recent DESC, symbol ASC",
+        (market_code,),
     ).fetchall()
     return [
         {

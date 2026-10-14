@@ -13,33 +13,37 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from app.core.accounts import AccountStore
 from app.core.db import get_db
 from app.core.fundamentals_annual import refresh_annual_fundamentals
 from app.core.limits import prune_auth
 from app.core.macro_series import refresh_current as refresh_macro_series
+from app.core.markets import EG, MarketConfig, market_param
 from app.core.pe_fetch import get_pe_for_symbol, refresh_pe_data
 
 router = APIRouter()
 
 
 @router.get("/api/pe")
-def get_pe(symbol: Optional[str] = Query(None)):
+def get_pe(symbol: Optional[str] = Query(None),
+           market: MarketConfig = Depends(market_param)):
     try:
         db = get_db()
         if symbol:
-            data = get_pe_for_symbol(db, symbol)
+            data = get_pe_for_symbol(db, symbol, market.code)
             if not data:
                 raise HTTPException(
                     status_code=404, detail=f"No P/E data for {symbol.upper()}"
                 )
-            return {"symbol": symbol.upper(), **data}
+            return {"market": market.code, "currency": market.currency,
+                    "symbol": symbol.upper(), **data}
 
         rows = db.execute(
             "SELECT symbol, company_name, pe_ratio, dividend_yield, loss_making, "
-            "updated_at FROM pe_data"
+            "updated_at FROM pe_data WHERE market = %s",
+            (market.code,),
         ).fetchall()
         last_row = db.execute(
             "SELECT value FROM settings WHERE key = 'pe_last_successful_fetch'"
@@ -48,6 +52,8 @@ def get_pe(symbol: Optional[str] = Query(None)):
             "SELECT value FROM settings WHERE key = 'pe_last_attempt_status'"
         ).fetchone()
         return {
+            "market": market.code,
+            "currency": market.currency,
             "data": [
                 {
                     "symbol": r[0],
@@ -74,13 +80,16 @@ def trigger_refresh(x_refresh_secret: Optional[str] = Header(default=None)):
     Manual + cron-triggered refresh. When PE_REFRESH_SECRET env var is set,
     the X-Refresh-Secret header must match (used in production to prevent
     random callers from triggering EGX scrapes).
+
+    EG only in this sub-project: the feed's row-count guards and the
+    pe_last_* status keys are calibrated for the EGX universe.
     """
     expected = os.environ.get("PE_REFRESH_SECRET")
     if expected and x_refresh_secret != expected:
         raise HTTPException(status_code=403, detail="Forbidden")
     try:
         db = get_db()
-        result = refresh_pe_data(db)
+        result = refresh_pe_data(db, EG)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -93,7 +102,7 @@ def trigger_refresh(x_refresh_secret: Optional[str] = Header(default=None)):
     # feed down with it would trade something the user sees for something only
     # a backtest reads.
     try:
-        result["annual"] = refresh_annual_fundamentals(db)
+        result["annual"] = refresh_annual_fundamentals(db, EG)
     except Exception as e:
         result["annual"] = {"success": False,
                             "error": f"{type(e).__name__}: {e}"}

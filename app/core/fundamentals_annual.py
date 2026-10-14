@@ -43,7 +43,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from app.core.markets import EG
+from app.core.markets import EG, MarketConfig
 from app.core.tradingview import scan
 
 # Positional column request; each `d` aligns to this order. The first is the
@@ -114,14 +114,14 @@ def _num(value) -> Optional[float]:
     return f if f == f else None      # NaN -> None
 
 
-def fetch_annual_rows(raw: Optional[list] = None) -> list:
+def fetch_annual_rows(raw: Optional[list] = None, market: MarketConfig = EG) -> list:
     """
     One POST, exploded into one record per (symbol, fiscal year).
 
     Passing `raw` skips the HTTP call — the seam used by tests.
     """
     if raw is None:
-        raw = scan(TV_HISTORY_COLUMNS)
+        raw = scan(TV_HISTORY_COLUMNS, market=market)
 
     out = []
     for row in raw:
@@ -156,7 +156,8 @@ def fetch_annual_rows(raw: Optional[list] = None) -> list:
     return out
 
 
-def refresh_annual_fundamentals(db, rows: Optional[list] = None) -> dict:
+def refresh_annual_fundamentals(db, market: MarketConfig = EG,
+                                rows: Optional[list] = None) -> dict:
     """
     Upsert the annual archive. NEVER WIPES, matching refresh_pe_data.
 
@@ -168,7 +169,7 @@ def refresh_annual_fundamentals(db, rows: Optional[list] = None) -> dict:
     now = datetime.now(timezone.utc).isoformat()
     try:
         if rows is None:
-            rows = fetch_annual_rows()
+            rows = fetch_annual_rows(market=market)
     except Exception as e:
         return {"success": False, "written": 0, "error": f"{type(e).__name__}: {e}"}
 
@@ -191,14 +192,15 @@ def refresh_annual_fundamentals(db, rows: Optional[list] = None) -> dict:
 
     written = 0
     for start in range(0, len(unique), WRITE_BATCH):
-        written += _upsert_batch(db, unique[start:start + WRITE_BATCH], now)
+        written += _upsert_batch(db, unique[start:start + WRITE_BATCH], now,
+                                 market.code)
 
     return {"success": True, "written": written, "symbols": len(symbols),
             "years": len({r["fiscal_year"] for r in unique}),
             "batches": (len(unique) + WRITE_BATCH - 1) // WRITE_BATCH}
 
 
-def _upsert_batch(db, batch: list, now: str) -> int:
+def _upsert_batch(db, batch: list, now: str, market_code: str = EG.code) -> int:
     """
     One multi-row INSERT for up to WRITE_BATCH records.
 
@@ -229,7 +231,7 @@ def _upsert_batch(db, batch: list, now: str) -> int:
     params: list = []
     for r in batch:
         params.extend([
-            EG.code, r["symbol"], r["fiscal_year"], r["eps_diluted"], r["dps"],
+            market_code, r["symbol"], r["fiscal_year"], r["eps_diluted"], r["dps"],
             r["net_income"], r["revenue"], r["total_assets"],
             r["gross_profit"], r["total_debt"], r["first_usable_date"], now,
         ])
@@ -257,7 +259,7 @@ def _upsert_batch(db, batch: list, now: str) -> int:
     return len(batch)
 
 
-def get_annual_asof(db, as_of: str) -> dict:
+def get_annual_asof(db, as_of: str, market_code: str = EG.code) -> dict:
     """
     The latest fundamentals KNOWABLE on `as_of`, per symbol: {symbol: row}.
 
@@ -274,9 +276,9 @@ def get_annual_asof(db, as_of: str) -> dict:
         "SELECT DISTINCT ON (symbol) symbol, fiscal_year, eps_diluted, dps, "
         "net_income, revenue, total_assets, gross_profit, total_debt, "
         "first_usable_date "
-        "FROM fundamentals_annual WHERE first_usable_date <= %s "
+        "FROM fundamentals_annual WHERE first_usable_date <= %s AND market = %s "
         "ORDER BY symbol, fiscal_year DESC",
-        (as_of,),
+        (as_of, market_code),
     ).fetchall()
     return {
         r[0]: {"fiscal_year": r[1], "eps_diluted": r[2], "dps": r[3],

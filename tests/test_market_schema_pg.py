@@ -199,8 +199,8 @@ def test_writers_upsert_against_the_new_keys(pg):
     from app.core.pe_fetch import refresh_pe_data
     rows = [{"symbol": f"S{i}", "pe_ratio": 10.0, "value_traded": 1e6}
             for i in range(120)]
-    assert refresh_pe_data(d, rows)["success"] is True
-    assert refresh_pe_data(d, rows)["success"] is True
+    assert refresh_pe_data(d, rows=rows)["success"] is True
+    assert refresh_pe_data(d, rows=rows)["success"] is True
     assert d.execute(
         "SELECT COUNT(*), MIN(market), MAX(value_traded) FROM pe_data").fetchone() == (120, "EG", 1e6)
 

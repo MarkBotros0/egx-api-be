@@ -316,8 +316,8 @@ def test_the_nightly_refresh_prunes_best_effort(monkeypatch, capsys):
     from app.routers import pe as pe_router
     monkeypatch.delenv("PE_REFRESH_SECRET", raising=False)
     monkeypatch.setattr(pe_router, "get_db", lambda: FakeDB())
-    monkeypatch.setattr(pe_router, "refresh_pe_data", lambda db: {"success": True})
-    monkeypatch.setattr(pe_router, "refresh_annual_fundamentals", lambda db: {"success": True})
+    monkeypatch.setattr(pe_router, "refresh_pe_data", lambda db, market: {"success": True})
+    monkeypatch.setattr(pe_router, "refresh_annual_fundamentals", lambda db, market: {"success": True})
     monkeypatch.setattr(pe_router, "refresh_macro_series", lambda db: {"success": True})
     seen = []
     monkeypatch.setattr(pe_router, "prune_auth", lambda store, now: seen.append(store) or {"users": 1})

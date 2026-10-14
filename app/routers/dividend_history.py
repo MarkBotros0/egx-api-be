@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core import cache
-from app.core.markets import EG
+from app.core.markets import MarketConfig, market_param
 from app.core.auth import CurrentUser, get_current_user
 from app.core.constants import DIVIDEND_HISTORY_TTL_SECONDS
 from app.core.db import get_db
@@ -43,19 +43,20 @@ router = APIRouter()
 def get_dividend_history(
     symbol: str = Query(...),
     user: CurrentUser = Depends(get_current_user),
+    market: MarketConfig = Depends(market_param),
 ):
     sym = symbol.strip().upper()
     if not sym:
         raise HTTPException(status_code=400, detail="Missing required query parameter: symbol")
 
-    key = cache.make_key(EG.code, "divhist", sym)
+    key = cache.make_key(market.code, "divhist", sym)
     hit = cache.get(key)
     if hit is not None:
         return hit
 
     db = get_db()
     try:
-        dividends = read_dividends(db, sym)
+        dividends = read_dividends(db, sym, market.code)
     except Exception:
         dividends = []
 
@@ -63,11 +64,13 @@ def get_dividend_history(
     # serve it. This is how the store fills in ahead of the backfill script.
     if not dividends:
         try:
-            fetched = fetch_dividends(sym)
+            fetched = fetch_dividends(sym, market=market)
         except Exception:
             fetched = None
         if fetched is None:
             return {
+                "market": market.code,
+                "currency": market.currency,
                 "symbol": sym,
                 "dividends": [],
                 "cadence": summarize_cadence([]),
@@ -75,12 +78,15 @@ def get_dividend_history(
             }
         if fetched:
             try:
-                upsert_dividends(db, sym, fetched, source="yahoo")
+                upsert_dividends(db, sym, fetched, source="yahoo",
+                                 market_code=market.code)
             except Exception:
                 pass
         dividends = fetched
 
     payload = {
+        "market": market.code,
+        "currency": market.currency,
         "symbol": sym,
         "dividends": dividends,
         "cadence": summarize_cadence(dividends),
@@ -91,8 +97,9 @@ def get_dividend_history(
 
 
 @router.get("/api/dividend_calendar")
-def get_dividend_calendar(user: CurrentUser = Depends(get_current_user)):
-    key = cache.make_key(EG.code, "divcal")
+def get_dividend_calendar(user: CurrentUser = Depends(get_current_user),
+                          market: MarketConfig = Depends(market_param)):
+    key = cache.make_key(market.code, "divcal")
     hit = cache.get(key)
     if hit is not None:
         return hit
@@ -104,13 +111,13 @@ def get_dividend_calendar(user: CurrentUser = Depends(get_current_user)):
     # fall back to pe_data's latest-coupon-per-symbol so the calendar still paints.
     stocks = []
     try:
-        events = read_calendar(db)
+        events = read_calendar(db, market.code)
     except Exception:
         events = []
 
     if events:
         try:
-            payers = {p["symbol"]: p for p in get_dividend_payers(db)}
+            payers = {p["symbol"]: p for p in get_dividend_payers(db, market.code)}
         except Exception:
             payers = {}
         for e in events:
@@ -124,10 +131,12 @@ def get_dividend_calendar(user: CurrentUser = Depends(get_current_user)):
             })
     else:
         try:
-            stocks = get_dividend_payers(db)
+            stocks = get_dividend_payers(db, market.code)
         except Exception:
-            return {"stocks": [], "count": 0, "as_of": now, "status": "unavailable"}
+            return {"market": market.code, "currency": market.currency,
+                    "stocks": [], "count": 0, "as_of": now, "status": "unavailable"}
 
-    payload = {"stocks": stocks, "count": len(stocks), "as_of": now, "status": "ok"}
+    payload = {"market": market.code, "currency": market.currency,
+               "stocks": stocks, "count": len(stocks), "as_of": now, "status": "ok"}
     cache.set(key, payload, ttl=DIVIDEND_HISTORY_TTL_SECONDS)
     return payload

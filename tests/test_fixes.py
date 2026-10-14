@@ -1221,7 +1221,7 @@ def test_fundamentals_refresh_never_wipes_on_failure(monkeypatch):
     """
     import app.core.pe_fetch as pf
 
-    def _boom():
+    def _boom(*_args, **_kwargs):
         raise RuntimeError("scanner unreachable")
 
     monkeypatch.setattr(pf, "fetch_fundamentals_rows", _boom)

@@ -33,10 +33,13 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.core.constants import DIVIDEND_HISTORY_TIMEOUT_SECONDS
-from app.core.markets import EG
+from app.core.markets import EG, MarketConfig
 
-# events=div gives dividends; a wide window so we get the whole history. The
-# .CA suffix is Yahoo's code for the Egyptian Exchange.
+# Yahoo's per-market symbol suffix: `.CA` is its code for the Egyptian
+# Exchange; US listings are quoted bare.
+YAHOO_SUFFIX = {"EG": ".CA", "US": ""}
+
+# events=div gives dividends; a wide window so we get the whole history.
 _URL = (
     "https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
     "?interval=1d&period1=1104537600&period2={p2}&events=div"
@@ -52,9 +55,9 @@ _HEADERS = {
 }
 
 
-def yahoo_symbol(symbol: str) -> str:
-    """EGX ticker -> Yahoo code, e.g. 'COMI' -> 'COMI.CA'."""
-    return f"{(symbol or '').strip().upper()}.CA"
+def yahoo_symbol(symbol: str, market: MarketConfig = EG) -> str:
+    """Ticker -> Yahoo code: 'COMI' on EG -> 'COMI.CA', 'AAPL' on US -> 'AAPL'."""
+    return f"{(symbol or '').strip().upper()}{YAHOO_SUFFIX[market.code]}"
 
 
 def parse_dividends(payload) -> list[dict]:
@@ -129,12 +132,13 @@ def summarize_cadence(dividends: list[dict]) -> dict:
 
 
 def fetch_dividends(
-    symbol: str, timeout: float = DIVIDEND_HISTORY_TIMEOUT_SECONDS
+    symbol: str, timeout: float = DIVIDEND_HISTORY_TIMEOUT_SECONDS,
+    market: MarketConfig = EG,
 ) -> list[dict]:
     """One Yahoo GET for one symbol's dividend history. Raises on HTTP/JSON
     error — the caller owns the never-500 policy."""
     p2 = int(datetime.now(timezone.utc).timestamp()) + 86_400
-    url = _URL.format(sym=yahoo_symbol(symbol), p2=p2)
+    url = _URL.format(sym=yahoo_symbol(symbol, market), p2=p2)
     req = urllib.request.Request(url, headers=_HEADERS)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = json.loads(resp.read())
@@ -145,7 +149,8 @@ def fetch_dividends(
 # Persisted table (dividend_events) — the store the refresh appends to
 # ---------------------------------------------------------------------------
 
-def upsert_dividends(db, symbol: str, dividends: list[dict], source: str) -> int:
+def upsert_dividends(db, symbol: str, dividends: list[dict], source: str,
+                     market_code: str = EG.code) -> int:
     """
     Append coupons to `dividend_events`, one row per (symbol, ex_date).
     Idempotent by PRIMARY KEY — a re-seen coupon is a no-op — so the nightly
@@ -166,19 +171,20 @@ def upsert_dividends(db, symbol: str, dividends: list[dict], source: str) -> int
             "(market, symbol, ex_date, amount, source, created_at) "
             "VALUES (%s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (market, symbol, ex_date) DO NOTHING",
-            (EG.code, sym, ex_date, d.get("amount"), source, now),
+            (market_code, sym, ex_date, d.get("amount"), source, now),
         )
         # psycopg exposes rowcount; a DO NOTHING that hit the conflict is 0.
         inserted += getattr(cur, "rowcount", 0) or 0
     return inserted
 
 
-def read_dividends(db, symbol: str) -> list[dict]:
+def read_dividends(db, symbol: str, market_code: str = EG.code) -> list[dict]:
     """Every stored coupon for one symbol, newest ex-date first."""
     rows = db.execute(
-        "SELECT ex_date, amount FROM dividend_events WHERE symbol = %s "
+        "SELECT ex_date, amount FROM dividend_events "
+        "WHERE market = %s AND symbol = %s "
         "ORDER BY ex_date DESC",
-        ((symbol or "").strip().upper(),),
+        (market_code, (symbol or "").strip().upper()),
     ).fetchall()
     return [
         {"ex_date": r[0], "amount": r[1], "year": int(r[0][:4])}
@@ -186,14 +192,15 @@ def read_dividends(db, symbol: str) -> list[dict]:
     ]
 
 
-def read_calendar(db) -> list[dict]:
+def read_calendar(db, market_code: str = EG.code) -> list[dict]:
     """
     Latest coupon per symbol from the table, newest ex-date first — the
     /dividend_calendar read model. One row per symbol via DISTINCT ON.
     """
     rows = db.execute(
         "SELECT DISTINCT ON (symbol) symbol, ex_date, amount "
-        "FROM dividend_events ORDER BY symbol, ex_date DESC"
+        "FROM dividend_events WHERE market = %s ORDER BY symbol, ex_date DESC",
+        (market_code,),
     ).fetchall()
     out = [{"symbol": r[0], "ex_date": r[1], "amount": r[2]} for r in rows if r[1]]
     out.sort(key=lambda d: d["ex_date"], reverse=True)
