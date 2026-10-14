@@ -247,10 +247,10 @@ def test_a_repeated_symbol_year_cannot_abort_its_batch():
 
     keys = []
     for sql, params in db.statements:
-        # 11 columns per record, positionally: symbol, fiscal_year, ...
-        for i in range(0, len(params), 11):
-            keys.append((params[i], params[i + 1]))
-    assert len(keys) == len(set(keys)), "a (symbol, fiscal_year) repeated in one batch"
+        # 12 columns per record, positionally: market, symbol, fiscal_year, ...
+        for i in range(0, len(params), 12):
+            keys.append((params[i], params[i + 1], params[i + 2]))
+    assert len(keys) == len(set(keys)), "a (market, symbol, fiscal_year) repeated in one batch"
 
 
 @pytest.mark.parametrize("year", [2012, 2018, 2024])

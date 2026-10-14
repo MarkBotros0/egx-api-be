@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
+from app.core.markets import EG
 
 router = APIRouter()
 
@@ -48,9 +49,10 @@ def add_to_watchlist(
         now = datetime.utcnow().isoformat() + "Z"
         db = get_db()
         db.execute(
-            "INSERT INTO watchlist (user_id, symbol, added_at) VALUES (%s, %s, %s) "
-            "ON CONFLICT (user_id, symbol) DO NOTHING",
-            (user.id, symbol, now),
+            "INSERT INTO watchlist (user_id, market, symbol, added_at) "
+            "VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (user_id, market, symbol) DO NOTHING",
+            (user.id, EG.code, symbol, now),
         )
         db.commit()
         return {"symbol": symbol, "added_at": now}

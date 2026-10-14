@@ -36,6 +36,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.core.markets import EG
 from app.core.tradingview import scan
 
 # Positional column request. `d` in each returned row aligns to this order.
@@ -166,7 +167,7 @@ def fetch_fundamentals_rows() -> list:
             "market_cap": _clean_float(d[8]),
             "shares_outstanding": _clean_float(d[9]),
             "beta_1y": _clean_float(d[10]),
-            "value_traded_egp": _clean_float(d[11]),
+            "value_traded": _clean_float(d[11]),
             "dividend_ex_date_recent": _ts_to_iso_date(d[12]),
             "dividend_amount_recent": _clean_float(d[13]),
         })
@@ -222,12 +223,12 @@ def refresh_pe_data(db, rows: Optional[list] = None) -> dict:
         db.execute(
             """
             INSERT INTO pe_data
-                (symbol, company_name, pe_ratio, dividend_yield, loss_making,
-                 market_cap, shares_outstanding, beta_1y, value_traded_egp,
-                 dividend_ex_date_recent, dividend_amount_recent,
+                (market, symbol, company_name, pe_ratio, dividend_yield,
+                 loss_making, market_cap, shares_outstanding, beta_1y,
+                 value_traded, dividend_ex_date_recent, dividend_amount_recent,
                  updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (symbol) DO UPDATE SET
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (market, symbol) DO UPDATE SET
                 company_name            = EXCLUDED.company_name,
                 pe_ratio                = EXCLUDED.pe_ratio,
                 dividend_yield          = EXCLUDED.dividend_yield,
@@ -235,15 +236,15 @@ def refresh_pe_data(db, rows: Optional[list] = None) -> dict:
                 market_cap              = EXCLUDED.market_cap,
                 shares_outstanding      = EXCLUDED.shares_outstanding,
                 beta_1y                 = EXCLUDED.beta_1y,
-                value_traded_egp        = EXCLUDED.value_traded_egp,
+                value_traded            = EXCLUDED.value_traded,
                 dividend_ex_date_recent = EXCLUDED.dividend_ex_date_recent,
                 dividend_amount_recent  = EXCLUDED.dividend_amount_recent,
                 updated_at              = EXCLUDED.updated_at
             """,
-            (row["symbol"], row.get("company_name"), row.get("pe_ratio"),
+            (EG.code, row["symbol"], row.get("company_name"), row.get("pe_ratio"),
              row.get("dividend_yield"), row.get("loss_making"),
              row.get("market_cap"), row.get("shares_outstanding"),
-             row.get("beta_1y"), row.get("value_traded_egp"),
+             row.get("beta_1y"), row.get("value_traded"),
              row.get("dividend_ex_date_recent"), row.get("dividend_amount_recent"),
              now),
         )

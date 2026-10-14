@@ -92,6 +92,129 @@ def _get_pool() -> ConnectionPool:
     return _pool
 
 
+# Multi-market (2026-10-15). Tables keyed by symbol gain a market, and their key
+# gains it too, so the same ticker can exist in two markets. The value lists the
+# NEW key columns; None means the table keeps its id key and only gets the
+# column plus an index.
+_MARKET_KEYS: dict[str, tuple[str, tuple[str, ...]] | None] = {
+    "watchlist":           ("PRIMARY KEY", ("user_id", "market", "symbol")),
+    "discovered_tickers":  ("PRIMARY KEY", ("market", "symbol")),
+    "pe_data":             ("PRIMARY KEY", ("market", "symbol")),
+    "risk_snapshot":       ("PRIMARY KEY", ("market", "symbol")),
+    "dividend_events":     ("PRIMARY KEY", ("market", "symbol", "ex_date")),
+    "fundamentals_annual": ("PRIMARY KEY", ("market", "symbol", "fiscal_year")),
+    "score_baseline":      ("PRIMARY KEY", ("market", "symbol", "session_date")),
+    "alert_log":           ("UNIQUE", ("user_id", "market", "symbol", "session_date", "direction")),
+    "portfolio":           None,
+    "portfolio_sales":     None,
+    "portfolio_dividends": None,
+    "fundamentals_history": None,
+    "market_regime":       None,
+}
+
+
+def _sql_text_array(values) -> str:
+    return "ARRAY[" + ",".join(f"'{v}'" for v in values) + "]::text[]"
+
+
+def _ensure_key(db, table: str, kind: str, name: str, columns: tuple[str, ...]) -> None:
+    """
+    Make `name` the table's key over `columns` (in that order), idempotently.
+
+    Postgres has no ADD CONSTRAINT IF NOT EXISTS for keys, and the key over the
+    OLD columns has to go first. Which constraint is "the old one" is decided
+    explicitly rather than guessed from a name or a column count:
+      * PRIMARY KEY: the table's primary key, whatever it is called;
+      * UNIQUE: the unique constraint over exactly the new columns minus
+        `market` (alert_log's was unnamed, so Postgres called it
+        alert_log_user_id_symbol_session_date_direction_key).
+
+    A key already over `columns` returns before anything is locked, so every
+    cold start after the first is a read of pg_constraint and nothing more.
+    Only a run with work to do takes the table lock, and it re-checks under the
+    lock: two instances cold-starting together must not both migrate.
+    """
+    contype = "p" if kind == "PRIMARY KEY" else "u"
+    want = _sql_text_array(columns)
+    old_set = _sql_text_array(sorted(c for c in columns if c != "market"))
+    cols_of = (
+        "ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(n, i) "
+        "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.n "
+        "ORDER BY k.i)"
+    )
+    sorted_cols_of = (
+        "ARRAY(SELECT a.attname::text FROM unnest(c.conkey) k(n) "
+        "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.n "
+        "ORDER BY a.attname::text COLLATE \"C\")"
+    )
+    in_place = (
+        f"EXISTS (SELECT 1 FROM pg_constraint c "
+        f"WHERE c.conrelid = '{table}'::regclass AND c.contype = '{contype}' "
+        f"AND {cols_of} = {want})"
+    )
+    is_old = "TRUE" if contype == "p" else f"{sorted_cols_of} = {old_set}"
+    db.execute(f"""
+        DO $$
+        DECLARE con record;
+        BEGIN
+            IF {in_place} THEN
+                RETURN;
+            END IF;
+            LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE;
+            IF {in_place} THEN
+                RETURN;
+            END IF;
+            FOR con IN
+                SELECT c.conname FROM pg_constraint c
+                 WHERE c.conrelid = '{table}'::regclass AND c.contype = '{contype}'
+                   AND {is_old}
+            LOOP
+                EXECUTE format('ALTER TABLE {table} DROP CONSTRAINT %%I', con.conname);
+            END LOOP;
+            ALTER TABLE {table} ADD CONSTRAINT {name} {kind} ({", ".join(columns)});
+        END $$
+    """)
+
+
+def _rename_column(db, table: str, old: str, new: str) -> None:
+    """
+    Rename `old` to `new` if `old` is still there, idempotently.
+
+    Skipped when `new` already exists as well: renaming onto it would fail, and
+    which of the two holds the real data is not something to guess at boot.
+    Re-checked under the table lock for the same reason as `_ensure_key`.
+    """
+    has = (
+        "EXISTS (SELECT 1 FROM information_schema.columns "
+        f"WHERE table_schema = current_schema() AND table_name = '{table}' "
+        "AND column_name = '{col}')"
+    )
+    ready = f"{has.format(col=old)} AND NOT {has.format(col=new)}"
+    db.execute(f"""
+        DO $$
+        BEGIN
+            IF {ready} THEN
+                LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE;
+                IF {ready} THEN
+                    ALTER TABLE {table} RENAME COLUMN {old} TO {new};
+                END IF;
+            END IF;
+        END $$
+    """)
+
+
+def _add_market_columns(db) -> None:
+    for table, key in _MARKET_KEYS.items():
+        db.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS market TEXT NOT NULL DEFAULT 'EG'")
+        if key is None:
+            lead = "user_id, market" if table.startswith("portfolio") else "market"
+            db.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_market ON {table}({lead})")
+        else:
+            kind, cols = key
+            name = f"{table}_pkey" if kind == "PRIMARY KEY" else f"{table}_market_unique"
+            _ensure_key(db, table, kind, name, cols)
+
+
 def init_db(db: _DB) -> None:
     # Email accounts (2026-10-12). A database that still has the old
     # username-based table keeps it — CREATE IF NOT EXISTS skips — and
@@ -310,6 +433,11 @@ def init_db(db: _DB) -> None:
             updated_at TEXT NOT NULL
         )
     """)
+    # Multi-market (2026-10-15): the traded value is in the market's currency,
+    # so the column no longer names EGP. The rename must run BEFORE the
+    # additive column loop below, or that loop would create an empty
+    # `value_traded` on an old database and leave the rename nowhere to go.
+    _rename_column(db, "pe_data", "value_traded_egp", "value_traded")
     # Additive and idempotent, matching the rest of init_db — there is no
     # migration framework, so new columns land on the next cold start.
     db.execute("ALTER TABLE pe_data ADD COLUMN IF NOT EXISTS loss_making BOOLEAN")
@@ -406,7 +534,7 @@ def init_db(db: _DB) -> None:
             sigma_63_ann_pct DOUBLE PRECISION,
             sigma_ewma_ann_pct DOUBLE PRECISION,
             beta DOUBLE PRECISION,
-            turnover_egp DOUBLE PRECISION,
+            turnover DOUBLE PRECISION,
             traded_share DOUBLE PRECISION,
             last_price DOUBLE PRECISION,
             tradeable BOOLEAN
@@ -416,6 +544,9 @@ def init_db(db: _DB) -> None:
         "CREATE INDEX IF NOT EXISTS idx_risk_snapshot_time "
         "ON risk_snapshot(measured_at DESC)"
     )
+    # Multi-market: turnover is in the market's currency. Before the additive
+    # column loops below, for the same reason as pe_data's rename.
+    _rename_column(db, "risk_snapshot", "turnover_egp", "turnover")
 
     # Twenty years of annual fundamentals, from the *_fy_h history arrays the
     # nightly scanner call already has access to. This is what makes a
@@ -474,7 +605,7 @@ def init_db(db: _DB) -> None:
         ("market_cap", "DOUBLE PRECISION"),
         ("shares_outstanding", "DOUBLE PRECISION"),
         ("beta_1y", "DOUBLE PRECISION"),
-        ("value_traded_egp", "DOUBLE PRECISION"),
+        ("value_traded", "DOUBLE PRECISION"),
         # The last cash coupon per stock, from the nightly scanner. TEXT ISO
         # date so the read path sorts/compares it plainly. Feeds the dashboard
         # "recently paid" sort, /api/dividend_calendar, and the portfolio
@@ -622,6 +753,14 @@ def init_db(db: _DB) -> None:
     db.execute("ALTER TABLE alert_log ADD COLUMN IF NOT EXISTS claimed_at TEXT")
     db.execute("CREATE INDEX IF NOT EXISTS idx_alert_log_status ON alert_log(status)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_alert_log_user_session ON alert_log(user_id, session_date)")
+
+    # Multi-market (2026-10-15). Every symbol-keyed row belongs to a market;
+    # existing rows become EG through the default. The CREATE TABLEs above keep
+    # their old keys on purpose: this rekeys a fresh database exactly as it
+    # rekeys an old one, so there is a single code path. Idempotent like the
+    # rest — see _ensure_key.
+    _add_market_columns(db)
+    db.execute("ALTER TABLE discovered_tickers ADD COLUMN IF NOT EXISTS exchange TEXT")
 
     for key in ("pe_last_successful_fetch", "pe_last_attempt_status"):
         db.execute(

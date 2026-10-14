@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from app.core.cache import get as cache_get, set as cache_set
 from app.core.constants import TICKERS_CACHE_TTL_SECONDS
 from app.core.db import get_db
+from app.core.markets import EG
 
 router = APIRouter()
 
@@ -180,10 +181,10 @@ def _validate_symbol(symbol: str):
             db = get_db()
             db.execute(
                 """INSERT INTO discovered_tickers
-                   (symbol, name, sector, index_name, added_at)
-                   VALUES (%s, %s, 'Unknown', 'EGX', %s)
-                   ON CONFLICT (symbol) DO NOTHING""",
-                (symbol, result["name"], datetime.utcnow().isoformat()),
+                   (market, symbol, name, sector, index_name, added_at)
+                   VALUES (%s, %s, %s, 'Unknown', 'EGX', %s)
+                   ON CONFLICT (market, symbol) DO NOTHING""",
+                (EG.code, symbol, result["name"], datetime.utcnow().isoformat()),
             )
             db.commit()
         except Exception:

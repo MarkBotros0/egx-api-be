@@ -13,6 +13,7 @@ from uuid import uuid4
 from app.core.card_snapshot import CATEGORY_COLUMNS
 from app.core.composite import CATEGORY_ORDER, get_weights_from_db
 from app.core.constants import ALERT_BASELINE_RETENTION_DAYS
+from app.core.markets import EG
 from app.core.score_alerts import SUMMARY_SYMBOL, Subscriber, apply_daily_cap, detect_signals
 
 
@@ -109,12 +110,12 @@ def run_detection(db, scored: dict, macro: Optional[dict], now: str,
 
         for sig, status in apply_daily_cap(signals, sent_today, summary_sent):
             row = db.execute(
-                "INSERT INTO alert_log (id, user_id, symbol, session_date, direction, "
-                "score_before, score_after, status, attempts, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0, %s) "
-                "ON CONFLICT (user_id, symbol, session_date, direction) DO NOTHING "
-                "RETURNING id",
-                (new_id(), sig.user_id, sig.symbol, sig.session_date, sig.direction,
+                "INSERT INTO alert_log (id, user_id, market, symbol, session_date, "
+                "direction, score_before, score_after, status, attempts, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s) "
+                "ON CONFLICT (user_id, market, symbol, session_date, direction) "
+                "DO NOTHING RETURNING id",
+                (new_id(), sig.user_id, EG.code, sig.symbol, sig.session_date, sig.direction,
                  sig.before, sig.after, status, now),
             ).fetchone()
             if row:

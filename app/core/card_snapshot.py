@@ -50,6 +50,7 @@ from typing import Optional
 
 from app.core.composite import CATEGORY_ORDER, blend_categories
 from app.core.constants import FAILURE_DEMOTION_THRESHOLD
+from app.core.markets import EG
 
 # Column name per category, DERIVED from CATEGORY_ORDER rather than typed out.
 # Adding a ninth category then adds its column automatically in `init_db`, the
@@ -229,13 +230,14 @@ def _capture_baseline(db, symbol: str, now: str, session: str) -> None:
     any_scored = " OR ".join(f"{c} IS NOT NULL" for c in CATEGORY_COLUMNS)
     try:
         db.execute(
-            f"INSERT INTO score_baseline (symbol, session_date, {cols}, "
+            f"INSERT INTO score_baseline (market, symbol, session_date, {cols}, "
             "source_bar_date, captured_at) "
-            f"SELECT symbol, %s, {cols}, last_bar_date, %s FROM risk_snapshot "
-            "WHERE symbol = %s AND last_bar_date IS DISTINCT FROM %s "
+            f"SELECT market, symbol, %s, {cols}, last_bar_date, %s FROM risk_snapshot "
+            "WHERE market = %s AND symbol = %s "
+            "AND last_bar_date IS DISTINCT FROM %s "
             f"AND ({any_scored}) "
-            "ON CONFLICT (symbol, session_date) DO NOTHING",
-            (session, now, symbol, session),
+            "ON CONFLICT (market, symbol, session_date) DO NOTHING",
+            (session, now, EG.code, symbol, session),
         )
     except Exception as e:
         print(f"[alerts] baseline capture failed for {symbol}: {e}")
@@ -283,16 +285,16 @@ def upsert_snapshot(db, symbol: str, now: str, stats: Optional[dict],
                       now, card.get("last_bar_date")]
 
     columns = [
-        "symbol", "measured_at", "sigma_63_ann_pct", "sigma_ewma_ann_pct",
-        "beta", "turnover_egp", "traded_share", "last_price", "tradeable",
+        "market", "symbol", "measured_at", "sigma_63_ann_pct", "sigma_ewma_ann_pct",
+        "beta", "turnover", "traded_share", "last_price", "tradeable",
         "above_sma200", "rsi_14", "consecutive_failures",
     ] + card_cols
     values = [
-        symbol, now,
+        EG.code, symbol, now,
         (stats or {}).get("sigma_63_ann_pct"),
         (stats or {}).get("sigma_ewma_ann_pct"),
         (stats or {}).get("beta"),
-        (stats or {}).get("turnover_egp"),
+        (stats or {}).get("turnover"),
         (stats or {}).get("traded_share"),
         (stats or {}).get("last_price"),
         tradeable,
@@ -303,7 +305,7 @@ def upsert_snapshot(db, symbol: str, now: str, stats: Optional[dict],
 
     updates = [
         f"{c} = EXCLUDED.{c}" for c in columns
-        if c not in ("symbol", "consecutive_failures")
+        if c not in ("market", "symbol", "consecutive_failures")
     ]
     updates.append(
         "consecutive_failures = CASE WHEN %s THEN 0 "
@@ -313,6 +315,6 @@ def upsert_snapshot(db, symbol: str, now: str, stats: Optional[dict],
     db.execute(
         f"INSERT INTO risk_snapshot ({', '.join(columns)}) "
         f"VALUES ({', '.join(['%s'] * len(columns))}) "
-        f"ON CONFLICT (symbol) DO UPDATE SET {', '.join(updates)}",
+        f"ON CONFLICT (market, symbol) DO UPDATE SET {', '.join(updates)}",
         tuple(values) + (ok,),
     )

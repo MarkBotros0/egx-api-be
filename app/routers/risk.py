@@ -35,12 +35,12 @@ router = APIRouter()
 def _rows(db) -> list:
     result = db.execute(
         "SELECT symbol, measured_at, sigma_63_ann_pct, sigma_ewma_ann_pct, "
-        "beta, turnover_egp, traded_share, last_price, tradeable "
+        "beta, turnover, traded_share, last_price, tradeable "
         "FROM risk_snapshot"
     ).fetchall()
     return [{
         "symbol": r[0], "measured_at": r[1], "sigma_63_ann_pct": r[2],
-        "sigma_ewma_ann_pct": r[3], "beta": r[4], "turnover_egp": r[5],
+        "sigma_ewma_ann_pct": r[3], "beta": r[4], "turnover": r[5],
         "traded_share": r[6], "last_price": r[7], "tradeable": r[8],
     } for r in result]
 

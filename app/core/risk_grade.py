@@ -265,7 +265,7 @@ def measure(close: pd.Series, volume: pd.Series,
         "sigma_63_ann_pct": round(annualized(trailing), 2),
         "sigma_ewma_ann_pct": round(annualized(ewma), 2) if ewma else None,
         "beta": beta,
-        "turnover_egp": round(float((close * volume).iloc[window].mean()), 2),
+        "turnover": round(float((close * volume).iloc[window].mean()), 2),
         "traded_share": round(float((volume.iloc[window] > 0).mean()), 4),
         "last_price": round(float(close.iloc[-1]), 4),
     }

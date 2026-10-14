@@ -43,6 +43,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
+from app.core.markets import EG
 from app.core.tradingview import scan
 
 # Positional column request; each `d` aligns to this order. The first is the
@@ -222,13 +223,13 @@ def _upsert_batch(db, batch: list, now: str) -> int:
     if not batch:
         return 0
 
-    row_sql = "(" + ", ".join(["%s"] * 11) + ")"
+    row_sql = "(" + ", ".join(["%s"] * 12) + ")"
     values_sql = ", ".join([row_sql] * len(batch))
 
     params: list = []
     for r in batch:
         params.extend([
-            r["symbol"], r["fiscal_year"], r["eps_diluted"], r["dps"],
+            EG.code, r["symbol"], r["fiscal_year"], r["eps_diluted"], r["dps"],
             r["net_income"], r["revenue"], r["total_assets"],
             r["gross_profit"], r["total_debt"], r["first_usable_date"], now,
         ])
@@ -236,11 +237,11 @@ def _upsert_batch(db, batch: list, now: str) -> int:
     db.execute(
         f"""
         INSERT INTO fundamentals_annual
-            (symbol, fiscal_year, eps_diluted, dps, net_income, revenue,
-             total_assets, gross_profit, total_debt, first_usable_date,
-             updated_at)
+            (market, symbol, fiscal_year, eps_diluted, dps, net_income,
+             revenue, total_assets, gross_profit, total_debt,
+             first_usable_date, updated_at)
         VALUES {values_sql}
-        ON CONFLICT (symbol, fiscal_year) DO UPDATE SET
+        ON CONFLICT (market, symbol, fiscal_year) DO UPDATE SET
             eps_diluted       = EXCLUDED.eps_diluted,
             dps               = EXCLUDED.dps,
             net_income        = EXCLUDED.net_income,

@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.core.constants import DIVIDEND_HISTORY_TIMEOUT_SECONDS
+from app.core.markets import EG
 
 # events=div gives dividends; a wide window so we get the whole history. The
 # .CA suffix is Yahoo's code for the Egyptian Exchange.
@@ -161,10 +162,11 @@ def upsert_dividends(db, symbol: str, dividends: list[dict], source: str) -> int
         if not ex_date:
             continue
         cur = db.execute(
-            "INSERT INTO dividend_events (symbol, ex_date, amount, source, created_at) "
-            "VALUES (%s, %s, %s, %s, %s) "
-            "ON CONFLICT (symbol, ex_date) DO NOTHING",
-            (sym, ex_date, d.get("amount"), source, now),
+            "INSERT INTO dividend_events "
+            "(market, symbol, ex_date, amount, source, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (market, symbol, ex_date) DO NOTHING",
+            (EG.code, sym, ex_date, d.get("amount"), source, now),
         )
         # psycopg exposes rowcount; a DO NOTHING that hit the conflict is 0.
         inserted += getattr(cur, "rowcount", 0) or 0

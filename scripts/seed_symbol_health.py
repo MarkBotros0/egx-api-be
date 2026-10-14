@@ -101,6 +101,7 @@ def main() -> int:
         return 0
 
     from app.core.db import get_db, init_db
+    from app.core.markets import EG
     db = get_db()
     init_db(db)          # idempotent; ensures consecutive_failures exists
 
@@ -110,14 +111,14 @@ def main() -> int:
             db.execute(
                 """
                 INSERT INTO risk_snapshot
-                    (symbol, measured_at, tradeable, consecutive_failures)
-                VALUES (%s, %s, FALSE, %s)
-                ON CONFLICT (symbol) DO UPDATE SET
+                    (market, symbol, measured_at, tradeable, consecutive_failures)
+                VALUES (%s, %s, %s, FALSE, %s)
+                ON CONFLICT (market, symbol) DO UPDATE SET
                     consecutive_failures = GREATEST(
                         COALESCE(risk_snapshot.consecutive_failures, 0), %s
                     )
                 """,
-                (symbol, EPOCH, FAILURE_DEMOTION_THRESHOLD,
+                (EG.code, symbol, EPOCH, FAILURE_DEMOTION_THRESHOLD,
                  FAILURE_DEMOTION_THRESHOLD),
             )
             written += 1

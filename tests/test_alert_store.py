@@ -55,14 +55,14 @@ def test_upsert_with_a_card_captures_the_baseline_before_writing_the_row():
     assert sqls[1].startswith("INSERT INTO risk_snapshot")
     sql, params = db.log[0]
     cols = ", ".join(CATEGORY_COLUMNS)
-    assert f"(symbol, session_date, {cols}, source_bar_date, captured_at)" in sql
-    assert f"SELECT symbol, %s, {cols}, last_bar_date, %s FROM risk_snapshot" in sql
-    assert "WHERE symbol = %s AND last_bar_date IS DISTINCT FROM %s" in sql
+    assert f"(market, symbol, session_date, {cols}, source_bar_date, captured_at)" in sql
+    assert f"SELECT market, symbol, %s, {cols}, last_bar_date, %s FROM risk_snapshot" in sql
+    assert "WHERE market = %s AND symbol = %s AND last_bar_date IS DISTINCT FROM %s" in sql
     # never guess a baseline from an unscored row
     assert " OR ".join(f"{c} IS NOT NULL" for c in CATEGORY_COLUMNS) in sql
     # first capture wins
-    assert sql.rstrip().endswith("ON CONFLICT (symbol, session_date) DO NOTHING")
-    assert params == ("2026-10-11", "now", "COMI", "2026-10-11")
+    assert sql.rstrip().endswith("ON CONFLICT (market, symbol, session_date) DO NOTHING")
+    assert params == ("2026-10-11", "now", "EG", "COMI", "2026-10-11")
 
 
 def test_upsert_without_a_card_or_a_bar_date_captures_nothing():
@@ -147,9 +147,9 @@ def test_run_detection_queues_a_pending_alert_for_a_qualifying_move():
                       None, "now", new_id=lambda: "id1")
     assert n == 1
     [(sql, params)] = db.statements("INSERT INTO alert_log")
-    assert "ON CONFLICT (user_id, symbol, session_date, direction) DO NOTHING" in sql
-    assert params[:5] == ("id1", "u1", "COMI", "2026-10-11", "up")
-    assert params[7] == "pending"
+    assert "ON CONFLICT (user_id, market, symbol, session_date, direction) DO NOTHING" in sql
+    assert params[:6] == ("id1", "u1", "EG", "COMI", "2026-10-11", "up")
+    assert params[8] == "pending"
 
 
 def test_run_detection_without_a_baseline_queues_nothing():
@@ -211,7 +211,7 @@ def test_run_detection_scopes_dedup_to_each_symbols_own_session():
         "FWRY": {"session_date": "2026-10-07", "categories": _cats(30.0)},
     }
     assert run_detection(db, scored, None, "now", new_id=lambda: "i") == 2
-    inserts = {(p[2], p[3], p[4]) for _, p in db.statements("INSERT INTO alert_log")}
+    inserts = {(p[3], p[4], p[5]) for _, p in db.statements("INSERT INTO alert_log")}
     assert inserts == {("COMI", "2026-10-11", "up"), ("FWRY", "2026-10-07", "down")}
 
 
@@ -230,5 +230,5 @@ def test_run_detection_applies_the_daily_cap_with_a_summary():
                       None, "now", new_id=lambda: "i")
     assert n == 2
     rows = [p for _, p in db.statements("INSERT INTO alert_log")]
-    assert any(p[2] == "*" and p[4] == "summary" and p[7] == "pending" for p in rows)
-    assert any(p[2] == "COMI" and p[4] == "up" and p[7] == "suppressed" for p in rows)
+    assert any(p[3] == "*" and p[5] == "summary" and p[8] == "pending" for p in rows)
+    assert any(p[3] == "COMI" and p[5] == "up" and p[8] == "suppressed" for p in rows)
