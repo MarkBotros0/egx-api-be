@@ -13,6 +13,7 @@ All scraping is wrapped in try/except — returns partial/null data, never crash
 
 from datetime import datetime, timedelta
 
+from app.core.markets import EG
 from app.core.constants import (
     DEFAULT_RISK_FREE_RATE_PCT,
     MACRO_CACHE_TTL_SECONDS,
@@ -89,7 +90,7 @@ def _fetch_egx30():
     """Fetch EGX30 index data via egxpy."""
     try:
         from app.vendor.egxpy import get_OHLCV_data
-        df = get_OHLCV_data("EGX30", "EGX", "Daily", 30)
+        df = get_OHLCV_data(EG.benchmark_symbol, EG.benchmark_exchange, "Daily", 30)
         if df is None or df.empty:
             return {"value": None, "change_pct": None, "direction": None}
         df.columns = [c.lower() for c in df.columns]

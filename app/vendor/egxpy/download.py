@@ -79,7 +79,8 @@ def _get_close_price_data(symbol,exchange,interval,n_bars):
 
 
 
-def get_EGXdata(stock_list:list, interval:str, start:date, end:date):
+def get_EGXdata(stock_list:list, interval:str, start:date, end:date,
+                exchange:str="EGX", holiday_country:str="EG"):
     """Fetches Historical close prices data for EGX stocks
 
 
@@ -93,14 +94,14 @@ def get_EGXdata(stock_list:list, interval:str, start:date, end:date):
         _type_: _description_
     """
 
-    n = holidays.country_holidays('EG').get_working_days_count(start,end)
+    n = holidays.country_holidays(holiday_country).get_working_days_count(start,end)
 
 
 
     close_prices_dic = {}
     try:
         for stock in stock_list:
-            close = _get_close_price_data(symbol=stock,exchange='EGX',interval=interval,n_bars=n)
+            close = _get_close_price_data(symbol=stock,exchange=exchange,interval=interval,n_bars=n)
             close_prices_dic[stock]=close
     except:
         pass
@@ -112,7 +113,8 @@ def get_EGXdata(stock_list:list, interval:str, start:date, end:date):
     return df.loc[start:end,:]
 
 
-def get_EGX_intraday_data(stock_list:list, interval:str, start:date, end:date):
+def get_EGX_intraday_data(stock_list:list, interval:str, start:date, end:date,
+                          exchange:str="EGX"):
     """Fetches intraday data for EGX stocks
 
     Args:
@@ -132,7 +134,7 @@ def get_EGX_intraday_data(stock_list:list, interval:str, start:date, end:date):
     close_prices_dic = {}
     try:
         for stock in stock_list:
-            close = _get_intraday_close_price_data(symbol=stock,exchange='EGX',interval=interval,n_bars=n)
+            close = _get_intraday_close_price_data(symbol=stock,exchange=exchange,interval=interval,n_bars=n)
             close_prices_dic[stock]=close
     except:
         pass

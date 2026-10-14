@@ -51,6 +51,7 @@ from typing import Optional
 from fastapi import APIRouter, Header, HTTPException, Query
 
 from app.core.alert_store import prune_baselines, run_detection
+from app.core.benchmark import get_benchmark_close
 from app.core.cache import get as cache_get, make_key, set as cache_set
 from app.core.markets import EG
 from app.core.card_snapshot import SPARKLINE_BARS, upsert_snapshot
@@ -264,21 +265,7 @@ def _universe() -> list:
 
 def _benchmark_close():
     """EGX30 closes for beta, through the shared cache key every path uses."""
-    try:
-        from app.vendor.egxpy import get_OHLCV_data
-        ck = make_key(EG.code, "benchmark", "Daily", INTERNAL_BARS_MIN)
-        df = cache_get(ck)
-        if df is None:
-            raw = get_OHLCV_data("EGX30", "EGX", "Daily", INTERNAL_BARS_MIN)
-            if raw is not None and not raw.empty:
-                raw.columns = [c.lower() for c in raw.columns]
-                cache_set(ck, raw)
-                df = raw
-        if df is not None and "close" in df.columns:
-            return df["close"]
-    except Exception:
-        pass
-    return None
+    return get_benchmark_close(EG, "Daily", INTERNAL_BARS_MIN)
 
 
 @router.post("/api/cron/risk_snapshot")

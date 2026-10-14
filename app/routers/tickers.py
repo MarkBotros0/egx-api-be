@@ -15,6 +15,7 @@ from app.core.cache import get as cache_get, set as cache_set
 from app.core.constants import TICKERS_CACHE_TTL_SECONDS
 from app.core.db import get_db
 from app.core.markets import EG
+from app.core.tradingview import _exchange_filter
 
 router = APIRouter()
 
@@ -51,7 +52,7 @@ def _fetch_live_tickers():
         import urllib.request
         body = json.dumps({
             "columns": ["name", "description", "sector", "type"],
-            "filter": [{"left": "exchange", "operation": "equal", "right": "EGX"}],
+            "filter": [_exchange_filter(EG)],
             "range": [0, 500],
         }).encode("utf-8")
         req = urllib.request.Request(_TV_SCAN_URL, data=body, headers=_TV_HEADERS)

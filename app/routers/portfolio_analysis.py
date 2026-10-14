@@ -185,6 +185,7 @@ def _analyze(holdings, user_id: str = None):
         raise HTTPException(status_code=400, detail="No holdings provided")
 
     from app.vendor.egxpy import get_OHLCV_data
+    from app.core.benchmark import get_benchmark_close
     from app.core.cache import get as cache_get, set as cache_set, make_key
     from app.core.markets import EG
     import pandas as pd
@@ -225,23 +226,14 @@ def _analyze(holdings, user_id: str = None):
 
     egx30_returns = None
     egx30_close = None
-    egx30_df = None
     try:
         # Same window and cache key as /api/analysis so beta and relative
         # strength are computed against an identical benchmark series on
         # every page. A shorter window here gave the same stock a different
         # beta on the portfolio page than on its detail page.
-        egx30_cache_key = make_key(EG.code, "benchmark", "Daily", INTERNAL_BARS_MIN)
-        egx30_df = cache_get(egx30_cache_key)
-        if egx30_df is None:
-            egx30_raw = get_OHLCV_data("EGX30", "EGX", "Daily", INTERNAL_BARS_MIN)
-            if egx30_raw is not None and not egx30_raw.empty:
-                egx30_raw.columns = [c.lower() for c in egx30_raw.columns]
-                cache_set(egx30_cache_key, egx30_raw)
-                egx30_df = egx30_raw
-        if egx30_df is not None:
-            egx30_returns = calc_daily_returns(egx30_df["close"])
-            egx30_close = egx30_df["close"]
+        egx30_close = get_benchmark_close(EG, "Daily", INTERNAL_BARS_MIN)
+        if egx30_close is not None:
+            egx30_returns = calc_daily_returns(egx30_close)
     except Exception:
         pass
 

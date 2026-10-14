@@ -13,6 +13,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.auth import CurrentUser, get_current_user
+from app.core.benchmark import get_benchmark_close
 from app.core.cache import get, set, make_key
 from app.core.markets import EG
 from app.core.constants import (
@@ -75,21 +76,7 @@ def _get_egx30_close(exchange: str, interval: str, bars: int):
     The cache key is shared with the portfolio endpoint so every page scores
     against the identical benchmark series.
     """
-    try:
-        from app.vendor.egxpy import get_OHLCV_data
-        ck = make_key(EG.code, "benchmark", interval, bars)
-        egx30_df = get(ck)
-        if egx30_df is None:
-            raw = get_OHLCV_data("EGX30", "EGX", interval, bars)
-            if raw is not None and not raw.empty:
-                raw.columns = [c.lower() for c in raw.columns]
-                set(ck, raw)
-                egx30_df = raw
-        if egx30_df is not None and "close" in egx30_df.columns:
-            return egx30_df["close"]
-    except Exception:
-        pass
-    return None
+    return get_benchmark_close(EG, interval, bars)
 
 
 router = APIRouter()

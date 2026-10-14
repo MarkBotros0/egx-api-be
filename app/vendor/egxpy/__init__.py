@@ -26,6 +26,9 @@ It is a thin wrapper over `tvDatafeed` (which IS still public and installs
 from git normally). If it needs changing, edit download.py directly and note
 the deviation from v1.1.0 here.
 
+Deviations from v1.1.0:
+  - 2026-10-15: exchange/holiday params on get_EGXdata/get_EGX_intraday_data (multi-market)
+
 Only three functions are used by the app:
   - get_OHLCV_data          (analysis, ohlcv, portfolio_analysis, macro_fetch)
   - get_EGXdata             (compare, historical)

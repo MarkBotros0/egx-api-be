@@ -15,7 +15,10 @@ from __future__ import annotations
 import json
 import urllib.request
 
-SCAN_URL = "https://scanner.tradingview.com/egypt/scan"
+from app.core.markets import EG, MarketConfig
+
+SCAN_URL_TEMPLATE = "https://scanner.tradingview.com/{region}/scan"
+SCAN_URL = SCAN_URL_TEMPLATE.format(region=EG.scanner_region)  # kept for existing importers
 
 HEADERS = {
     "User-Agent": (
@@ -32,10 +35,21 @@ HEADERS = {
 DEFAULT_TIMEOUT_SECONDS = 20
 
 
-def scan(columns: list, timeout: int = DEFAULT_TIMEOUT_SECONDS,
-         limit: int = 500) -> list:
+def scan_url(market: MarketConfig) -> str:
+    return SCAN_URL_TEMPLATE.format(region=market.scanner_region)
+
+
+def _exchange_filter(market: MarketConfig) -> dict:
+    """The one spelling of the scanner's exchange filter (also used by tickers.py)."""
+    if len(market.exchanges) == 1:
+        return {"left": "exchange", "operation": "equal", "right": market.exchanges[0]}
+    return {"left": "exchange", "operation": "in_range", "right": list(market.exchanges)}
+
+
+def scan(columns: list, market: MarketConfig = EG,
+         timeout: int = DEFAULT_TIMEOUT_SECONDS, limit: int = 500) -> list:
     """
-    Request `columns` for every EGX common stock.
+    Request `columns` for every common stock listed on `market`.
 
     Returns the raw `data` array: [{"s": "EGX:COMI", "d": [...]}, ...] with
     `d` positionally aligned to `columns`. Raises on HTTP/JSON error — callers
@@ -43,14 +57,11 @@ def scan(columns: list, timeout: int = DEFAULT_TIMEOUT_SECONDS,
     """
     body = json.dumps({
         "columns": columns,
-        "filter": [
-            {"left": "exchange", "operation": "equal", "right": "EGX"},
-            {"left": "type", "operation": "equal", "right": "stock"},
-        ],
+        "filter": [_exchange_filter(market), {"left": "type", "operation": "equal", "right": "stock"}],
         "range": [0, limit],
     }).encode("utf-8")
 
-    req = urllib.request.Request(SCAN_URL, data=body, headers=HEADERS)
+    req = urllib.request.Request(scan_url(market), data=body, headers=HEADERS)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = json.loads(resp.read())
 
