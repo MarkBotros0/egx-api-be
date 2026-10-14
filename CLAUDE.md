@@ -2390,7 +2390,7 @@ Anything that must sit clear of the bottom nav reads the
 `--bottom-nav-clearance` CSS variable from `globals.css`:
 `calc(env(safe-area-inset-bottom) + 70px)` on mobile, `0px` at `md:`. That is
 the pill's 52px height, the 8px it floats clear of the safe area, and 10px of
-breathing room. Consumers today: the `layout.tsx` footer, the portfolio FAB and
+breathing room. Consumers today: the `layout.tsx` bottom spacer, the portfolio FAB and
 the admin FAB.
 
 **It exists because three hardcoded copies of that number drifted apart.** The
