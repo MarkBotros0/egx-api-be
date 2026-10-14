@@ -5,6 +5,8 @@ GET  /api/settings                   — All settings as key/value map
 PUT  /api/settings                   — Update a single setting {key, value}
 GET  /api/settings?section=weights   — Composite-score weights
 PUT  /api/settings?section=weights   — Update weights (normalized to 100)
+GET  /api/settings?section=market    — The caller's selected market {market}
+PUT  /api/settings?section=market    — Select a market {market}; 400 if unknown/disabled
 """
 
 from typing import Optional, Any
@@ -13,6 +15,7 @@ from pydantic import BaseModel
 
 from app.core.auth import CurrentUser, get_current_user, require_admin
 from app.core.db import get_db
+from app.core.markets import DEFAULT_CODE, enabled_codes, get_market
 from app.core.composite import (
     CATEGORY_ORDER,
     DEFAULT_WEIGHTS,
@@ -33,12 +36,25 @@ class WeightsUpdate(BaseModel):
     weights: dict
 
 
+def read_market_pref(db, user_id: str) -> str:
+    """The caller's selected market; EG when unset or no longer enabled."""
+    row = db.execute(
+        "SELECT value FROM user_settings WHERE user_id = %s AND key = 'market'",
+        (user_id,),
+    ).fetchone()
+    code = (row[0] if row else DEFAULT_CODE).upper()
+    return code if code in enabled_codes() else DEFAULT_CODE
+
+
 @router.get("/api/settings")
 def get_settings(
     section: Optional[str] = Query(None),
     user: CurrentUser = Depends(get_current_user),
 ):
     try:
+        if section == "market":
+            return {"market": read_market_pref(get_db(), user.id)}
+
         if section == "weights":
             db = get_db()
             raw = get_weights_from_db(db, user.id)
@@ -65,6 +81,18 @@ def put_settings(
     user: CurrentUser = Depends(get_current_user),
 ):
     try:
+        if section == "market":
+            market = get_market(body.get("market"))   # 400 on unknown/disabled
+            db = get_db()
+            # A per-user PREFERENCE (what to view), unlike the market facts.
+            db.execute(
+                "INSERT INTO user_settings (user_id, key, value) VALUES (%s, %s, %s) "
+                "ON CONFLICT (user_id, key) DO UPDATE SET value = EXCLUDED.value",
+                (user.id, "market", market.code),
+            )
+            db.commit()
+            return {"market": market.code}
+
         if section == "weights":
             weights_in = body.get("weights")
             if not isinstance(weights_in, dict):

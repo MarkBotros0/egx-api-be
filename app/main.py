@@ -38,6 +38,7 @@ from app.routers import (
     calibration,
     dashboard,
     alerts,
+    markets,
 )
 
 app = FastAPI(
@@ -121,5 +122,6 @@ for router_module in (
     calibration,
     dashboard,
     alerts,
+    markets,
 ):
     app.include_router(router_module.router)

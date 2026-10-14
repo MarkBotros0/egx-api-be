@@ -48,5 +48,10 @@ class FakeDB:
 
         yield _Tx()
 
+    def rows_for(self, needle, rows):
+        """Canned rows for any SQL containing `needle`; added after, so earlier
+        responses still win. With none registered, execute() returns no rows."""
+        self.responses.append((needle, rows))
+
     def statements(self, needle):
         return [(s, p) for s, p in self.log if needle in s]
