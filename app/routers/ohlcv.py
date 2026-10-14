@@ -2,9 +2,11 @@
 GET /api/ohlcv — Fetch OHLCV data for a single stock.
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from app.core.cache import get, set, make_key
-from app.core.markets import EG
+from app.core.markets import MarketConfig, market_param
 
 router = APIRouter()
 
@@ -14,13 +16,16 @@ VALID_INTERVALS = {"daily", "weekly", "monthly"}
 @router.get("/api/ohlcv")
 def get_ohlcv(
     symbol: str = Query(...),
-    exchange: str = Query("EGX"),
+    # An override for a symbol listed off the market's primary exchange (a US
+    # stock on NYSE rather than NASDAQ). Absent means the market's primary.
+    exchange: Optional[str] = Query(None),
     interval: str = Query("Daily"),
     bars: int = Query(100),
+    market: MarketConfig = Depends(market_param),
 ):
     try:
         symbol = symbol.upper()
-        exchange = exchange.upper()
+        exchange = (exchange or market.primary_exchange).upper()
         interval = interval.capitalize()
         bars = min(max(bars, 1), 5000)
 
@@ -30,7 +35,7 @@ def get_ohlcv(
                 detail=f"Invalid interval: {interval}. Use Daily, Weekly, or Monthly.",
             )
 
-        cache_key = make_key(EG.code, "ohlcv", symbol, exchange, interval, bars)
+        cache_key = make_key(market.code, "ohlcv", symbol, exchange, interval, bars)
         cached = get(cache_key)
         if cached:
             return cached
@@ -55,7 +60,8 @@ def get_ohlcv(
                 "volume": int(row.get("volume", 0)),
             })
 
-        result = {"symbol": symbol, "interval": interval, "data": records}
+        result = {"symbol": symbol, "interval": interval, "data": records,
+                  "market": market.code, "currency": market.currency}
         set(cache_key, result)
         return result
 

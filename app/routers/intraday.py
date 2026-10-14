@@ -5,10 +5,10 @@ GET /api/intraday — Fetch intraday price data for EGX stocks.
 from datetime import date, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.cache import get, set, make_key
-from app.core.markets import EG
+from app.core.markets import MarketConfig, market_param
 
 router = APIRouter()
 
@@ -29,6 +29,7 @@ def get_intraday(
     interval: str = Query("5 Minute"),
     start: Optional[str] = Query(None),
     end: Optional[str] = Query(None),
+    market: MarketConfig = Depends(market_param),
 ):
     try:
         syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
@@ -45,20 +46,23 @@ def get_intraday(
         start_date = _parse_date(start or "", today - timedelta(days=5))
         end_date = _parse_date(end or "", today)
 
-        cache_key = make_key(EG.code, "intraday", ",".join(syms), interval, str(start_date), str(end_date))
+        cache_key = make_key(market.code, "intraday", ",".join(syms), interval, str(start_date), str(end_date))
         cached = get(cache_key)
         if cached:
             return cached
 
         from app.vendor.egxpy import get_EGX_intraday_data
 
-        df = get_EGX_intraday_data(syms, interval, start_date, end_date)
+        df = get_EGX_intraday_data(syms, interval, start_date, end_date,
+                                   exchange=market.primary_exchange)
 
         if df is None or df.empty:
             raise HTTPException(status_code=404, detail="No intraday data found")
 
         result = {
             "symbols": syms,
+            "market": market.code,
+            "currency": market.currency,
             "dates": [str(idx) for idx in df.index],
         }
         for sym in syms:

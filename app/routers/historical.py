@@ -5,10 +5,10 @@ GET /api/historical — Fetch historical close prices for multiple EGX stocks.
 from datetime import date, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.cache import get, set, make_key
-from app.core.markets import EG
+from app.core.markets import MarketConfig, market_param
 from app.core.constants import (
     HISTORICAL_DEFAULT_LOOKBACK_DAYS,
     HISTORICAL_MAX_SYMBOLS,
@@ -31,6 +31,7 @@ def get_historical(
     interval: str = Query("Daily"),
     start: Optional[str] = Query(None),
     end: Optional[str] = Query(None),
+    market: MarketConfig = Depends(market_param),
 ):
     try:
         syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
@@ -44,14 +45,16 @@ def get_historical(
         start_date = _parse_date(start or "", today - timedelta(days=HISTORICAL_DEFAULT_LOOKBACK_DAYS))
         end_date = _parse_date(end or "", today)
 
-        cache_key = make_key(EG.code, "historical", ",".join(syms), interval, str(start_date), str(end_date))
+        cache_key = make_key(market.code, "historical", ",".join(syms), interval, str(start_date), str(end_date))
         cached = get(cache_key)
         if cached:
             return cached
 
         from app.vendor.egxpy import get_EGXdata
 
-        df = get_EGXdata(syms, interval, start_date, end_date)
+        df = get_EGXdata(syms, interval, start_date, end_date,
+                         exchange=market.primary_exchange,
+                         holiday_country=market.holiday_country)
 
         if df is None or df.empty:
             raise HTTPException(
@@ -61,6 +64,8 @@ def get_historical(
 
         result = {
             "symbols": syms,
+            "market": market.code,
+            "currency": market.currency,
             "dates": [str(idx)[:10] for idx in df.index],
         }
         for sym in syms:
