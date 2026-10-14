@@ -19,10 +19,10 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.cache import get as cache_get, make_key, set as cache_set
-from app.core.markets import EG
+from app.core.markets import EG, MarketConfig, market_param
 from app.core.db import get_db
 from app.core.breadth import compute_breadth, describe as describe_breadth
 from app.core.regime import classify_regime
@@ -52,28 +52,29 @@ def _regime_universe() -> list:
         return []
 
 
-def _store_reading(reading: dict) -> None:
+def _store_reading(reading: dict, market_code: str = EG.code) -> None:
     """Append the reading so a history builds and a cold cache has a fallback."""
     try:
         db = get_db()
         db.execute(
-            "INSERT INTO market_regime (observed_at, mean_score, n_symbols, band) "
-            "VALUES (%s, %s, %s, %s)",
-            (datetime.now(timezone.utc).isoformat(), reading["mean_score"],
-             reading["n_symbols"], reading["band"]),
+            "INSERT INTO market_regime (market, observed_at, mean_score, n_symbols, band) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (market_code, datetime.now(timezone.utc).isoformat(),
+             reading["mean_score"], reading["n_symbols"], reading["band"]),
         )
         db.commit()
     except Exception:
         pass
 
 
-def _last_stored_reading() -> Optional[dict]:
+def _last_stored_reading(market_code: str = EG.code) -> Optional[dict]:
     """Most recent stored reading, re-classified so wording stays in one place."""
     try:
         db = get_db()
         row = db.execute(
             "SELECT observed_at, mean_score, n_symbols, band FROM market_regime "
-            "ORDER BY observed_at DESC LIMIT 1"
+            "WHERE market = %s ORDER BY observed_at DESC LIMIT 1",
+            (market_code,),
         ).fetchone()
     except Exception:
         return None
@@ -84,12 +85,14 @@ def _last_stored_reading() -> Optional[dict]:
     return reading
 
 
-def _breadth() -> dict:
+def _breadth(market_code: str = EG.code) -> dict:
     """Aggregate the snapshot's stored flags. Never fetches; never raises."""
     try:
         db = get_db()
         rows = db.execute(
-            "SELECT tradeable, above_sma200, rsi_14 FROM risk_snapshot"
+            "SELECT tradeable, above_sma200, rsi_14 FROM risk_snapshot "
+            "WHERE market = %s",
+            (market_code,),
         ).fetchall()
     except Exception:
         return {"enough_data": False, "n_symbols": 0}
@@ -103,23 +106,32 @@ def _breadth() -> dict:
 
 
 @router.get("/api/market_regime")
-def get_market_regime(interval: str = "Daily"):
+def get_market_regime(interval: str = "Daily",
+                      market: MarketConfig = Depends(market_param)):
+    stamp = {"market": market.code, "currency": market.currency}
+    if market.code != EG.code:
+        # The bands were calibrated on EGX30 + EGX70 and the universe comes from
+        # the EGX ticker file. A US universe (and its own calibration) arrives
+        # in a later sub-project; until then, say there is no reading rather
+        # than average EGX symbols under a US label.
+        return {**stamp, "band": None, "stale": True, "n_symbols": 0}
     try:
         universe = _regime_universe()
         if not universe:
             raise HTTPException(status_code=500, detail="No regime universe available")
 
         interval = interval.capitalize()
-        ck = make_key(EG.code, "regime", interval, len(universe))
+        ck = make_key(market.code, "regime", interval, len(universe))
         hit = cache_get(ck)
         if hit is not None:
             return hit
 
-        cached = read_cached_scores(universe, interval)
+        cached = read_cached_scores(universe, interval, market)
         scores = [float(v["score"]) for v in cached.values()]
         mean_score = sum(scores) / len(scores) if scores else None
 
         reading = classify_regime(mean_score, len(scores))
+        reading.update(stamp)
         reading["universe_size"] = len(universe)
         reading["interval"] = interval
         reading["stale"] = False
@@ -133,17 +145,18 @@ def get_market_regime(interval: str = "Daily"):
         # It is NOT a second forecast. Its strongest leg reaches t=-2.44, below
         # this project's |t| > 3.0 bar, so it ships with the same weak-evidence
         # framing and carries its own numbers so the UI cannot invent a claim.
-        reading["breadth"] = _breadth()
+        reading["breadth"] = _breadth(market.code)
 
         if reading.get("band") is not None:
             cache_set(ck, reading)
-            _store_reading(reading)
+            _store_reading(reading, market.code)
             return reading
 
         # Coverage too thin right now. A reading from earlier today is still
         # informative; silence is not.
-        previous = _last_stored_reading()
+        previous = _last_stored_reading(market.code)
         if previous is not None:
+            previous.update(stamp)
             previous["stale"] = True
             previous["n_symbols_now"] = len(scores)
             previous["universe_size"] = len(universe)
