@@ -453,24 +453,24 @@ def test_tickers_refuse_unknown_market(client, tickers_db):
     assert tickers_db.log == []
 
 
-def test_tickers_us_uses_the_us_scanner_and_no_egx_file(client, tickers_db, monkeypatch):
-    import urllib.request
+def test_tickers_us_comes_from_the_universe_and_not_the_egx_file(client, tickers_db, monkeypatch):
+    from app.core import universe
     monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
-    bodies = []
+    seen = []
 
-    def fake(req, timeout=None):
-        bodies.append((req.full_url, json.loads(req.data)))
-        return _FakeResponse({"data": [
-            {"s": "NASDAQ:AAPL", "d": ["AAPL", "Apple", "Tech", "stock"]},
-            {"s": "NYSE:IBM", "d": ["IBM", "IBM", "Tech", "stock"]},
-        ]})
+    def fake_universe(db, market):
+        seen.append(market.code)
+        return [
+            {"symbol": "AAPL", "name": "Apple", "sector": "Tech", "exchange": "NASDAQ",
+             "kind": "stock", "indices": []},
+            {"symbol": "IBM", "name": "IBM", "sector": "Tech", "exchange": "NYSE",
+             "kind": "stock", "indices": []},
+        ]
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    monkeypatch.setattr(universe, "load_universe", fake_universe)
     r = client.get("/api/tickers", params={"market": "US"})
     assert r.status_code == 200, r.text
-    url, body = bodies[0]
-    assert url == "https://scanner.tradingview.com/america/scan"
-    assert body["filter"][0]["right"] == list(US.exchanges)
+    assert seen == ["US"]
     assert {t["symbol"]: t["index"] for t in r.json()} == {"AAPL": "NASDAQ", "IBM": "NYSE"}
     _, params = tickers_db.statements("FROM discovered_tickers")[0]
     assert params == ("US",)
@@ -478,44 +478,43 @@ def test_tickers_us_uses_the_us_scanner_and_no_egx_file(client, tickers_db, monk
 
 def test_ticker_cache_is_per_market(client, tickers_db, monkeypatch):
     import urllib.request
+    from app.core import universe
     monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
     calls = []
+    loads = []
 
     def fake(req, timeout=None):
         calls.append(req.full_url)
         return _FakeResponse({"data": []})
 
+    def fake_universe(db, market):
+        loads.append(market.code)
+        return [{"symbol": "AAPL", "name": "Apple", "sector": "Tech", "exchange": "NASDAQ",
+                 "kind": "stock", "indices": []}]
+
     monkeypatch.setattr(urllib.request, "urlopen", fake)
+    monkeypatch.setattr(universe, "load_universe", fake_universe)
     client.get("/api/tickers")
     client.get("/api/tickers")
     client.get("/api/tickers", params={"market": "US"})
-    assert calls == ["https://scanner.tradingview.com/egypt/scan",
-                     "https://scanner.tradingview.com/america/scan"]
+    client.get("/api/tickers", params={"market": "US"})
+    assert calls == ["https://scanner.tradingview.com/egypt/scan"]
+    assert loads == ["US"]
 
 
-def test_validate_searches_the_market_exchanges_and_stores_the_exchange(
+def test_validate_looks_the_symbol_up_and_stores_the_exchange(
         client, tickers_db, monkeypatch):
-    import urllib.request
+    from app.core import universe
     monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
-    urls = []
-
-    def fake(req, timeout=None):
-        urls.append(req.full_url)
-        if "symbol-search" in req.full_url and "exchange=NYSE" in req.full_url:
-            return _FakeResponse([{"symbol": "IBM", "description": "IBM Corp",
-                                   "exchange": "NYSE"}])
-        if "symbol-search" in req.full_url:
-            return _FakeResponse([])
-        return _FakeResponse({"data": []})
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    monkeypatch.setattr(universe, "load_universe", lambda db, m: [])
+    monkeypatch.setattr(universe, "lookup_listing", lambda m, s: {
+        "symbol": "IBM", "name": "IBM Corp", "sector": "Tech", "exchange": "NYSE",
+        "kind": "stock"})
     r = client.get("/api/tickers", params={"market": "US", "validate": "ibm"})
     assert r.json() == {"symbol": "IBM", "valid": True, "name": "IBM Corp"}
-    searched = [u for u in urls if "symbol-search" in u]
-    assert "exchange=NASDAQ" in searched[0] and "exchange=NYSE" in searched[1]
     [(sql, params)] = tickers_db.statements("INSERT INTO discovered_tickers")
     assert "exchange" in sql and "ON CONFLICT (market, symbol)" in sql
-    assert params[:2] == ("US", "IBM") and params[4] == "NYSE"
+    assert params[:2] == ("US", "IBM") and params[5] == "NYSE"
 
 
 # ---------------------------------------------------------------------------

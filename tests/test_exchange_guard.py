@@ -6,12 +6,10 @@ Only the market registry and the resolver may name `primary_exchange`.
 import pathlib
 import re
 
-import pytest
 
 ALLOWED = {"app/core/markets.py", "app/core/universe.py"}
 
 
-@pytest.mark.xfail(strict=True, reason="tickers.py migrates in Task 4")
 def test_primary_exchange_only_in_registry_and_resolver():
     root = pathlib.Path(__file__).resolve().parents[1]
     offenders = []
