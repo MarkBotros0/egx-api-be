@@ -39,6 +39,68 @@ user management*.
 `GoogleSignInButton`). `FE_BASE_URL` no longer exists anywhere: the address the
 emailed links point at is the FIRST entry of the backend's `FRONTEND_ORIGIN`.
 
+## Markets (EG today, US coming)
+
+The app shows one market at a time. Every per-market fact — currency, timezone,
+trading days and hours, holiday calendar, TradingView exchanges and scanner
+region, benchmark, risk-free fallback, liquidity floors, the ISIN filter — lives
+in `app/core/markets.py` (`MarketConfig`, registry `MARKETS`) and NOWHERE else.
+Add a fact there, not as a literal.
+
+- `?market=EG|US` on every market-data route, resolved by the `market_param`
+  dependency. **Absent means EG**, so old clients are unaffected. Unknown or
+  not-enabled codes are 400. Watchlist, portfolio and dividend POST bodies take
+  an optional `market` that beats the query one; a sale takes its holding's.
+- `ENABLED_MARKETS` (default `EG`) gates which codes the API accepts. US is fully
+  wired but refused until sub-project 2 enables it. `GET /api/markets`
+  (signed-in only) lists the enabled markets with their display fields.
+- Selected market = per-user PREFERENCE in `user_settings` (key `market`), via
+  `GET/PUT /api/settings?section=market` (PUT is 400 for an unknown/disabled
+  code; GET falls back to EG). The market's FACTS are never per-user.
+- Schema: symbol-keyed tables carry `market TEXT NOT NULL DEFAULT 'EG'` and
+  composite keys `(market, symbol, …)`; per-user tables carry `market` and
+  filter on it. Existing rows are `EG`. `init_db` rekeys through
+  `db._ensure_key` / `db._rename_column` (idempotent, re-checked under the
+  table lock). Renamed: `risk_snapshot.turnover_egp` → `turnover`,
+  `pe_data.value_traded_egp` → `value_traded`; `discovered_tickers` gained
+  `exchange`.
+- `cache.make_key(market_code, …)` refuses a missing or unknown market code
+  (ValueError); `tests/test_cache_keys.py` also walks the AST and fails on any
+  call site whose first argument is a literal.
+- The benchmark is fetched only through `core/benchmark.get_benchmark_close`.
+  The scanner goes through `core/tradingview.scan(columns, market=EG)` /
+  `scan_url(market)`.
+- `cron.is_isin` is gone: `MarketConfig.is_valid_symbol` (still LENGTH-based —
+  EGSA is a real ticker). `LIQUID_MIN_*_EGP` are gone: `MarketConfig.liquid_min_turnover`
+  / `liquid_min_price` (None = not calibrated for that market).
+- Response shapes that changed: `/api/risk` returns `turnover` and
+  `liquidity_floor` (was `liquidity_floor_egp`); `/api/news` names the market
+  code `market_code`, because its `market` field is the EGX30 story list;
+  portfolio/sales `currency` comes from the market, not `settings.currency`;
+  `/api/watchlist` returns `{symbols, market}`.
+- Clients: shared `lib/markets.ts` (`isMarketOpen`, `EG_FALLBACK`), `lib/money.ts`
+  (`formatMoney`, `formatPrice`), and `setApiMarket` / `withMarket` in
+  `lib/api.ts`, which append `market=` to every data request.
+  `fetchAnalysis` / `fetchRisk` / `fetchDividendHistory` / `fetchPEFeedStatus`
+  take a per-call `{ market }` override. Mobile's `MarketProvider`
+  (`src/providers/market.tsx`) owns the choice; the header `MarketChip`, its
+  `MarketSheet` and the account screen's `MarketRow` (`src/features/shell`) are
+  hidden while the preference loads and when fewer than two markets are
+  enabled. A deep link `stock/[symbol]?market=XX` reads that market's data
+  without switching the app (no watch star on another market's stock).
+- Still EGX-only (later sub-projects): scoring calibration (P/E and yield bands,
+  z-cone, regime, breadth), macro, Arab Finance news, Learn content, the web
+  changer. Spec: `docs/superpowers/specs/2026-10-15-multi-market-foundation-design.md`.
+
+**Deploying the market migration.** Deploy the backend in ONE step, not as a
+rolling mix: once the new code has migrated the keys, an old instance's
+`ON CONFLICT (symbol)` writes fail. The first cold start briefly takes ACCESS
+EXCLUSIVE locks on the 8 small rekeyed tables (`watchlist`,
+`discovered_tickers`, `pe_data`, `risk_snapshot`, `dividend_events`,
+`fundamentals_annual`, `score_baseline`, `alert_log`) to rebuild their keys.
+Rollout order: Neon snapshot → backend with `ENABLED_MARKETS=EG` → web →
+mobile build.
+
 ## Directory Layout
 
 The repo is split into two top-level directories — **`egx-api-be/`** (Python backend) and **`egx-api-fe/`** (Next.js frontend). CLAUDE.md previously described a flat `api/` layout; that is obsolete.
@@ -1218,7 +1280,7 @@ failed invite email can be retried) · `POST /{id}/send-reset` · `PATCH
 
 ### GET /api/watchlist, POST, DELETE
 User's watched symbols, stored in the `watchlist` table in Turso.
-- GET returns `{ symbols: string[] }` ordered by `added_at`
+- GET `?market=` returns `{ symbols: string[], market }` ordered by `added_at`; every route is scoped by market (absent = EG)
 - POST body `{ "symbol": "..." }` — idempotent (INSERT OR IGNORE)
 - DELETE `?symbol=XXX`
 
@@ -1487,8 +1549,10 @@ MEAN while the MEDIAN is clearly worse. It answers "how much will this move and
 how deep a hole should I expect", never "will it go up".
 `tests/test_risk_grade.py::test_risk_grade_makes_no_return_claim` greps for it.
 
-**Ranking happens at READ time**, over the TRADEABLE subset only (>1M EGP/day
-turnover, traded on ≥80% of the last 60 sessions, price >0.5 EGP). An
+**Ranking happens at READ time**, over the TRADEABLE subset only (for EG: >1M EGP/day
+turnover, traded on ≥80% of the last 60 sessions, price >0.5 EGP — the floors are
+`MarketConfig.liquid_min_turnover` / `liquid_min_price`, and the response reports
+the turnover floor as `liquidity_floor`, in the market's currency). An
 untradeable symbol is returned with its raw sigma and a **null band** rather
 than a rank it has not earned. `oldest_measurement` is reported, not the
 newest — a snapshot is only as current as its stalest row.
@@ -1586,7 +1650,8 @@ Design rules, all load-bearing:
   return 400 bars in ~1.4s; only the refusals cost ~6s. So the budget problem
   was never throughput, it was the dead half consuming all of it.
 
-`select_stalest()`, `plan_chunk()` and `is_isin()` are pure, so the selection
+`select_stalest()`, `plan_chunk()` and `MarketConfig.is_valid_symbol()` (formerly
+`cron.is_isin()`, still matched on length) are pure, so the selection
 logic a scheduler depends on is testable without Postgres — tests/ has no DB
 fixture by design.
 
@@ -2563,13 +2628,14 @@ auth_tokens (token_hash PK, user_id, purpose 'verify'|'reset'|'invite',
                  -- the link is used. Listed in USER_OWNED_TABLES.
 user_settings (user_id, key, value, PRIMARY KEY (user_id, key))
                  -- Per-user overrides of the `settings` keys that are a
-                 -- PREFERENCE rather than a fact — today only weight_*.
+                 -- PREFERENCE rather than a fact — weight_* and `market`
+                 -- (the selected market; see *Markets*).
                  -- A separate table, not a user_id column on `settings`:
                  -- changing that PK is not idempotent in Postgres, and keeping
                  -- `settings` as the global tier makes the migration free.
-portfolio (id, symbol, name, buy_price, buy_date, quantity, notes, sector,
-           target_price, stop_loss, created_at, updated_at)
-portfolio_sales (id, user_id, holding_id, symbol, name, sector, quantity,
+portfolio (id, user_id, market, symbol, name, buy_price, buy_date, quantity, notes,
+           sector, target_price, stop_loss, created_at, updated_at)
+portfolio_sales (id, user_id, market, holding_id, symbol, name, sector, quantity,
                  buy_price, buy_date, sell_price, sell_date, notes, created_at,
                  sale_group_id)
                  -- Cost basis is SNAPSHOTTED, not joined: a sale is a
@@ -2583,29 +2649,32 @@ portfolio_sales (id, user_id, holding_id, symbol, name, sector, quantity,
                  -- portfolio.quantity = 0 means fully sold; the row is kept
                  -- as the undo anchor and filtered out of every read by
                  -- core/holdings.fetch_open_holdings.
-portfolio_dividends (id, user_id, symbol, name, sector, amount, pay_date,
+portfolio_dividends (id, user_id, market, symbol, name, sector, amount, pay_date,
                      shares, notes, created_at)
                  -- Cash the company paid for holding it. Anchored to the
                  -- SYMBOL, deliberately with NO holding_id: a dividend
                  -- restores nothing on undo, so the column would buy no
                  -- behaviour and would cost correctness — deleting a holding
                  -- would destroy the record of money genuinely received.
-                 -- amount   -> total EGP that ACTUALLY LANDED, already net of
+                 -- amount   -> total cash (market currency; EGP for EG) that ACTUALLY LANDED, already net of
                  --             the 5-10% withholding tax. Never gross.
                  -- shares   -> optional, display only. amount is never
                  --             derived from it.
                  -- An exact symbol+pay_date+amount repeat is rejected 409.
-settings  (key, value)   -- pre-seeded: currency, risk_free_rate,
+settings  (key, value)   -- pre-seeded: currency (legacy; portfolio/sales now
+                         --             take the market's), risk_free_rate,
                          --             weight_trend, weight_momentum, weight_volume,
                          --             weight_volatility, weight_divergence,
                          --             weight_quality, weight_risk_adjusted,
                          --             weight_relative_strength,
                          --             pe_last_successful_fetch, pe_last_attempt_status
-watchlist (symbol, added_at)                                     -- user's watched tickers
+watchlist (user_id, market, symbol, added_at,
+           PRIMARY KEY (user_id, market, symbol))            -- user's watched tickers, per market
 macro_data (key, value, previous_value, change_pct, updated_at)  -- 1-hour cache
-pe_data    (symbol PK, company_name, pe_ratio, dividend_yield, loss_making,
-            market_cap, shares_outstanding, beta_1y, value_traded_egp,
-            dividend_ex_date_recent, dividend_amount_recent, updated_at)
+pe_data    (market, symbol, company_name, pe_ratio, dividend_yield, loss_making,
+            market_cap, shares_outstanding, beta_1y, value_traded,
+            dividend_ex_date_recent, dividend_amount_recent, updated_at,
+            PRIMARY KEY (market, symbol))
                          -- Nightly refresh from the TradingView scanner via
                          -- core/pe_fetch.py. `symbol` is the exact ticker from
                          -- the feed — no name matching involved.
@@ -2621,8 +2690,8 @@ pe_data    (symbol PK, company_name, pe_ratio, dividend_yield, loss_making,
 ```
 
 ```sql
-dividend_events (symbol, ex_date, amount, source, created_at,
-                 PRIMARY KEY (symbol, ex_date))
+dividend_events (market, symbol, ex_date, amount, source, created_at,
+                 PRIMARY KEY (market, symbol, ex_date))
                  -- Persisted dividend history, append-only and idempotent by PK.
                  -- Seeded deep from Yahoo (scripts/backfill_dividends), grown
                  -- forward nightly by refresh_pe_data appending the scanner's
@@ -2637,23 +2706,25 @@ push_devices (token PK, user_id, platform, created_at, last_seen)
 alert_preferences (user_id PK, enabled, scope, rise_threshold, fall_threshold, updated_at)
              -- scope 'watchlist' (watchlist + holdings) | 'all'; thresholds are
              -- points on the 0-100 score: 5|10|15|20, NULL = that direction off.
-score_baseline (symbol, session_date, <8 category columns>, source_bar_date,
-                captured_at, PRIMARY KEY (symbol, session_date))
+score_baseline (market, symbol, session_date, <8 category columns>, source_bar_date,
+                captured_at, PRIMARY KEY (market, symbol, session_date))
              -- Category scores at the PREVIOUS session's close, captured just
              -- before the first rescore of a new session overwrites them.
              -- Pruned after ALERT_BASELINE_RETENTION_DAYS (10).
-alert_log (id PK, user_id, symbol, session_date, direction, score_before,
+alert_log (id PK, user_id, market, symbol, session_date, direction, score_before,
            score_after, status, attempts, created_at, sent_at,
-           UNIQUE (user_id, symbol, session_date, direction))
+           UNIQUE (user_id, market, symbol, session_date, direction))
              -- status pending|sent|failed|suppressed|expired. symbol '*' /
              -- direction 'summary' is the daily-cap summary. The UNIQUE is the
              -- duplicate guard of last resort for overlapping cron calls.
 ```
 
 ```sql
-market_regime (id, observed_at, mean_score, n_symbols, band)
-risk_snapshot (symbol PK, measured_at, sigma_63_ann_pct, sigma_ewma_ann_pct,
-               beta, turnover_egp, traded_share, last_price, tradeable)
+market_regime (id, market, observed_at, mean_score, n_symbols, band)
+risk_snapshot (market, symbol, measured_at, sigma_63_ann_pct, sigma_ewma_ann_pct,
+               beta, turnover, traded_share, last_price, tradeable,
+               PRIMARY KEY (market, symbol))
+               -- turnover is in the market's currency (was turnover_egp).
                -- Current-value read model, refreshed in CHUNKS by
                -- POST /api/cron/risk_snapshot and ranked cross-sectionally
                -- at READ time. No run to finalize and no cursor state that
@@ -2716,10 +2787,10 @@ or investment premia** — which is exactly the pattern above.
 ### fundamentals_annual — twenty years, from a call we already make
 
 ```sql
-fundamentals_annual (symbol, fiscal_year, eps_diluted, dps, net_income,
+fundamentals_annual (market, symbol, fiscal_year, eps_diluted, dps, net_income,
                      revenue, total_assets, gross_profit, total_debt,
                      first_usable_date, updated_at,
-                     PRIMARY KEY (symbol, fiscal_year))
+                     PRIMARY KEY (market, symbol, fiscal_year))
 ```
 
 **This is what makes a fundamental factor testable at all.** `scripts/backtest.py`
@@ -2785,7 +2856,7 @@ Two properties of that write are load-bearing:
 ### fundamentals_history — the point-in-time record
 
 ```sql
-fundamentals_history (id, symbol, observed_at, eps_ttm, dps_annual,
+fundamentals_history (id, market, symbol, observed_at, eps_ttm, dps_annual,
                       book_value_per_share, loss_making, close_at_observation)
 ```
 
@@ -2871,7 +2942,7 @@ Synced to Turso via `/api/watchlist` and exposed through `WatchlistProvider` (wr
 - **EGX30 symbol:** use `get_OHLCV_data("EGX30", "EGX", ...)`. Wrap in try/except — some exchanges/intervals may not have it.
 - **SMA 200 needs 200+ bars:** `analysis.py` fetches `max(bars, 400)` internally and trims output
 - **Monte Carlo MUST be vectorized:** `np.random.normal(mu, sigma, (n_sims, n_days))` — never loop
-- **All P&L in EGP.** Egypt's currency is the Egyptian pound.
+- **P&L is in the market's currency** (EGP for EG). Portfolio and sales responses carry `currency` from the market.
 - **EGX trading hours:** Sun–Thu, 10:00 AM – 2:30 PM Cairo time. EGX30 only updates during these hours.
 - **T+2 settlement:** mentioned on Learn page but not enforced in portfolio logic
 - **Auth:** every router scopes its queries by `user.id` from a JWT Bearer token (`app/routers/portfolio.py` and the rest); `app/main.py` calls `seed_users_from_env` to provision the `AUTH_ADMINS` accounts.
