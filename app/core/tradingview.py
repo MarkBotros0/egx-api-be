@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import urllib.request
+from typing import Optional
 
 from app.core.markets import EG, MarketConfig
 
@@ -47,21 +48,37 @@ def _exchange_filter(market: MarketConfig) -> dict:
 
 
 def scan(columns: list, market: MarketConfig = EG,
-         timeout: int = DEFAULT_TIMEOUT_SECONDS, limit: int = 500) -> list:
+         timeout: int = DEFAULT_TIMEOUT_SECONDS, limit: int = 500, *,
+         tickers: Optional[list] = None, symbolset: Optional[str] = None,
+         extra_filter: Optional[list] = None, sort_by: Optional[str] = None) -> list:
     """
-    Request `columns` for every common stock listed on `market`.
+    Request `columns` from the market's scanner.
+
+    Default: every common stock on the market's exchanges (unchanged).
+    `symbolset`: an index's members (e.g. "SYML:SP;SPX"), no filter.
+    `tickers`: exactly these "EXCHANGE:SYMBOL" listings, no filter.
+    `extra_filter`: appended to the exchange filter; widens type to stock+fund
+    (name search must find ETFs). `sort_by`: descending sort column.
 
     Returns the raw `data` array: [{"s": "EGX:COMI", "d": [...]}, ...] with
     `d` positionally aligned to `columns`. Raises on HTTP/JSON error — callers
     own their own failure policy.
     """
-    body = json.dumps({
-        "columns": columns,
-        "filter": [_exchange_filter(market), {"left": "type", "operation": "equal", "right": "stock"}],
-        "range": [0, limit],
-    }).encode("utf-8")
+    body: dict = {"columns": columns, "range": [0, limit]}
+    if tickers is not None:
+        body["symbols"] = {"tickers": list(tickers)}
+    elif symbolset is not None:
+        body["symbols"] = {"symbolset": [symbolset]}
+    else:
+        type_filter = ({"left": "type", "operation": "in_range", "right": ["stock", "fund"]}
+                       if extra_filter else
+                       {"left": "type", "operation": "equal", "right": "stock"})
+        body["filter"] = [_exchange_filter(market), type_filter, *(extra_filter or [])]
+    if sort_by:
+        body["sort"] = {"sortBy": sort_by, "sortOrder": "desc"}
 
-    req = urllib.request.Request(scan_url(market), data=body, headers=HEADERS)
+    req = urllib.request.Request(scan_url(market), data=json.dumps(body).encode("utf-8"),
+                                 headers=HEADERS)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = json.loads(resp.read())
 

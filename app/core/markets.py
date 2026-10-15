@@ -23,6 +23,13 @@ from fastapi import HTTPException, Query
 
 
 @dataclass(frozen=True)
+class IndexDef:
+    id: str
+    label: str
+    symbolset: Optional[str] = None   # TradingView scanner symbolset; None = from data/egx_tickers.json
+
+
+@dataclass(frozen=True)
 class MarketConfig:
     code: str
     name: str
@@ -47,6 +54,9 @@ class MarketConfig:
     # False: /api/markets sends `holidays: []`. The server clock
     # (is_market_open) still uses the calendar either way.
     publish_holidays: bool = True
+    indices: tuple[IndexDef, ...] = ()
+    short_name: str = ""
+    score_calibrated: bool = True
 
     @property
     def primary_exchange(self) -> str:
@@ -82,6 +92,9 @@ EG = MarketConfig(
     # Unverified: the `holidays` library ESTIMATES Islamic dates, and the old
     # client clock ignored holidays. Publish none until Egyptian dates are checked.
     publish_holidays=False,
+    indices=(IndexDef("EGX30", "EGX30"), IndexDef("EGX70", "EGX70"),
+             IndexDef("EGX100", "EGX100"), IndexDef("NILEX", "NILEX")),
+    short_name="EGX",
 )
 
 US = MarketConfig(
@@ -91,9 +104,13 @@ US = MarketConfig(
     holiday_country="NYSE", holiday_kind="financial",
     exchanges=("NASDAQ", "NYSE", "AMEX"), scanner_region="america",
     benchmark_symbol="SPX", benchmark_exchange="SP", benchmark_label="S&P 500",
-    # Calibrated in sub-project 3; None means "no US rate yet".
-    risk_free_fallback_pct=None,
+    # 3-month T-bill fallback; live value from TVC:US03MY.
+    risk_free_fallback_pct=4.0,
     liquid_min_turnover=None, liquid_min_price=None,
+    indices=(IndexDef("SPX", "S&P 500", "SYML:SP;SPX"),
+             IndexDef("NDX", "NASDAQ-100", "SYML:NASDAQ;NDX"),
+             IndexDef("DJI", "Dow 30", "SYML:DJ;DJI")),
+    short_name="US", score_calibrated=False,
 )
 
 MARKETS: dict[str, MarketConfig] = {"EG": EG, "US": US}
@@ -155,5 +172,8 @@ def public_market(market: MarketConfig, today: date) -> dict:
         "open": market.open.strftime("%H:%M"),
         "close": market.close.strftime("%H:%M"),
         "benchmark_label": market.benchmark_label,
+        "short_name": market.short_name,
+        "score_calibrated": market.score_calibrated,
+        "indices": [{"id": i.id, "label": i.label} for i in market.indices],
         "holidays": market_holidays(market, today) if market.publish_holidays else [],
     }

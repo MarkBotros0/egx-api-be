@@ -130,3 +130,34 @@ def test_public_market_publishes_no_eg_holidays_until_verified():
 def test_eg_server_clock_still_uses_the_holiday_calendar():
     # Only the published list is withheld; is_market_open keeps its calendar.
     assert len(m.EG.holidays(2026)) > 0
+
+
+from app.core.markets import EG, US, IndexDef, public_market  # noqa: E402
+
+
+def test_indices_per_market():
+    assert [i.id for i in EG.indices] == ["EGX30", "EGX70", "EGX100", "NILEX"]
+    assert all(i.symbolset is None for i in EG.indices)
+    assert [(i.id, i.label, i.symbolset) for i in US.indices] == [
+        ("SPX", "S&P 500", "SYML:SP;SPX"),
+        ("NDX", "NASDAQ-100", "SYML:NASDAQ;NDX"),
+        ("DJI", "Dow 30", "SYML:DJ;DJI"),
+    ]
+
+
+def test_short_name_and_calibration_flag():
+    assert (EG.short_name, EG.score_calibrated) == ("EGX", True)
+    assert (US.short_name, US.score_calibrated) == ("US", False)
+    assert US.risk_free_fallback_pct == 4.0
+
+
+def test_public_market_exposes_new_fields_only():
+    pm = public_market(US, date(2026, 10, 15))
+    assert pm["short_name"] == "US"
+    assert pm["score_calibrated"] is False
+    assert pm["indices"] == [
+        {"id": "SPX", "label": "S&P 500"},
+        {"id": "NDX", "label": "NASDAQ-100"},
+        {"id": "DJI", "label": "Dow 30"},
+    ]
+    assert "symbolset" not in str(pm)
