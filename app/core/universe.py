@@ -27,6 +27,7 @@ _COLUMNS = ["name", "description", "sector", "type"]
 _KINDS = ("stock", "fund")
 _UNIVERSE_TTL = 3600
 _MISS_TTL = 3600
+WRITE_BATCH = 250      # rows per multi-row INSERT: ~515 single-row writes would risk Vercel's 30s limit
 
 _universe_cache: dict[str, tuple[list, float]] = {}
 _exchange_cache: dict[tuple[str, str], tuple[Optional[str], float]] = {}
@@ -63,7 +64,8 @@ def refresh_universe(db, market: MarketConfig) -> dict:
     rows: dict[str, dict] = {}
     try:
         for idx in sets:
-            for raw in scan(_COLUMNS, market=market, symbolset=idx.symbolset, limit=1000):
+            for raw in scan(_COLUMNS, market=market, symbolset=idx.symbolset, limit=1000,
+                            timeout=8):
                 r = _parse(raw)
                 if r is None:
                     continue
@@ -74,20 +76,28 @@ def refresh_universe(db, market: MarketConfig) -> dict:
         return {"success": False, "count": 0, "error": "no rows returned"}
 
     now = _now_iso()
-    with db.transaction() as tx:
-        tx.execute("UPDATE market_universe SET indices = '{}' WHERE market = %s", (market.code,))
-        for r in rows.values():
-            tx.execute(
-                """INSERT INTO market_universe
-                   (market, symbol, name, sector, exchange, kind, indices, updated_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                   ON CONFLICT (market, symbol) DO UPDATE SET
-                     name = EXCLUDED.name, sector = EXCLUDED.sector,
-                     exchange = EXCLUDED.exchange, kind = EXCLUDED.kind,
-                     indices = EXCLUDED.indices, updated_at = EXCLUDED.updated_at""",
-                (market.code, r["symbol"], r["name"], r["sector"], r["exchange"],
-                 r["kind"], r["indices"], now),
-            )
+    values = list(rows.values())
+    try:
+        with db.transaction() as tx:
+            tx.execute("UPDATE market_universe SET indices = '{}' WHERE market = %s", (market.code,))
+            for start in range(0, len(values), WRITE_BATCH):
+                batch = values[start:start + WRITE_BATCH]
+                params: list = []
+                for r in batch:
+                    params += [market.code, r["symbol"], r["name"], r["sector"], r["exchange"],
+                               r["kind"], r["indices"], now]
+                tx.execute(
+                    """INSERT INTO market_universe
+                       (market, symbol, name, sector, exchange, kind, indices, updated_at)
+                       VALUES """ + ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(batch)) + """
+                       ON CONFLICT (market, symbol) DO UPDATE SET
+                         name = EXCLUDED.name, sector = EXCLUDED.sector,
+                         exchange = EXCLUDED.exchange, kind = EXCLUDED.kind,
+                         indices = EXCLUDED.indices, updated_at = EXCLUDED.updated_at""",
+                    tuple(params),
+                )
+    except Exception as e:
+        return {"success": False, "count": 0, "error": f"{type(e).__name__}: {e}"}
     _universe_cache.pop(market.code, None)
     for r in rows.values():
         _exchange_cache[(market.code, r["symbol"])] = (r["exchange"], time.time())

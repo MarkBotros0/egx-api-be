@@ -39,7 +39,9 @@ def test_refresh_builds_membership_sets(monkeypatch):
     out = U.refresh_universe(db, US)
     assert out == {"success": True, "count": 3, "error": None}
     ups = db.statements("INSERT INTO market_universe")
-    by_sym = {p[1]: p for _, p in ups}
+    assert len(ups) == 1
+    flat = ups[0][1]
+    by_sym = {flat[i + 1]: flat[i:i + 8] for i in range(0, len(flat), 8)}
     assert set(by_sym) == {"KO", "AAPL", "BRK.B"}
     assert sorted(by_sym["AAPL"][6]) == ["DJI", "NDX", "SPX"]
     assert by_sym["BRK.B"][4] == "NYSE"
@@ -140,3 +142,28 @@ def test_search_symbols_merges_exact_and_name(monkeypatch):
     assert calls[1][1] == [{"left": "description", "operation": "match", "right": "ko"}]
     assert calls[1][2] == "market_cap_basic"
     assert U.search_symbols(US, "  ") == []
+
+def test_refresh_is_written_in_batches_not_one_row_at_a_time(monkeypatch):
+    big = [{"s": f"NYSE:S{i:03d}", "d": [f"S{i:03d}", "n", "x", "stock"]} for i in range(515)]
+    def scan(columns, market=EG, timeout=20, limit=500, *, tickers=None, symbolset=None,
+             extra_filter=None, sort_by=None):
+        return big if symbolset == "SYML:SP;SPX" else []
+    monkeypatch.setattr(U, "scan", scan)
+    db = FakeDB()
+    assert U.refresh_universe(db, US)["count"] == 515
+    assert len(db.statements("UPDATE market_universe")) == 1
+    ins = db.statements("INSERT INTO market_universe")
+    assert [len(p) // 8 for _, p in ins] == [250, 250, 15]
+
+def test_refresh_db_error_returns_failure_and_skips_exchange_cache(monkeypatch):
+    monkeypatch.setattr(U, "scan", _fake_scan())
+    db = FakeDB()
+    from contextlib import contextmanager
+    @contextmanager
+    def boom():
+        raise RuntimeError("db down")
+        yield
+    db.transaction = boom
+    out = U.refresh_universe(db, US)
+    assert out["success"] is False and out["count"] == 0 and out["error"] == "RuntimeError: db down"
+    assert U._exchange_cache == {}
