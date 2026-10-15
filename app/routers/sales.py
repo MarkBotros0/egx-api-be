@@ -22,7 +22,7 @@ DELETE acts on rows by id, which already carry their market.
 """
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -116,7 +116,7 @@ def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
             today=date.today(),
         )
 
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         notes = body.get("notes", "")
         # One submit, one order id, however many lots it reaches into. The
         # ledger groups on this, so it is stamped even on a single-lot sale —
@@ -258,7 +258,7 @@ def delete_sale(id: str = Query(...), user: CurrentUser = Depends(get_current_us
             if not rows:
                 raise HTTPException(status_code=404, detail=f"Sale not found: {id}")
 
-            now = datetime.utcnow().isoformat() + "Z"
+            now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
             restored = []
             for row_id, holding_id, quantity in rows:
                 # If the user hard-deleted the holding, there is nothing to

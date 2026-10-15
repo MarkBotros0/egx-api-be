@@ -18,7 +18,7 @@ row by id, which already carries its market.
 """
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -66,7 +66,7 @@ def record_dividend(body: dict,
                 ),
             )
 
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         dividend_id = str(uuid.uuid4())
         name = body.get("name") or clean["symbol"]
         sector = body.get("sector") or ""

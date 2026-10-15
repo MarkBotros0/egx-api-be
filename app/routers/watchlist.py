@@ -9,7 +9,7 @@ Every route is scoped by the caller's user_id (from the JWT Bearer token) and
 by market (absent means EG). A body `market` beats the query one.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -54,7 +54,7 @@ def add_to_watchlist(
         if not symbol:
             raise HTTPException(status_code=400, detail="Missing required field: symbol")
 
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         db = get_db()
         db.execute(
             "INSERT INTO watchlist (user_id, market, symbol, added_at) "

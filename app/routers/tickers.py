@@ -195,7 +195,7 @@ def _validate_symbol(symbol: str, market: MarketConfig):
 
     if result["valid"] is True:
         try:
-            from datetime import datetime
+            from datetime import datetime, timezone
             db = get_db()
             # index_name keeps its 'EGX' default meaning only for EG rows; other
             # markets have no index tiers yet, so it stays NULL there.
@@ -206,7 +206,7 @@ def _validate_symbol(symbol: str, market: MarketConfig):
                    ON CONFLICT (market, symbol) DO NOTHING""",
                 (market.code, symbol, result["name"],
                  "EGX" if market.code == "EG" else None,
-                 exchange, datetime.utcnow().isoformat()),
+                 exchange, datetime.now(timezone.utc).replace(tzinfo=None).isoformat()),
             )
             db.commit()
         except Exception:

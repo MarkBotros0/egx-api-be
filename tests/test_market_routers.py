@@ -31,6 +31,11 @@ ME = CurrentUser(id="u1", email="sara@example.com", role="user")
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(auth_mod, "_load_user", lambda uid: ME)
+    # app.core.auth snapshots AUTH_SECRET at first import, and whichever test
+    # module imports it first decides it for the whole run — often a short
+    # 24-byte secret that makes PyJWT warn on every token. A 32+ byte secret
+    # here keeps this module's ~50 mint/decode calls silent.
+    monkeypatch.setattr(auth_mod, "AUTH_SECRET", "test-secret-for-market-routers-0123456789")
     monkeypatch.delenv("ENABLED_MARKETS", raising=False)
     cache._store.clear()
     c = TestClient(app)
@@ -584,7 +589,11 @@ def news_env(monkeypatch):
 def test_news_defaults_to_eg(client, news_env):
     r = client.get("/api/news")
     assert r.status_code == 200, r.text
-    assert r.json()["market"] == "EG" and r.json()["currency"] == "EGP"
+    body = r.json()
+    # `market` is the market-news STORY LIST the web and mobile pages read;
+    # the market code must not overwrite it.
+    assert isinstance(body["market"], list)
+    assert body["market_code"] == "EG" and body["currency"] == "EGP"
     assert any(u.endswith("symbol=EGX%3ACOMI") for u in news_env.urls)
     assert len(news_env.urls) > 1, "the EGX30 market half was not fetched"
     assert news_env.af_calls == [1]

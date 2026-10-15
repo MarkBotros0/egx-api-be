@@ -12,7 +12,7 @@ on a row by id, which already carries its market, so they take none.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -56,7 +56,7 @@ def add_holding(body: dict,
         if quantity is None:
             raise HTTPException(status_code=400, detail="Missing required field: quantity")
 
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         holding_id = str(uuid.uuid4())
         name = body.get("name", symbol)
         buy_date = body.get("buy_date", now[:10])
@@ -132,7 +132,7 @@ def update_holding(
                 set_clauses.append(f"{key} = %s")
                 values.append(val)
 
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         set_clauses.append("updated_at = %s")
         values.append(now)
         values.extend([id, user.id])

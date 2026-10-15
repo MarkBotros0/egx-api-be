@@ -83,7 +83,8 @@ def get_news(user: CurrentUser = Depends(get_current_user),
 
     feed = build_feed(fetched, yours=yours, now=now, dropped=dropped, extra=af_stories,
                       exchanges=market.exchanges)
-    feed["market"] = market.code
+    # "market" is already the market-news story list; the code goes beside it.
+    feed["market_code"] = market.code
     feed["currency"] = market.currency
     feed["fetched_at"] = now.isoformat().replace("+00:00", "Z")
     feed["status"] = feed_status(fetched, requested, extra_count=len(af_stories))
