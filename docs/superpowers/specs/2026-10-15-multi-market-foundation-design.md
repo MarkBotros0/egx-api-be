@@ -136,7 +136,7 @@ There is one frozen `MarketConfig` per market:
 ### Shared `lib/` (source of truth is `egx-api-fe/src/app/lib`, copied by `sync:shared`)
 
 - **New `markets.ts`:** the `MarketCode` and `Market` types, `EG_FALLBACK` (mirroring the registry's EG display fields), and `isMarketOpen(market, now)`, which is timezone-aware through `Intl`.
-- **New `format.ts`:** `formatMoney(value, currency, opts?)` and `formatPrice(value, currency)`, both using `Intl.NumberFormat`. Add both new files to `SHARED_FILES` in `egx-api-mobile/scripts/sync-shared.mjs`.
+- **New `money.ts`:** `formatMoney(value, currency, opts?)` and `formatPrice(value, currency)`, both using `Intl.NumberFormat`. Add both new files to `SHARED_FILES` in `egx-api-mobile/scripts/sync-shared.mjs`.
 - **`api.ts`:**
   - Module-level `setApiMarket(code)` and `getApiMarket()`. `fetchJSON` appends `market=<code>` to every request URL, except `/auth/*`, `/markets` and `/settings`.
   - New `fetchMarkets()`.
