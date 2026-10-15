@@ -1,8 +1,8 @@
 """
 AccountStore against a REAL Postgres. Skipped unless TEST_DATABASE_URL is set.
 
-    docker run -d --rm --name egx-auth-pg -e POSTGRES_PASSWORD=pw -p 55432:5432 postgres:16
-    TEST_DATABASE_URL=postgresql://postgres:pw@localhost:55432/postgres \
+    docker run -d --rm --name egx-auth-pg -e POSTGRES_PASSWORD=pw -p 55433:5432 postgres:16
+    TEST_DATABASE_URL=postgresql://postgres:pw@localhost:55433/postgres \
         python -m pytest tests/test_accounts_pg.py -v
     docker stop egx-auth-pg
 
