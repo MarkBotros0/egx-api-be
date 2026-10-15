@@ -187,6 +187,16 @@ def resolve_exchange(db, market: MarketConfig, symbol: str) -> Optional[str]:
     return found["exchange"]
 
 
+
+def exchange_map(db, market: MarketConfig, symbols: list) -> dict:
+    """{SYMBOL: exchange} for the symbols that resolve; the rest are dropped."""
+    out = {}
+    for s in symbols:
+        ex = resolve_exchange(db, market, s)
+        if ex:
+            out[s.upper()] = ex
+    return out
+
 def search_symbols(market: MarketConfig, q: str, limit: int = 20) -> list:
     """Exact ticker first, then name matches by market cap. Raises on scanner error."""
     q = (q or "").strip()

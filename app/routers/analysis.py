@@ -12,6 +12,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core import universe
 from app.core.auth import CurrentUser, get_current_user
 from app.core.benchmark import get_benchmark_close
 from app.core.cache import get, set, make_key
@@ -80,7 +81,8 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict,
                        dividend_yield: Optional[float] = None,
                        loss_making: Optional[bool] = None,
                        index_membership: Optional[str] = None,
-                       market: MarketConfig = EG) -> tuple:
+                       market: MarketConfig = EG,
+                       db=None) -> tuple:
     """
     Score one symbol for the dashboard grid.
 
@@ -92,7 +94,11 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict,
     try:
         from app.vendor.egxpy import get_OHLCV_data
 
-        df = get_OHLCV_data(symbol, market.primary_exchange, interval, INTERNAL_BARS_MIN)
+        exchange = universe.resolve_exchange(db, market, symbol)
+        if not exchange:
+            return symbol, {"error": "unknown symbol"}, None
+
+        df = get_OHLCV_data(symbol, exchange, interval, INTERNAL_BARS_MIN)
         if df is None or df.empty:
             return symbol, {"error": "no data"}, None
 
@@ -373,7 +379,7 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None,
                 f = pool.submit(_compute_batch_one, s, interval, weights, macro,
                                 egx30_close, risk_free_rate_pct, pe_ratio,
                                 dividend_yield, loss_making,
-                                get_index_membership(s), market)
+                                get_index_membership(s), market, db)
                 # Stragglers that finish AFTER we've returned still self-cache
                 # via this callback — a frontend retry a few seconds later hits
                 # a warm cache and fills in the '--' cards.
@@ -437,8 +443,8 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None,
 @router.get("/api/analysis")
 def get_analysis(
     symbol: Optional[str] = Query(None),
-    # Override for a symbol off the market's primary exchange; absent means
-    # the market's primary.
+    # An explicit exchange beats the lookup; absent, the symbol's own listing
+    # exchange is resolved.
     exchange: Optional[str] = Query(None),
     interval: str = Query("Daily"),
     bars: int = Query(200),
@@ -463,11 +469,14 @@ def get_analysis(
             raise HTTPException(status_code=400, detail="Missing required parameter: symbol")
 
         symbol = symbol.upper()
-        exchange = (exchange or market.primary_exchange).upper()
         interval = interval.capitalize()
         bars = min(max(bars, USER_BARS_MIN), USER_BARS_MAX)
 
         db = get_db()
+        exchange = (exchange.upper() if exchange
+                    else universe.resolve_exchange(db, market, symbol))
+        if not exchange:
+            raise HTTPException(status_code=404, detail=f"Unknown symbol: {symbol}")
         weights = get_weights_from_db(db, user_id)
         w_hash = weights_hash(weights)
 

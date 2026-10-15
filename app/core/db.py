@@ -831,3 +831,13 @@ def get_db():
         init_db(db)
         _initialized = True
     return db
+
+
+def get_db_or_none():
+    """`get_db()`, or None when the DB is unreachable — for callers that can
+    still answer without it (e.g. `universe.resolve_exchange` falls through to
+    the scanner)."""
+    try:
+        return get_db()
+    except Exception:
+        return None

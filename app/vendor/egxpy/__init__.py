@@ -28,6 +28,8 @@ the deviation from v1.1.0 here.
 
 Deviations from v1.1.0:
   - 2026-10-15: exchange/holiday params on get_EGXdata/get_EGX_intraday_data (multi-market)
+  - 2026-10-15: their `exchange` may also be a {symbol: exchange} map (US
+    symbols are split across NASDAQ/NYSE/AMEX)
 
 Only three functions are used by the app:
   - get_OHLCV_data          (analysis, ohlcv, portfolio_analysis, macro_fetch)

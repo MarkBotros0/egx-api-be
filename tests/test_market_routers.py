@@ -44,6 +44,25 @@ def client(monkeypatch):
     cache._store.clear()
 
 
+@pytest.fixture(autouse=True)
+def us_listings(monkeypatch):
+    """Where each symbol trades, without the scanner or Postgres.
+
+    Every symbol fetch asks `universe.resolve_exchange`; for a non-EG market
+    that would read the DB and then call the scanner. Neither may happen in a
+    test, so the resolver answers from this table (EG is always EGX) and the
+    DB the routers open for it is a FakeDB.
+    """
+    from app.core import db as db_mod
+    from app.core import universe
+    table = {"AAPL": "NASDAQ", "IBM": "NYSE"}
+    monkeypatch.setattr(universe, "resolve_exchange",
+                        lambda db, market, symbol: "EGX" if market.code == "EG"
+                        else table.get(symbol.upper()))
+    monkeypatch.setattr(db_mod, "get_db", lambda: FakeDB())
+    return table
+
+
 def _frame(n: int) -> pd.DataFrame:
     rng = np.random.default_rng(7)
     close = 20 * np.exp(np.cumsum(rng.normal(0, 0.01, n)))
@@ -175,7 +194,7 @@ def test_historical_us_asks_the_us_exchange(client, fake_multi, monkeypatch):
     monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
     r = client.get("/api/historical", params={"symbols": "AAPL", "market": "US"})
     assert r.status_code == 200
-    assert fake_multi[0][1] == US.primary_exchange
+    assert fake_multi[0][1] == {"AAPL": "NASDAQ"}, "a per-symbol exchange map"
     assert r.json()["currency"] == "USD"
 
 

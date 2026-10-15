@@ -8,12 +8,11 @@ not a snapshot table and why it cannot be done in the browser.
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
 
-from app.core import cache
+from app.core import cache, universe
 from app.core.markets import MarketConfig, market_param
 from app.core.arabfinance import fetch_stories as fetch_arabfinance
 from app.core.auth import CurrentUser, get_current_user
@@ -48,6 +47,7 @@ def get_news(user: CurrentUser = Depends(get_current_user),
     except Exception:
         # The feed is worth showing even when the DB is unhappy — the market
         # half needs no user data at all.
+        db = None
         holdings, watch = [], []
 
     # The market half fans out over the EGX30 for EG. Other markets have no
@@ -69,7 +69,13 @@ def get_news(user: CurrentUser = Depends(get_current_user),
         return hit
 
     requested = yours + market_half
-    fetcher = partial(fetch_symbol_news, exchange=market.primary_exchange)
+
+    def fetcher(symbol: str) -> list:
+        # Each symbol's news is keyed by its own listing exchange; one the
+        # resolver cannot place falls back to the market's first exchange.
+        exchange = universe.resolve_exchange(db, market, symbol) or market.exchanges[0]
+        return fetch_symbol_news(symbol, exchange=exchange)
+
     # The two sources run side by side under the same deadline, so adding
     # Arab Finance costs no wall-clock time. Either one failing leaves the
     # other's stories standing. Arab Finance is Egyptian press: EG only.

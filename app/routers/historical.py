@@ -7,8 +7,10 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core import universe
 from app.core.cache import get, set, make_key
-from app.core.markets import MarketConfig, market_param
+from app.core.db import get_db_or_none
+from app.core.markets import EG, MarketConfig, market_param
 from app.core.constants import (
     HISTORICAL_DEFAULT_LOOKBACK_DAYS,
     HISTORICAL_MAX_SYMBOLS,
@@ -45,6 +47,15 @@ def get_historical(
         start_date = _parse_date(start or "", today - timedelta(days=HISTORICAL_DEFAULT_LOOKBACK_DAYS))
         end_date = _parse_date(end or "", today)
 
+        # Each symbol on its own listing exchange; unresolved ones are dropped.
+        # EG resolves without a DB, and keeps passing the plain "EGX" string.
+        db = None if market.code == EG.code else get_db_or_none()
+        ex_map = universe.exchange_map(db, market, syms)
+        if not ex_map:
+            raise HTTPException(status_code=404, detail=f"Unknown symbol: {','.join(syms)}")
+        syms = [s for s in syms if s in ex_map]
+        exchange = market.exchanges[0] if market.code == EG.code else ex_map
+
         cache_key = make_key(market.code, "historical", ",".join(syms), interval, str(start_date), str(end_date))
         cached = get(cache_key)
         if cached:
@@ -53,7 +64,7 @@ def get_historical(
         from app.vendor.egxpy import get_EGXdata
 
         df = get_EGXdata(syms, interval, start_date, end_date,
-                         exchange=market.primary_exchange,
+                         exchange=exchange,
                          holiday_country=market.holiday_country)
 
         if df is None or df.empty:

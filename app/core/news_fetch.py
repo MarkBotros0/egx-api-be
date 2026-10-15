@@ -207,13 +207,13 @@ def _get_json(url: str, timeout: float):
         return json.loads(resp.read())
 
 
-def news_url(symbol: str, exchange: str = EG.primary_exchange) -> str:
+def news_url(symbol: str, exchange: str = EG.exchanges[0]) -> str:
     return NEWS_URL.format(exchange=exchange, symbol=symbol.upper())
 
 
 def fetch_symbol_news(
     symbol: str, timeout: float = NEWS_REQUEST_TIMEOUT_SECONDS,
-    exchange: str = EG.primary_exchange,
+    exchange: str = EG.exchanges[0],
 ) -> list[dict]:
     """One GET for one symbol. Returns the raw `items` array. Raises on error."""
     payload = _get_json(news_url(symbol, exchange), timeout)

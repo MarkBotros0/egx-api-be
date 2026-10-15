@@ -5,8 +5,10 @@ GET /api/ohlcv — Fetch OHLCV data for a single stock.
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from app.core import universe
 from app.core.cache import get, set, make_key
-from app.core.markets import MarketConfig, market_param
+from app.core.db import get_db_or_none
+from app.core.markets import EG, MarketConfig, market_param
 
 router = APIRouter()
 
@@ -16,8 +18,8 @@ VALID_INTERVALS = {"daily", "weekly", "monthly"}
 @router.get("/api/ohlcv")
 def get_ohlcv(
     symbol: str = Query(...),
-    # An override for a symbol listed off the market's primary exchange (a US
-    # stock on NYSE rather than NASDAQ). Absent means the market's primary.
+    # An explicit exchange beats the lookup. Absent, the symbol's own listing
+    # exchange is resolved (a US stock may be on NYSE, NASDAQ or AMEX).
     exchange: Optional[str] = Query(None),
     interval: str = Query("Daily"),
     bars: int = Query(100),
@@ -25,7 +27,6 @@ def get_ohlcv(
 ):
     try:
         symbol = symbol.upper()
-        exchange = (exchange or market.primary_exchange).upper()
         interval = interval.capitalize()
         bars = min(max(bars, 1), 5000)
 
@@ -34,6 +35,15 @@ def get_ohlcv(
                 status_code=400,
                 detail=f"Invalid interval: {interval}. Use Daily, Weekly, or Monthly.",
             )
+
+        if exchange:
+            exchange = exchange.upper()
+        else:
+            # EG resolves without a DB; never open one for it.
+            db = None if market.code == EG.code else get_db_or_none()
+            exchange = universe.resolve_exchange(db, market, symbol)
+        if not exchange:
+            raise HTTPException(status_code=404, detail=f"Unknown symbol: {symbol}")
 
         cache_key = make_key(market.code, "ohlcv", symbol, exchange, interval, bars)
         cached = get(cache_key)

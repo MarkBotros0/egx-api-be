@@ -50,6 +50,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
+from app.core import universe as universe_mod
 from app.core.alert_store import prune_baselines, run_detection
 from app.core.benchmark import get_benchmark_close
 from app.core.cache import get as cache_get, make_key, set as cache_set
@@ -413,8 +414,10 @@ def risk_snapshot(
             timed_out = True
             break
         try:
-            df = get_OHLCV_data(symbol, market.primary_exchange, "Daily",
-                                INTERNAL_BARS_MIN)
+            # An unresolved symbol counts as failed, like a refused fetch.
+            exchange = universe_mod.resolve_exchange(db, market, symbol)
+            df = (get_OHLCV_data(symbol, exchange, "Daily", INTERNAL_BARS_MIN)
+                  if exchange else None)
         except Exception:
             df = None
 

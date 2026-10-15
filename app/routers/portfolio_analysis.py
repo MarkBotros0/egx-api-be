@@ -15,6 +15,7 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.core import universe
 from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
 from app.core.dividends import fetch_dividend_totals
@@ -264,6 +265,13 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
 
     composite_scores_collected = []
 
+    # Each holding is fetched from its own listing exchange. EG resolves
+    # without a DB; elsewhere the resolver still answers without one (scanner).
+    try:
+        exchange_db = None if market.code == EG.code else get_db()
+    except Exception:
+        exchange_db = None
+
     for h in holdings:
         symbol = h.get("symbol", "").upper()
         buy_price = float(h.get("buy_price", 0))
@@ -283,7 +291,10 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
             # SMA200 with a single valid point, so golden/death crosses could
             # never be detected for a recently-bought holding, and made beta
             # depend on how long the user had owned the stock.
-            df = get_OHLCV_data(symbol, market.primary_exchange, "Daily", INTERNAL_BARS_MIN)
+            exchange = universe.resolve_exchange(exchange_db, market, symbol)
+            # An unresolved symbol takes the same error row as a failed fetch.
+            df = (get_OHLCV_data(symbol, exchange, "Daily", INTERNAL_BARS_MIN)
+                  if exchange else None)
             if df is None or df.empty:
                 # `id` travels with the error row on purpose: the spec promises
                 # a sale can be recorded even when the price feed is down, and

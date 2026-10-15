@@ -80,7 +80,7 @@ def _get_close_price_data(symbol,exchange,interval,n_bars):
 
 
 def get_EGXdata(stock_list:list, interval:str, start:date, end:date,
-                exchange:str="EGX", holiday_country:str="EG"):
+                exchange="EGX", holiday_country:str="EG"):
     """Fetches Historical close prices data for EGX stocks
 
 
@@ -89,6 +89,8 @@ def get_EGXdata(stock_list:list, interval:str, start:date, end:date,
         interval (str): ['Daily', 'Weekly','Monthly']
         start (date): starting date
         end (date): end date
+        exchange (str | dict): one exchange for every stock, or a
+            {symbol: exchange} map (a symbol missing from it falls back to "EGX")
 
     Returns:
         _type_: _description_
@@ -101,7 +103,8 @@ def get_EGXdata(stock_list:list, interval:str, start:date, end:date,
     close_prices_dic = {}
     try:
         for stock in stock_list:
-            close = _get_close_price_data(symbol=stock,exchange=exchange,interval=interval,n_bars=n)
+            ex = exchange.get(stock, "EGX") if isinstance(exchange, dict) else exchange
+            close = _get_close_price_data(symbol=stock,exchange=ex,interval=interval,n_bars=n)
             close_prices_dic[stock]=close
     except:
         pass
@@ -114,7 +117,7 @@ def get_EGXdata(stock_list:list, interval:str, start:date, end:date,
 
 
 def get_EGX_intraday_data(stock_list:list, interval:str, start:date, end:date,
-                          exchange:str="EGX"):
+                          exchange="EGX"):
     """Fetches intraday data for EGX stocks
 
     Args:
@@ -122,6 +125,8 @@ def get_EGX_intraday_data(stock_list:list, interval:str, start:date, end:date,
         interval (str): ['1 Minute', '5 Minute','30 Minute']
         start (date): starting date
         end (date): end date
+        exchange (str | dict): one exchange for every stock, or a
+            {symbol: exchange} map (a symbol missing from it falls back to "EGX")
 
     Returns:
         pd.DataFrame: close prices
@@ -134,7 +139,8 @@ def get_EGX_intraday_data(stock_list:list, interval:str, start:date, end:date,
     close_prices_dic = {}
     try:
         for stock in stock_list:
-            close = _get_intraday_close_price_data(symbol=stock,exchange=exchange,interval=interval,n_bars=n)
+            ex = exchange.get(stock, "EGX") if isinstance(exchange, dict) else exchange
+            close = _get_intraday_close_price_data(symbol=stock,exchange=ex,interval=interval,n_bars=n)
             close_prices_dic[stock]=close
     except:
         pass
