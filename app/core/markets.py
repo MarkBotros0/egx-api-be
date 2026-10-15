@@ -44,6 +44,9 @@ class MarketConfig:
     liquid_min_turnover: Optional[float]
     liquid_min_price: Optional[float]
     isin_prefix: Optional[str] = None
+    # False: /api/markets sends `holidays: []`. The server clock
+    # (is_market_open) still uses the calendar either way.
+    publish_holidays: bool = True
 
     @property
     def primary_exchange(self) -> str:
@@ -76,6 +79,9 @@ EG = MarketConfig(
     risk_free_fallback_pct=19,
     liquid_min_turnover=1_000_000, liquid_min_price=0.5,
     isin_prefix="EG",
+    # Unverified: the `holidays` library ESTIMATES Islamic dates, and the old
+    # client clock ignored holidays. Publish none until Egyptian dates are checked.
+    publish_holidays=False,
 )
 
 US = MarketConfig(
@@ -102,6 +108,8 @@ def enabled_codes() -> tuple[str, ...]:
 
 
 def get_market(code: Optional[str]) -> MarketConfig:
+    if code is not None and not isinstance(code, str):
+        raise HTTPException(status_code=400, detail=f"Unknown market: {code!r}")
     c = (code or DEFAULT_CODE).strip().upper()
     if c not in MARKETS:
         raise HTTPException(status_code=400, detail=f"Unknown market: {code}")
@@ -147,5 +155,5 @@ def public_market(market: MarketConfig, today: date) -> dict:
         "open": market.open.strftime("%H:%M"),
         "close": market.close.strftime("%H:%M"),
         "benchmark_label": market.benchmark_label,
-        "holidays": market_holidays(market, today),
+        "holidays": market_holidays(market, today) if market.publish_holidays else [],
     }

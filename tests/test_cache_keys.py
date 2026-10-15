@@ -17,11 +17,15 @@ def test_unknown_market_is_refused():
 
 def test_no_call_site_passes_a_literal_first_argument():
     """A literal first arg ('ohlcv', 'EG') means the market was hardcoded or forgotten."""
+    app_dir = pathlib.Path(__file__).resolve().parent.parent / "app"
     bad = []
-    for path in pathlib.Path("app").rglob("*.py"):
+    scanned = 0
+    for path in app_dir.rglob("*.py"):
+        scanned += 1
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and getattr(node.func, "attr", getattr(node.func, "id", None)) == "make_key":
                 if node.args and isinstance(node.args[0], ast.Constant):
                     bad.append(f"{path}:{node.lineno}")
+    assert scanned > 0, f"no .py files found under {app_dir}"
     assert bad == []

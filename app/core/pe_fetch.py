@@ -251,7 +251,9 @@ def refresh_pe_data(db, market: MarketConfig = EG,
         )
         written += 1
 
-    # fundamentals_history carries no market column yet, so only EG feeds it.
+    # fundamentals_history has a `market` column (DEFAULT 'EG'), but its writer
+    # and readers are not market-aware yet: the INSERT omits the column and
+    # _latest_history / the dated readers do not filter on it. So only EG feeds it.
     appended = (_append_fundamentals_history(db, rows, now)
                 if market.code == EG.code else 0)
     dividends_appended = _append_dividend_events(db, rows, market)

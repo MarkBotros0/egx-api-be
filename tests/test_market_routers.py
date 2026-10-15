@@ -1029,3 +1029,20 @@ def test_portfolio_analysis_refuses_unknown_market(client, pa_env):
     assert client.get("/api/portfolio_analysis", params={"market": "XX"}).status_code == 400
     assert client.post("/api/portfolio_analysis", params={"market": "XX"},
                        json={"portfolio": []}).status_code == 400
+
+
+@pytest.mark.parametrize("bad", [5, ["US"], {"code": "US"}])
+def test_portfolio_and_dividend_create_refuse_a_non_string_body_market(monkeypatch, bad):
+    from fastapi import HTTPException
+    for mod, fn, body in (
+        (portfolio_mod, portfolio_mod.add_holding,
+         {"symbol": "comi", "buy_price": 10, "quantity": 2, "market": bad}),
+        (dividends_mod, dividends_mod.record_dividend,
+         {"symbol": "comi", "amount": 5, "pay_date": "2026-01-05", "shares": 10,
+          "market": bad}),
+    ):
+        db = _patched_db(monkeypatch, mod)
+        with pytest.raises(HTTPException) as e:
+            fn(body, market=EG, user=ME)
+        assert e.value.status_code == 400, (mod.__name__, bad)
+        assert db.statements("INSERT INTO") == []

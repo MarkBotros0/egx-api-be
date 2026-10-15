@@ -108,3 +108,25 @@ def test_public_market_is_json_ready():
     assert out["trading_days"] == [6, 0, 1, 2, 3]   # Sun..Thu as Python weekday()
     assert out["open"] == "10:00" and out["close"] == "14:30"
     assert isinstance(out["holidays"], list)
+
+
+@pytest.mark.parametrize("code", [5, 1.5, ["EG"], {"c": "EG"}, True])
+def test_get_market_rejects_a_non_string_code_with_400(monkeypatch, code):
+    monkeypatch.delenv("ENABLED_MARKETS", raising=False)
+    with pytest.raises(HTTPException) as e:
+        m.get_market(code)
+    assert e.value.status_code == 400
+
+
+def test_public_market_publishes_no_eg_holidays_until_verified():
+    # The holidays library estimates Islamic dates and the old client clock
+    # ignored holidays, so EG sends none; US keeps its NYSE calendar.
+    assert m.EG.publish_holidays is False
+    assert m.public_market(m.EG, date(2026, 10, 15))["holidays"] == []
+    us = m.public_market(m.US, date(2026, 10, 15))["holidays"]
+    assert "2026-11-26" in [h["date"] for h in us]   # Thanksgiving
+
+
+def test_eg_server_clock_still_uses_the_holiday_calendar():
+    # Only the published list is withheld; is_market_open keeps its calendar.
+    assert len(m.EG.holidays(2026)) > 0

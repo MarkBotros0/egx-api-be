@@ -7,6 +7,7 @@ AccountStore against a REAL Postgres. Skipped unless TEST_DATABASE_URL is set.
     docker stop egx-auth-pg
 
 Never point this at a real database: it drops tables.
+Skipped unless the URL host is local (see tests/pg_guard.py; PG_TESTS_ALLOW_REMOTE=1 overrides).
 """
 
 import os
@@ -14,8 +15,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL not set")
+from pg_guard import requires_local_pg
+
+pytestmark = requires_local_pg
 
 NOW = datetime(2026, 10, 12, 9, 0, tzinfo=timezone.utc)
 

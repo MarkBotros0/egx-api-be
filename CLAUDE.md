@@ -54,6 +54,13 @@ Add a fact there, not as a literal.
 - `ENABLED_MARKETS` (default `EG`) gates which codes the API accepts. US is fully
   wired but refused until sub-project 2 enables it. `GET /api/markets`
   (signed-in only) lists the enabled markets with their display fields.
+- `ENABLED_MARKETS` must ALWAYS include `EG`: an absent `market` means EG
+  everywhere (query params, POST bodies, DB defaults, client fallbacks), so
+  dropping EG would 400 every old client.
+- `GET /api/markets` sends `holidays: []` for EG (`MarketConfig.publish_holidays=False`)
+  until the Egyptian dates are verified: the `holidays` library ESTIMATES Islamic
+  holidays and the old client clock ignored holidays anyway. US keeps its NYSE
+  calendar. The server's own `is_market_open` still uses the EG calendar.
 - Selected market = per-user PREFERENCE in `user_settings` (key `market`), via
   `GET/PUT /api/settings?section=market` (PUT is 400 for an unknown/disabled
   code; GET falls back to EG). The market's FACTS are never per-user.
@@ -67,7 +74,8 @@ Add a fact there, not as a literal.
 - `cache.make_key(market_code, …)` refuses a missing or unknown market code
   (ValueError); `tests/test_cache_keys.py` also walks the AST and fails on any
   call site whose first argument is a literal.
-- The benchmark is fetched only through `core/benchmark.get_benchmark_close`.
+- The benchmark is fetched only through `core/benchmark.get_benchmark_close(market,
+  interval, bars)`, cache key `make_key(market.code, "benchmark", interval, bars)`.
   The scanner goes through `core/tradingview.scan(columns, market=EG)` /
   `scan_url(market)`.
 - `cron.is_isin` is gone: `MarketConfig.is_valid_symbol` (still LENGTH-based —
@@ -176,14 +184,16 @@ egx-api-fe/                     # Next.js frontend
       types.ts                  # TypeScript interfaces
       constants.ts              # Frontend constants + fallback weight presets
       positions.ts              # Lots -> one position per symbol; FIFO sale preview
+      markets.ts                # Market type, EG_FALLBACK, isMarketOpen (Intl, DST-safe)
+      money.ts                  # formatMoney / formatPrice in the market's currency
 
 public/                         # Static assets, PWA manifest
 ```
 
 ### `lib/` is shared with the mobile app — keep it platform-neutral
 
-`egx-api-mobile` (sibling repo, Expo) copies `src/app/lib/{api,apiConfig,auth,constants,positions,riskBands,theme,types}.ts`
-verbatim via its `npm run sync:shared`, and its verification fails when the copy drifts.
+`egx-api-mobile` (sibling repo, Expo) copies `src/app/lib/{api,apiConfig,auth,constants,positions,riskBands,theme,types,learn,learnVisuals,learnWidgets,learnLive,curriculum,markets,money}.ts`
+(the `SHARED_FILES` list in its `scripts/sync-shared.mjs`) verbatim via its `npm run sync:shared`, and its verification fails when the copy drifts.
 So nothing in `lib/` may touch `window`, `document`, `localStorage`, `next/*` or import a
 component. The API client reads its base URL, token and 401 handler from
 `lib/apiConfig.ts`; the web registers them in `AuthProvider.tsx`
@@ -918,14 +928,14 @@ LEDGER routes — those record the USER's own payouts; these describe the MARKET
 
 **`GET /api/dividend_history?symbol=XXX`** — one stock's dated, multi-year
 dividend history plus a cadence estimate. **Persisted in the `dividend_events`
-table** (PK `(symbol, ex_date)`), which is:
+table** (PK `(market, symbol, ex_date)`), which is:
 - **seeded deep from Yahoo** by `scripts/backfill_dividends.py` (all years —
   `query1.finance.yahoo.com/v8/finance/chart/<SYM>.CA?events=div`, the ONLY
   keyless source of DATED history — the scanner carries just the latest coupon,
   `fundamentals_annual.dps` has amounts but no ex-dates, egx.com.eg is bot-blocked);
 - **grown forward for free by the nightly refresh** — `refresh_pe_data` appends
   the scanner's one latest coupon per symbol (`_append_dividend_events`), and the
-  PK makes it idempotent so only a NEW (symbol, ex_date) lands. No extra fetch.
+  PK makes it idempotent so only a NEW (market, symbol, ex_date) lands. No extra fetch.
 
 The endpoint **reads the table and self-heals**: on a table miss for a symbol it
 fetches Yahoo once, upserts, and serves — so the store fills in as stocks are
@@ -1497,8 +1507,9 @@ reintroduce the divergence measured once at **66 "Buy" on the card against 45
   "...ago".** A price cannot get newer than the last close while the market is
   closed (the Fri/Sat weekend, or any time outside 10:00-14:30 Cairo), so a
   growing age reads as staleness that isn't real — over a weekend it would climb
-  past "30h ago" on a number that is exactly as fresh as it can be. `isEgxOpen`
-  in `page.tsx` is the Cairo-aware, DST-safe gate (via `Intl`), read off the
+  past "30h ago" on a number that is exactly as fresh as it can be.
+  `isMarketOpen(EG_FALLBACK, now)` (shared `lib/markets.ts`; was `isEgxOpen` in
+  `page.tsx`) is the Cairo-aware, DST-safe gate (via `Intl`), read off the
   same ticking clock as the age it replaces so every card flips together. A
   closed-market bar also always shows "close", even for today's session once
   the 14:30 bell has rung.
@@ -1786,7 +1797,7 @@ Past that, alerts are skipped (`skipped: "deadline"`) and everything stays
   token. Receipts are not polled in v1. Expo's ticket shapes are normalised in
   `expo_push.py`.
 - Overlapping cron calls: the QUEUE is deduped by `alert_log`'s UNIQUE
-  `(user_id, symbol, session_date, direction)` + `ON CONFLICT DO NOTHING` (and
+  `(user_id, market, symbol, session_date, direction)` + `ON CONFLICT DO NOTHING` (and
   detection skips already-logged keys); SENDING is guarded by a delivery claim.
   `deliver_pending` first reclaims rows stuck in `sending` for over 2 min
   (`claimed_at`; the lost try counts as an attempt: back to `pending` with
@@ -2095,7 +2106,7 @@ Rules that keep them aligned:
 1. **Never build an `extras` dict by hand.** Call `core/extras_builder.py::build_composite_extras`. `tests/test_fixes.py::test_no_router_hand_rolls_composite_extras` greps the routers and fails if you do.
 2. **One fetch window** — `INTERNAL_BARS_MIN` (400) everywhere. The score depends on the window (volatility, S/R, SMA200, beta), so a "lightweight" 220-bar batch fetch silently rescored every card.
 3. **One divergence lookback** — `DIVERGENCE_LOOKBACK_FULL` (60) everywhere.
-4. **One benchmark series** — fetch EGX30 through the shared `make_key("egx30", exchange, interval, INTERNAL_BARS_MIN)` cache key so relative strength and beta compare against identical data.
+4. **One benchmark series** — fetch the market's benchmark (EGX30 for EG) only through `core/benchmark.get_benchmark_close(market, interval, INTERNAL_BARS_MIN)`, whose shared cache key is `make_key(market.code, "benchmark", interval, bars)`, so relative strength and beta compare against identical data. (`make_key("egx30", …)` now raises ValueError: the first argument must be a market code.)
 5. **Multi-timeframe is derived by resampling the daily frame** (`W-THU`), not by a separate weekly fetch. It costs no extra network call, which is why the batch and portfolio paths can now afford it, and it guarantees daily and weekly agree.
 6. **Scoring inputs belong in the cache key.** `/api/analysis` keys on `w_hash + macro_tag + rfr_tag`; the batch path keys on the same. Omitting the macro regime meant a bullish→bearish flip updated the dashboard immediately while the detail page served a pre-flip score for the rest of the 15-minute TTL.
 
@@ -2899,10 +2910,10 @@ Connection singleton in `_db.py` with lazy init. `get_db()` returns the ready co
 
 ## Caching Strategy
 
-- **Serverside:** `api/_cache.py` — module-level dict, 5-min TTL, keyed by `endpoint:params`
+- **Serverside:** `app/core/cache.py` — module-level dict, 5-min TTL, keyed by `make_key(market_code, endpoint, *params)` → `EG:endpoint:params` (a missing/unknown market code is a ValueError)
 - **Survives warm container**, cleared on cold start
 - **Turso cache:** `macro_data` table for 1-hour macro data cache
-- **EGX30 data:** Cached under dedicated key (reused across many stock analyses)
+- **Benchmark data (EGX30 for EG):** cached under `make_key(market.code, "benchmark", interval, bars)` by `core/benchmark.get_benchmark_close` (reused across many stock analyses)
 - **Composite score cache invalidation:** `analysis.py` and `portfolio_analysis.py` include `weights_hash(weights)` in their cache keys — changing weights via PUT /api/weights automatically busts cached scores
 
 ## Common Tasks

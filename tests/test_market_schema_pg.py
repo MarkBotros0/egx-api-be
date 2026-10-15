@@ -8,14 +8,16 @@ TEST_DATABASE_URL is set:
     docker stop egx-mkt-pg
 
 Never point this at a real database: it drops every table in the schema.
+Skipped unless the URL host is local (see tests/pg_guard.py; PG_TESTS_ALLOW_REMOTE=1 overrides).
 """
 import os
 
 import psycopg
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL not set")
+from pg_guard import requires_local_pg
+
+pytestmark = requires_local_pg
 
 
 def _wipe(d):
