@@ -26,6 +26,8 @@ import json
 import os
 from typing import Optional
 
+from app.core.markets import EG
+
 _STATIC_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "egx_tickers.json"
 )
@@ -59,13 +61,20 @@ def _load() -> dict:
     return _MEMBERSHIP
 
 
-def get_index_membership(symbol: str) -> Optional[str]:
+def get_index_membership(symbol: str, market=EG) -> Optional[str]:
     """
-    Return "EGX30" | "EGX70" | "EGX100" | "NILEX" for `symbol`, else None.
+    Return "EGX30" | "EGX70" | "EGX100" | "NILEX" for an EG `symbol`, else None.
 
     None means "unknown tier", not "no index" — callers should pass it straight
     through to `liquidity_score`, which applies its EGX100 default.
+
+    Any other market returns its own code ("US"), never an EGX tier: a US
+    ticker that happens to share a symbol with an EGX listing must not borrow
+    that listing's liquidity floors. `liquidity_score` has a floor row per
+    market code.
     """
+    if market.code != EG.code:
+        return market.code
     if not symbol:
         return None
     return _load().get(symbol.upper())

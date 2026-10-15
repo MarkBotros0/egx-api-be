@@ -926,6 +926,10 @@ _INDEX_LIQ_FLOORS = {
     "EGX70":   {"thin": 50_000,    "low": 200_000},
     "EGX100":  {"thin": 30_000,    "low": 100_000},
     "NILEX":   {"thin": 5_000,     "low": 20_000},
+    # Every US symbol, until US floors are calibrated in sub-project 3. Equal
+    # to NILEX, the most lenient tier: an uncalibrated floor should flag only
+    # the genuinely untraded, not the whole market.
+    "US":      {"thin": 5_000,     "low": 20_000},
 }
 
 # Share of the lookback window that may have zero volume before the stock is

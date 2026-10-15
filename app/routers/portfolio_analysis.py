@@ -20,7 +20,7 @@ from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
 from app.core.dividends import fetch_dividend_totals
 from app.core.holdings import fetch_open_holdings
-from app.core.macro_fetch import fetch_macro
+from app.core.macro_fetch import fetch_macro_for, read_risk_free_rate
 from app.core.markets import EG, MarketConfig, market_param
 from app.core.composite import compute_composite, get_weights_from_db, DEFAULT_WEIGHTS
 from app.core.levels import compute_key_levels, compute_entry_exit
@@ -37,7 +37,6 @@ from app.core.constants import (
     CORRELATION_HIGH_THRESHOLD,
     CORRELATION_NEGATIVE_THRESHOLD,
     CURRENT_DRAWDOWN_WARNING_PCT,
-    DEFAULT_RISK_FREE_RATE_PCT,
     DIVERGENCE_LOOKBACK_FULL,
     INTERNAL_BARS_MIN,
     MAX_DRAWDOWN_WARNING_PCT,
@@ -242,13 +241,14 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
     except Exception:
         pass
 
+    # The market's own rate, through the one reader /api/analysis uses, so a
+    # holding's Risk-Adjusted score matches its detail page.
     try:
         db = get_db()
-        rfr_row = db.execute("SELECT value FROM settings WHERE key = 'risk_free_rate'").fetchone()
-        risk_free_annual = float(rfr_row[0]) / 100 if rfr_row else DEFAULT_RISK_FREE_RATE_PCT / 100
     except Exception:
-        risk_free_annual = DEFAULT_RISK_FREE_RATE_PCT / 100
-    risk_free_rate_pct = risk_free_annual * 100
+        db = None
+    risk_free_rate_pct = read_risk_free_rate(db, market)
+    risk_free_annual = risk_free_rate_pct / 100
 
     try:
         weights = get_weights_from_db(get_db(), user_id)
@@ -259,7 +259,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
     # and the portfolio-level macro_egx30 signal below.
     macro_data = None
     try:
-        macro_data = fetch_macro(get_db())
+        macro_data = fetch_macro_for(get_db(), market)
     except Exception:
         macro_data = None
 
@@ -476,7 +476,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                     pe_ratio=pe_info_h.get("pe_ratio") if pe_info_h else None,
                     dividend_yield=pe_info_h.get("dividend_yield") if pe_info_h else None,
                     loss_making=pe_info_h.get("loss_making") if pe_info_h else None,
-                    index_membership=get_index_membership(symbol),
+                    index_membership=get_index_membership(symbol, market),
                     divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
                 )
                 divergences_h = built_h["divergences"]

@@ -312,6 +312,14 @@ def score_momentum(rsi_val, macd_hist, macd_hist_prev,
     return _clamp(score), reasons
 
 
+def _tier_article(tier: str) -> str:
+    """
+    "an" before a tier said with a leading vowel sound — every EGX tier ("an
+    EGX30 name", read "ee-gee-ex") — else "a" ("a NILEX name", "a US name").
+    """
+    return "an" if tier.startswith("E") else "a"
+
+
 def score_volume(obv_rising: Optional[bool], price_rising_20d: Optional[bool],
                  mfi_val: Optional[float], volume_price: Optional[dict],
                  *, liquidity: Optional[dict] = None) -> tuple:
@@ -418,11 +426,11 @@ def score_volume(obv_rising: Optional[bool], price_rising_20d: Optional[bool],
             score -= 12
             reasons.append(
                 f"Thin liquidity — {avg_vol:,} shares/day, below the floor for "
-                f"an {tier} name. Hard to exit; keep the position small."
+                f"{_tier_article(tier)} {tier} name. Hard to exit; keep the position small."
             )
         elif liquidity.get("classification") == "low":
             reasons.append(
-                f"Modest liquidity — {avg_vol:,} shares/day for an {tier} name."
+                f"Modest liquidity — {avg_vol:,} shares/day for {_tier_article(tier)} {tier} name."
             )
 
     return _clamp(score), reasons

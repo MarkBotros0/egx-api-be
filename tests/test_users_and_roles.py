@@ -479,7 +479,7 @@ def test_regime_reader_is_pinned_to_the_anonymous_context():
     """
     src = (Path(__file__).resolve().parents[1] / "app" / "routers" / "analysis.py").read_text(encoding="utf-8")
     body = src.split("def read_cached_scores", 1)[1].split("\ndef ", 1)[0]
-    assert "scoring_cache_context(None)" in body
+    assert "scoring_cache_context(None, market)" in body
 
 
 def test_risk_free_rate_is_never_user_scoped():

@@ -49,9 +49,9 @@ def fake_db(monkeypatch):
     db = FakeDB()
     monkeypatch.setattr(db_mod, "get_db", lambda: db)
     monkeypatch.setattr(analysis_mod, "get_db", lambda: db)
-    monkeypatch.setattr(analysis_mod, "fetch_macro", lambda db: None)
+    monkeypatch.setattr(analysis_mod, "fetch_macro_for", lambda db, market: None)
     monkeypatch.setattr(pa_mod, "get_db", lambda: db)
-    monkeypatch.setattr(pa_mod, "fetch_macro", lambda db: None)
+    monkeypatch.setattr(pa_mod, "fetch_macro_for", lambda db, market: None)
     return db
 
 

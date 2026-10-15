@@ -207,7 +207,7 @@ def analysis_db(monkeypatch):
     from app.routers import analysis as analysis_mod
     db = FakeDB()
     monkeypatch.setattr(analysis_mod, "get_db", lambda: db)
-    monkeypatch.setattr(analysis_mod, "fetch_macro", lambda db: None)
+    monkeypatch.setattr(analysis_mod, "fetch_macro_for", lambda db, market: None)
     return db
 
 
@@ -271,7 +271,7 @@ def dashboard_db(monkeypatch):
     db = FakeDB()
     db.rows_for("FROM risk_snapshot", [_snapshot_row("COMI")])
     monkeypatch.setattr(dashboard_mod, "get_db", lambda: db)
-    monkeypatch.setattr(dashboard_mod, "fetch_macro", lambda db: None)
+    monkeypatch.setattr(dashboard_mod, "fetch_macro_for", lambda db, market: None)
     return db
 
 
@@ -754,7 +754,7 @@ def cron_db(monkeypatch):
     alerts = []
     monkeypatch.delenv("CRON_SECRET", raising=False)
     monkeypatch.setattr(cron_mod, "get_db", lambda: db)
-    monkeypatch.setattr(cron_mod, "read_risk_free_rate", lambda db: 19.0)
+    monkeypatch.setattr(cron_mod, "read_risk_free_rate", lambda db, market: 19.0)
     monkeypatch.setattr(cron_mod, "run_alerts",
                         lambda *a, **k: alerts.append(k.get("market_code")) or {})
     db.alert_markets = alerts
@@ -1000,7 +1000,7 @@ def pa_env(monkeypatch, fake_feed):
     db = FakeDB()
     benchmarks = []
     monkeypatch.setattr(pa_mod, "get_db", lambda: db)
-    monkeypatch.setattr(pa_mod, "fetch_macro", lambda db: None)
+    monkeypatch.setattr(pa_mod, "fetch_macro_for", lambda db, market: None)
     monkeypatch.setattr(bench_mod, "get_benchmark_close",
                         lambda m, interval, bars: benchmarks.append(m.code) or None)
     db.benchmarks = benchmarks

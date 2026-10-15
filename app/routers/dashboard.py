@@ -28,7 +28,7 @@ from app.core.auth import CurrentUser, get_current_user
 from app.core.card_snapshot import attach_risk_bands, read_rows, to_card
 from app.core.composite import get_weights_from_db
 from app.core.db import get_db
-from app.core.macro_fetch import fetch_macro
+from app.core.macro_fetch import fetch_macro_for
 from app.core.markets import MarketConfig, market_param
 from app.core.pe_fetch import get_pe_for_symbols
 
@@ -73,7 +73,7 @@ def get_dashboard(user: CurrentUser = Depends(get_current_user),
 
     weights = get_weights_from_db(db, user.id)
     try:
-        macro = fetch_macro(db)
+        macro = fetch_macro_for(db, market)
     except Exception:
         # The macro modulation is a post-hoc adjustment, not an input the score
         # cannot be computed without. Losing it costs the bearish damping, not

@@ -147,9 +147,30 @@ def _fetch_usdegp():
         return {"value": None, "change_pct": None, "direction": None}
 
 
-def read_risk_free_rate(db) -> float:
+def fetch_macro_for(db, market):
     """
-    The CBE policy rate as a percent, from `settings`. Falls back to the default.
+    The macro regime that modulates `market`'s scores, or None.
+
+    Only EG has one today: `fetch_macro` is the EGX30 trend, USD/EGP and the
+    CBE rate, and modulating a US score by the EGX30 regime would be wrong.
+    Other markets get None, which skips modulation exactly as a macro outage
+    does (macro is sub-project 4).
+    """
+    if market.code != EG.code:
+        return None
+    return fetch_macro(db)
+
+
+def read_risk_free_rate(db, market=EG) -> float:
+    """
+    `market`'s risk-free rate as a percent, from `settings`. Falls back to the
+    market's default.
+
+    Non-EG markets read `settings.risk_free_rate:<CODE>` (written for US by
+    `refresh_us_risk_free`), else `market.risk_free_fallback_pct`. They never
+    read the EG key: Egypt's policy rate is no hurdle for a US stock.
+
+    For EG: the CBE policy rate, from `settings`. Falls back to the default.
 
     The ONE spelling of this read. It is a scoring input — `score_risk_adjusted`
     compares every stock's annualized return against it, and it is folded into
@@ -162,6 +183,22 @@ def read_risk_free_rate(db) -> float:
     rejects automated requests and no free machine-readable bill series exists,
     so the bill rate is approximated. Say so wherever it is explained.
     """
+    if market.code != EG.code:
+        fallback = float(market.risk_free_fallback_pct or DEFAULT_RISK_FREE_RATE_PCT)
+        if db is None:
+            return fallback
+        try:
+            # The key is spelled as a literal, like the writer's, from the
+            # registry's own code — never from request input.
+            row = db.execute(
+                f"SELECT value FROM settings WHERE key = 'risk_free_rate:{market.code}'"
+            ).fetchone()
+            if row and row[0] is not None:
+                return float(row[0])
+        except Exception:
+            pass
+        return fallback
+
     if db is None:
         return float(DEFAULT_RISK_FREE_RATE_PCT)
     try:

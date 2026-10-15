@@ -42,7 +42,7 @@ from app.core.extras_builder import build_composite_extras
 from app.core.index_membership import get_index_membership
 from app.core.levels import compute_key_levels, compute_entry_exit
 from app.core.trendlines import compute_trendlines
-from app.core.macro_fetch import fetch_macro, read_risk_free_rate
+from app.core.macro_fetch import fetch_macro_for, read_risk_free_rate
 from app.core.card_snapshot import upsert_snapshot
 from app.core.pe_fetch import get_pe_for_symbol, get_pe_for_symbols
 from app.core.risk_grade import is_tradeable, measure
@@ -172,10 +172,14 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict,
         return symbol, {"error": str(e)}, None
 
 
-def scoring_cache_context(user_id: str = None):
+def scoring_cache_context(user_id: str = None, market: MarketConfig = EG):
     """
     The three non-price inputs that make a composite score what it is:
     weights, macro regime, risk-free rate. Returns (weights, macro, tags).
+
+    Macro and the risk-free rate are `market`'s own: a US score is never
+    modulated by the EGX30 regime (its macro is None, tagged "n/a") nor graded
+    against the CBE rate. EG's tags are unchanged.
 
     Extracted so `_handle_batch` (which WRITES per-symbol score cache entries)
     and `read_cached_scores` (which READS them) derive the key from one place.
@@ -198,12 +202,12 @@ def scoring_cache_context(user_id: str = None):
     macro = None
     if db is not None:
         try:
-            macro = fetch_macro(db)
+            macro = fetch_macro_for(db, market)
         except Exception:
             macro = None
 
     macro_tag = str(((macro or {}).get("egx30") or {}).get("trend") or "n/a")
-    risk_free_rate_pct = _read_risk_free_rate(db)
+    risk_free_rate_pct = _read_risk_free_rate(db, market)
     tags = (weights_hash(weights), macro_tag, f"rfr{risk_free_rate_pct:g}")
     return db, weights, macro, risk_free_rate_pct, tags
 
@@ -232,7 +236,7 @@ def read_cached_scores(symbols: list, interval: str = "Daily",
     Anonymous dashboard traffic is what warms these entries, so the reader
     keeps hitting them.
     """
-    db, _, macro, _, tags = scoring_cache_context(None)
+    db, _, macro, _, tags = scoring_cache_context(None, market)
     out = {}
     missing = []
     for sym in symbols:
@@ -285,7 +289,7 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None,
     # bearish flip, or a settings change, serves stale scores for the whole
     # TTL. Derived through the shared helper so `read_cached_scores` cannot
     # spell the same key differently and silently find nothing.
-    db, weights, macro, risk_free_rate_pct, tags = scoring_cache_context(user_id)
+    db, weights, macro, risk_free_rate_pct, tags = scoring_cache_context(user_id, market)
 
     # The market's benchmark fetched ONCE for the whole batch (not per symbol)
     # and under the same cache key /api/analysis uses, so relative strength is
@@ -379,7 +383,7 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None,
                 f = pool.submit(_compute_batch_one, s, interval, weights, macro,
                                 egx30_close, risk_free_rate_pct, pe_ratio,
                                 dividend_yield, loss_making,
-                                get_index_membership(s), market, db)
+                                get_index_membership(s, market), market, db)
                 # Stragglers that finish AFTER we've returned still self-cache
                 # via this callback — a frontend retry a few seconds later hits
                 # a warm cache and fills in the '--' cards.
@@ -490,11 +494,11 @@ def get_analysis(
         # already bounds staleness, and keying it would force a DB read before
         # every cache hit.
         try:
-            macro = fetch_macro(db)
+            macro = fetch_macro_for(db, market)
         except Exception:
             macro = None
         macro_tag = str(((macro or {}).get("egx30") or {}).get("trend") or "n/a")
-        risk_free_rate_pct = _read_risk_free_rate(db)
+        risk_free_rate_pct = _read_risk_free_rate(db, market)
         rfr_tag = f"rfr{risk_free_rate_pct:g}"
 
         cache_key = make_key(market.code, "analysis", symbol, exchange, interval, bars,
@@ -566,7 +570,7 @@ def get_analysis(
             pe_ratio=pe_info.get("pe_ratio") if pe_info else None,
             dividend_yield=pe_info.get("dividend_yield") if pe_info else None,
             loss_making=pe_info.get("loss_making") if pe_info else None,
-            index_membership=get_index_membership(symbol),
+            index_membership=get_index_membership(symbol, market),
             divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
         )
         divergences = built["divergences"]

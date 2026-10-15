@@ -348,7 +348,7 @@ def risk_snapshot(
     except Exception:
         fundamentals = {}
 
-    risk_free_rate_pct = read_risk_free_rate(db)
+    risk_free_rate_pct = read_risk_free_rate(db, market)
 
     scored_for_alerts: dict = {}
 
@@ -401,7 +401,7 @@ def risk_snapshot(
                 pe_ratio=pe.get("pe_ratio"),
                 dividend_yield=pe.get("dividend_yield"),
                 loss_making=pe.get("loss_making"),
-                index_membership=get_index_membership(symbol),
+                index_membership=get_index_membership(symbol, market),
                 divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
             )
             scored = score_categories(indicators, built["extras"])
