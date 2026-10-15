@@ -418,6 +418,22 @@ def init_db(db: _DB) -> None:
         )
     """)
 
+    # The non-EG universe (core/universe.py): index members plus every listing
+    # a user has added. `exchange` is the listing exchange tvDatafeed needs.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS market_universe (
+            market TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            name TEXT,
+            sector TEXT,
+            exchange TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'stock',
+            indices TEXT[] NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (market, symbol)
+        )
+    """)
+
     # Fundamentals from the TradingView scanner (see core/pe_fetch.py). `symbol`
     # is the exact ticker as returned by the feed — no name matching involved.
     # Null semantics: pe_ratio IS NULL means no trailing P/E (usually a
