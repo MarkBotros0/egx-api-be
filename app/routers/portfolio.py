@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core import universe
 from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
 from app.core.holdings import HOLDING_COLUMNS, fetch_open_holdings, row_to_holding
@@ -56,6 +57,16 @@ def add_holding(body: dict,
         if quantity is None:
             raise HTTPException(status_code=400, detail="Missing required field: quantity")
 
+        db = get_db()
+        # EG stays lenient: its ticker file drifts and the user may hold a
+        # name it lacks. Elsewhere the symbol must resolve to a listing. A
+        # resolver that cannot reach the scanner also answers None, so a
+        # scanner outage refuses the add with the same 422 — acceptable,
+        # since nothing could be priced for it either.
+        if target.code != "EG" and not universe.resolve_exchange(db, target, symbol):
+            raise HTTPException(status_code=422,
+                                detail=f"Unknown {target.short_name} symbol: {symbol}")
+
         now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         holding_id = str(uuid.uuid4())
         name = body.get("name", symbol)
@@ -65,7 +76,6 @@ def add_holding(body: dict,
         target_price = float(body["target_price"]) if body.get("target_price") else None
         stop_loss = float(body["stop_loss"]) if body.get("stop_loss") else None
 
-        db = get_db()
         db.execute(
             """INSERT INTO portfolio (id, user_id, market, symbol, name, buy_price, buy_date,
                quantity, notes, sector, target_price, stop_loss, created_at, updated_at)

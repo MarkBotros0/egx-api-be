@@ -15,6 +15,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from app.core import universe
 from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
 from app.core.markets import MarketConfig, get_market, market_param
@@ -54,8 +55,15 @@ def add_to_watchlist(
         if not symbol:
             raise HTTPException(status_code=400, detail="Missing required field: symbol")
 
-        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         db = get_db()
+        # EG stays lenient; elsewhere the symbol must resolve to a listing.
+        # A scanner outage also resolves to None and so refuses with the same
+        # 422 — acceptable, since the symbol could not be priced either.
+        if target.code != "EG" and not universe.resolve_exchange(db, target, symbol):
+            raise HTTPException(status_code=422,
+                                detail=f"Unknown {target.short_name} symbol: {symbol}")
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         db.execute(
             "INSERT INTO watchlist (user_id, market, symbol, added_at) "
             "VALUES (%s, %s, %s, %s) "

@@ -403,6 +403,7 @@ def risk_snapshot(
                 loss_making=pe.get("loss_making"),
                 index_membership=get_index_membership(symbol, market),
                 divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
+                benchmark_label=market.benchmark_label,
             )
             scored = score_categories(indicators, built["extras"])
             close = df["close"]

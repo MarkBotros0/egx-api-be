@@ -101,7 +101,7 @@ def dedupe_symbol_signals(signals: list[dict]) -> list[dict]:
 
 
 def build_position_signals(positions: list[dict], *, risk_free_rate_pct: float,
-                           today) -> list[dict]:
+                           today, currency: str = "EGP") -> list[dict]:
     """
     The signals that read the user's own cost basis, one per SYMBOL.
 
@@ -113,6 +113,8 @@ def build_position_signals(positions: list[dict], *, risk_free_rate_pct: float,
 
     Stop and target come from the BINDING lot: the highest stop is the first
     one price falls through, the lowest target the first one it reaches.
+
+    `currency` is the market's, quoted after every price.
     """
     out: list[dict] = []
     for pos in positions:
@@ -137,25 +139,25 @@ def build_position_signals(positions: list[dict], *, risk_free_rate_pct: float,
         # indistinguishable from a stop still X% below the price.
         if dist_to_stop is not None and dist_to_stop >= 0:
             out.append({"type": "stop_breached", "severity": "action_required", "symbol": symbol,
-                "message": f"{symbol} is trading {dist_to_stop:.1f}% BELOW your stop-loss at {stop_loss:.2f} EGP — your exit rule has triggered.",
+                "message": f"{symbol} is trading {dist_to_stop:.1f}% BELOW your stop-loss at {stop_loss:.2f} {currency} — your exit rule has triggered.",
                 "explanation": "You set this stop-loss to cap your loss on this position. Price has passed it, so the rule you wrote before buying says to sell. Acting on your own pre-set rule is what stops a small loss becoming a large one.",
                 "learn_concept": "stop_loss"})
         elif dist_to_stop is not None and dist_to_stop > -10:
             prio = "action_required" if dist_to_stop > -5 else "warning"
             out.append({"type": "stop_loss", "severity": prio, "symbol": symbol,
-                "message": f"{symbol} is {abs(dist_to_stop):.1f}% away from your stop-loss at {stop_loss:.2f} EGP.",
+                "message": f"{symbol} is {abs(dist_to_stop):.1f}% away from your stop-loss at {stop_loss:.2f} {currency}.",
                 "explanation": "A stop-loss is a pre-set price where you sell to limit losses.",
                 "learn_concept": "stop_loss"})
 
         if dist_to_target is not None and 0 < dist_to_target < 10:
             out.append({"type": "target_reached", "severity": "opportunity", "symbol": symbol,
-                "message": f"{symbol} is {dist_to_target:.1f}% away from your target price of {target_price:.2f} EGP.",
+                "message": f"{symbol} is {dist_to_target:.1f}% away from your target price of {target_price:.2f} {currency}.",
                 "explanation": "Consider taking partial profits or setting a trailing stop.",
                 "learn_concept": "stop_loss"})
 
         if dist_to_target is not None and dist_to_target <= 0:
             out.append({"type": "target_hit", "severity": "opportunity", "symbol": symbol,
-                "message": f"{symbol} has reached your target price! Current: {current_price:.2f} EGP, Target: {target_price:.2f} EGP.",
+                "message": f"{symbol} has reached your target price! Current: {current_price:.2f} {currency}, Target: {target_price:.2f} {currency}.",
                 "explanation": "Your stock hit the target you set. Review: set a new target or take profits.",
                 "learn_concept": "stop_loss"})
 
@@ -196,6 +198,10 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
     import numpy as np
 
     today = date.today()
+    # Every price and amount in the copy below is in the market's currency,
+    # and every index mention is the market's own benchmark.
+    cur = market.currency
+    bench = market.benchmark_label
     stock_analyses = []
     signals = []
     total_invested = 0
@@ -228,16 +234,16 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
     # total_invested — counting cost with no matching value fabricates a loss.
     excluded_holdings = []
 
-    egx30_returns = None
-    egx30_close = None
+    bench_returns = None
+    bench_close = None
     try:
         # Same window and cache key as /api/analysis so beta and relative
         # strength are computed against an identical benchmark series on
         # every page. A shorter window here gave the same stock a different
         # beta on the portfolio page than on its detail page.
-        egx30_close = get_benchmark_close(market, "Daily", INTERNAL_BARS_MIN)
-        if egx30_close is not None:
-            egx30_returns = calc_daily_returns(egx30_close)
+        bench_close = get_benchmark_close(market, "Daily", INTERNAL_BARS_MIN)
+        if bench_close is not None:
+            bench_returns = calc_daily_returns(bench_close)
     except Exception:
         pass
 
@@ -249,6 +255,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
         db = None
     risk_free_rate_pct = read_risk_free_rate(db, market)
     risk_free_annual = risk_free_rate_pct / 100
+    rate_owner = "Egypt's" if market.code == EG.code else f"the {market.short_name}"
 
     try:
         weights = get_weights_from_db(get_db(), user_id)
@@ -256,7 +263,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
         weights = dict(DEFAULT_WEIGHTS)
 
     # Macro fetched once up-front — feeds both per-holding composite modulation
-    # and the portfolio-level macro_egx30 signal below.
+    # and, for EG, the portfolio-level macro_egx30 signal below.
     macro_data = None
     try:
         macro_data = fetch_macro_for(get_db(), market)
@@ -347,8 +354,8 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
             all_returns[symbol] = stock_rets
 
             beta = None
-            if egx30_returns is not None:
-                beta = compute_beta(stock_rets, egx30_returns)
+            if bench_returns is not None:
+                beta = compute_beta(stock_rets, bench_returns)
                 if beta is not None:
                     beta = round(beta, 2)
 
@@ -470,7 +477,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                     df, holding_indicators,
                     # Portfolio holdings are always analysed on daily bars.
                     interval="Daily",
-                    egx30_close=egx30_close,
+                    egx30_close=bench_close,
                     include_multi_timeframe=True,
                     risk_free_rate_pct=risk_free_rate_pct,
                     pe_ratio=pe_info_h.get("pe_ratio") if pe_info_h else None,
@@ -478,6 +485,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                     loss_making=pe_info_h.get("loss_making") if pe_info_h else None,
                     index_membership=get_index_membership(symbol, market),
                     divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
+                    benchmark_label=bench,
                 )
                 divergences_h = built_h["divergences"]
                 volume_price_h = built_h["volume_price"]
@@ -703,7 +711,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                 below_by = -ns_sig["distance_pct"]
                 if 0 < below_by < 3:
                     signals.append({"type": "near_support", "severity": "opportunity", "symbol": symbol,
-                        "message": f"{symbol} is near support at {ns_sig['price']:.2f} EGP (tested {ns_sig['strength']} times).",
+                        "message": f"{symbol} is near support at {ns_sig['price']:.2f} {cur} (tested {ns_sig['strength']} times).",
                         "explanation": "Support levels are prices where the stock has historically bounced.",
                         "learn_concept": "support_resistance"})
                 elif ns_sig["distance_pct"] > 0:
@@ -711,9 +719,9 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                     lower = [s for s in sr["supports"]
                              if s.get("price") is not None and s["price"] < current_price]
                     next_support = max(lower, key=lambda s: s["price"])["price"] if lower else None
-                    msg = f"{symbol} broke below support at {ns_sig['price']:.2f} EGP."
+                    msg = f"{symbol} broke below support at {ns_sig['price']:.2f} {cur}."
                     if next_support is not None:
-                        msg += f" Next support at {next_support:.2f} EGP."
+                        msg += f" Next support at {next_support:.2f} {cur}."
                     signals.append({"type": "support_broken", "severity": "action_required", "symbol": symbol,
                         "message": msg,
                         "explanation": "When a stock breaks below a support level, it often continues falling.",
@@ -734,7 +742,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                 above_by = nr_sig["distance_pct"]
                 if 0 < above_by < 3:
                     signals.append({"type": "near_resistance", "severity": "warning", "symbol": symbol,
-                        "message": f"{symbol} approaching resistance at {nr_sig['price']:.2f} EGP.",
+                        "message": f"{symbol} approaching resistance at {nr_sig['price']:.2f} {cur}.",
                         "explanation": "Resistance levels are prices where the stock has historically been rejected.",
                         "learn_concept": "support_resistance"})
                 elif above_by < 0:
@@ -744,9 +752,9 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                     higher = [r for r in sr["resistances"]
                               if r.get("price") is not None and r["price"] > current_price]
                     next_resistance = min(higher, key=lambda r: r["price"])["price"] if higher else None
-                    msg = f"{symbol} broke above resistance at {nr_sig['price']:.2f} EGP."
+                    msg = f"{symbol} broke above resistance at {nr_sig['price']:.2f} {cur}."
                     if next_resistance is not None:
-                        msg += f" Next resistance at {next_resistance:.2f} EGP."
+                        msg += f" Next resistance at {next_resistance:.2f} {cur}."
                     signals.append({"type": "resistance_broken", "severity": "opportunity", "symbol": symbol,
                         "message": msg,
                         "explanation": "Breaking above a level that previously rejected the stock often starts a new leg up. Old resistance frequently becomes new support — consider trailing your stop-loss up to just below it.",
@@ -775,7 +783,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                 prefix = {"high": "HIGH-CONFIDENCE ", "medium": "", "low": "Possible "}[conf]
                 msg = (
                     f"{prefix}entry zone on {symbol}: buy band "
-                    f"{pr.get('low', 0):.2f}–{pr.get('high', 0):.2f} EGP"
+                    f"{pr.get('low', 0):.2f}–{pr.get('high', 0):.2f} {cur}"
                 )
                 if sl is not None:
                     msg += f", suggested stop-loss {sl:.2f}"
@@ -793,7 +801,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                 prefix = {"high": "STRONG ", "medium": "", "low": "Possible "}[conf]
                 msg = (
                     f"{prefix}exit zone on {symbol}: trim band "
-                    f"{pr.get('low', 0):.2f}–{pr.get('high', 0):.2f} EGP. Confidence: {conf}."
+                    f"{pr.get('low', 0):.2f}–{pr.get('high', 0):.2f} {cur}. Confidence: {conf}."
                 )
                 signals.append({"type": "exit_zone_active", "severity": sev, "symbol": symbol,
                     "message": msg,
@@ -811,7 +819,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                 elif beta < 0:
                     signals.append({"type": "inverse_beta", "severity": "info", "symbol": symbol,
                         "message": f"{symbol} tends to move AGAINST the market (beta {beta:.2f}).",
-                        "explanation": "A negative beta means the stock has historically risen when EGX30 fell, and vice versa. Small negative betas are often just noise, but a consistent one makes the stock a useful diversifier.",
+                        "explanation": f"A negative beta means the stock has historically risen when {bench} fell, and vice versa. Small negative betas are often just noise, but a consistent one makes the stock a useful diversifier.",
                         "learn_concept": "beta"})
                 elif beta < 0.8:
                     signals.append({"type": "low_beta", "severity": "info", "symbol": symbol,
@@ -831,7 +839,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                     suggested_stop = current_price - STOP_LOSS_ATR_MULTIPLIER * current_atr
                     anchor = f"({STOP_LOSS_ATR_MULTIPLIER:g}x ATR below the current price — no clear support level found)"
                 signals.append({"type": "atr_stop", "severity": "info", "symbol": symbol,
-                    "message": f"{symbol} ATR is {current_atr:.2f} EGP ({atr_pct}% of price). Suggested stop-loss: {suggested_stop:.2f} EGP {anchor}.",
+                    "message": f"{symbol} ATR is {current_atr:.2f} {cur} ({atr_pct}% of price). Suggested stop-loss: {suggested_stop:.2f} {cur} {anchor}.",
                     "explanation": f"ATR measures typical daily price movement. Placing your stop {STOP_LOSS_ATR_MULTIPLIER:g}x ATR below the nearest support keeps normal daily noise from stopping you out while still capping the loss.",
                     "learn_concept": "atr"})
 
@@ -849,23 +857,23 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
 
             if above_sma is not None and not above_sma:
                 signals.append({"type": "below_sma", "severity": "info", "symbol": symbol,
-                    "message": f"{symbol} is trading below its 50-day SMA ({current_sma_50:.2f} EGP).",
+                    "message": f"{symbol} is trading below its 50-day SMA ({current_sma_50:.2f} {cur}).",
                     "explanation": "Trading below the 50-day SMA suggests the stock's momentum has weakened.",
                     "learn_concept": "sma"})
 
             # --- New signals from the 8-category engine ---
 
-            # Relative strength — leader or laggard vs EGX30 over 30 days
+            # Relative strength — leader or laggard vs the benchmark over 30 days
             if rs_h is not None and rs_h.get("alpha_pct") is not None:
                 alpha = rs_h["alpha_pct"]
                 if rs_h.get("leader"):
                     signals.append({"type": "relative_strength_leader", "severity": "opportunity", "symbol": symbol,
-                        "message": f"{symbol} is outperforming EGX30 by {alpha:+.1f}% over 30 days — a market leader.",
+                        "message": f"{symbol} is outperforming {bench} by {alpha:+.1f}% over 30 days — a market leader.",
                         "explanation": "Stocks that lead the index tend to keep leading in the short-term. Institutional money is favouring this name.",
                         "learn_concept": "relative_strength"})
                 elif rs_h.get("laggard"):
                     signals.append({"type": "relative_strength_laggard", "severity": "warning", "symbol": symbol,
-                        "message": f"{symbol} is lagging EGX30 by {abs(alpha):.1f}% over 30 days.",
+                        "message": f"{symbol} is lagging {bench} by {abs(alpha):.1f}% over 30 days.",
                         "explanation": "Persistent laggards drag down a portfolio. Consider switching to a leader unless your thesis is long-term and patient.",
                         "learn_concept": "relative_strength"})
 
@@ -908,8 +916,11 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                     "learn_concept": "pe_ratio"})
 
             # Bands match score_quality's, which are centred on the EGX median
-            # P/E of ~12 rather than a developed-market idea of cheap.
-            if pe_info_h and pe_info_h.get("pe_ratio") is not None:
+            # P/E of ~12 rather than a developed-market idea of cheap. That
+            # median says nothing about another market's P/E, so the bands and
+            # their "versus the EGX median" copy are EG-only.
+            if (market.code == EG.code and pe_info_h
+                    and pe_info_h.get("pe_ratio") is not None):
                 pe = float(pe_info_h["pe_ratio"])
                 if pe < 3:
                     signals.append({"type": "pe_implausibly_low", "severity": "warning", "symbol": symbol,
@@ -938,7 +949,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                         "learn_concept": "dividend_yield"})
                 elif dy >= 4:
                     signals.append({"type": "dividend_yield_solid", "severity": "info", "symbol": symbol,
-                        "message": f"{symbol} yields {dy:.1f}% — an above-median EGX payer.",
+                        "message": f"{symbol} yields {dy:.1f}% — an above-median {market.short_name} payer.",
                         "explanation": f"Read this as evidence the company generates real cash and returns it, not as income: even this yield loses to the ~{risk_free_rate_pct:.0f}% policy rate. It is a quality marker, not a reason to buy on its own.",
                         "learn_concept": "dividend_yield"})
 
@@ -970,6 +981,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
         list(positions.values()),
         risk_free_rate_pct=risk_free_rate_pct,
         today=today,
+        currency=cur,
     ))
 
     # Portfolio-level metrics
@@ -1158,7 +1170,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
             if sharpe_ratio is not None and sharpe_ratio < 0:
                 signals.append({"type": "negative_sharpe", "severity": "action_required", "symbol": None,
                     "message": f"Your portfolio's Sharpe ratio is {sharpe_ratio:.2f}. You're earning LESS than the risk-free rate (~{risk_free_annual*100:.0f}%).",
-                    "explanation": f"With Egypt's T-bill rate at ~{risk_free_annual*100:.0f}%, you could earn guaranteed returns with zero risk.",
+                    "explanation": f"With {rate_owner} T-bill rate at ~{risk_free_annual*100:.0f}%, you could earn guaranteed returns with zero risk.",
                     "learn_concept": "sharpe_ratio"})
 
             # Phrased as a simulation, not as history: portfolio_daily applies
@@ -1176,8 +1188,9 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                     "explanation": "Your portfolio value is below its recent high.",
                     "learn_concept": "max_drawdown"})
 
-    # macro_data was fetched at the top of _analyze (see earlier block)
-    if macro_data:
+    # macro_data was fetched at the top of _analyze (see earlier block). The
+    # signal reads the EGX30 reading, so it is EG-only.
+    if market.code == EG.code and macro_data:
         egx30 = macro_data.get("egx30", {})
         if egx30.get("value"):
             trend_word = egx30.get("trend", "sideways")
@@ -1198,7 +1211,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
         _excluded_invested = sum(e["invested"] for e in excluded_holdings)
         signals.append({"type": "holdings_excluded", "severity": "warning", "symbol": None,
             "message": f"{len(excluded_holdings)} holding(s) could not be priced ({_syms}) and are left out of every total below.",
-            "explanation": f"Market data was unavailable for these, so {_excluded_invested:,.0f} EGP of cost basis is excluded from your P&L, allocation and risk metrics. The figures shown describe the rest of your portfolio. This is usually temporary — try refreshing later.",
+            "explanation": f"Market data was unavailable for these, so {_excluded_invested:,.0f} {cur} of cost basis is excluded from your P&L, allocation and risk metrics. The figures shown describe the rest of your portfolio. This is usually temporary — try refreshing later.",
             "learn_concept": None})
 
     severity_order = {"action_required": 0, "warning": 1, "opportunity": 2, "info": 3}

@@ -744,7 +744,7 @@ def score_risk_adjusted(annualized_return_pct: Optional[float],
     return _clamp(score), reasons
 
 
-def score_relative_strength(rs: Optional[dict]) -> tuple:
+def score_relative_strength(rs: Optional[dict], benchmark_label: str = "EGX30") -> tuple:
     """
     Score the relative-strength category (0-100).
 
@@ -754,6 +754,8 @@ def score_relative_strength(rs: Optional[dict]) -> tuple:
 
     Input: rs dict from indicators.relative_strength()
       Keys: stock_return_pct, benchmark_return_pct, alpha_pct, leader, laggard.
+    `benchmark_label` names the index in the reasons (the market's own
+    benchmark); it does not touch the score.
     """
     if rs is None or rs.get("alpha_pct") is None:
         return None, []
@@ -764,18 +766,18 @@ def score_relative_strength(rs: Optional[dict]) -> tuple:
 
     if alpha >= 15:
         score += 30
-        reasons.append(f"Leading EGX30 by {alpha:.1f}% (30d) — clear market leader")
+        reasons.append(f"Leading {benchmark_label} by {alpha:.1f}% (30d) — clear market leader")
     elif alpha >= 5:
         score += 15
-        reasons.append(f"Leading EGX30 by {alpha:.1f}% (30d)")
+        reasons.append(f"Leading {benchmark_label} by {alpha:.1f}% (30d)")
     elif alpha >= -2:
-        reasons.append(f"Tracking EGX30 (alpha {alpha:+.1f}% over 30d)")
+        reasons.append(f"Tracking {benchmark_label} (alpha {alpha:+.1f}% over 30d)")
     elif alpha >= -10:
         score -= 15
-        reasons.append(f"Lagging EGX30 by {abs(alpha):.1f}% (30d)")
+        reasons.append(f"Lagging {benchmark_label} by {abs(alpha):.1f}% (30d)")
     else:
         score -= 30
-        reasons.append(f"Lagging EGX30 by {abs(alpha):.1f}% (30d) — significant laggard")
+        reasons.append(f"Lagging {benchmark_label} by {abs(alpha):.1f}% (30d) — significant laggard")
 
     # Absolute return context
     stock_ret = rs.get("stock_return_pct")
@@ -922,6 +924,7 @@ def score_categories(indicators: dict, extras: Optional[dict] = None) -> dict:
     )
     relative_strength_score, relative_strength_reasons = score_relative_strength(
         extras.get("relative_strength"),
+        benchmark_label=extras.get("benchmark_label") or "EGX30",
     )
 
     return {
