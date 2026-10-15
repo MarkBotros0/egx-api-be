@@ -138,3 +138,17 @@ def test_us_discovered_rows_appended_without_duplicates(client, monkeypatch):
     by = {r["symbol"]: r for r in client.get("/api/tickers?market=US").json()}
     assert by["BRK.B"]["index"] == "NYSE" and by["BRK.B"]["indices"] == []
     assert "XXX" not in by and by["AAPL"]["indices"] == ["SPX", "NDX", "DJI"]
+
+
+def test_universe_outage_with_discovered_rows_is_not_cached(client, monkeypatch):
+    monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
+    db = FakeDB()
+    db.rows_for("discovered_tickers", [("BRK.B", "Berkshire", "Finance", "NYSE")])
+    monkeypatch.setattr(T, "get_db", lambda: db)
+    monkeypatch.setattr(U, "load_universe", lambda d, m: [])
+    T._tickers_cache.clear()
+    assert [r["symbol"] for r in client.get("/api/tickers?market=US").json()] == ["BRK.B"]
+    assert "US" not in T._tickers_cache
+    monkeypatch.setattr(U, "load_universe", lambda d, m: UNIV)
+    syms = [r["symbol"] for r in client.get("/api/tickers?market=US").json()]
+    assert syms == ["AAPL", "KO", "VOO", "BRK.B"]

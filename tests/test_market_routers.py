@@ -421,13 +421,6 @@ def tickers_db(monkeypatch):
     tickers_mod._tickers_cache.clear()
 
 
-def test_exchange_of_reads_the_scanner_prefix():
-    from app.routers.tickers import exchange_of
-    assert exchange_of("NASDAQ:AAPL") == "NASDAQ"
-    assert exchange_of("EGX:COMI") == "EGX"
-    assert exchange_of("AAPL") is None
-
-
 def test_tickers_default_to_eg(client, tickers_db, monkeypatch):
     import urllib.request
     urls = []

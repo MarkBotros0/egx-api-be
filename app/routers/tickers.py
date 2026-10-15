@@ -29,13 +29,6 @@ _TV_SEARCH = (
 )
 
 
-def exchange_of(scanner_symbol: str) -> Optional[str]:
-    """`"NASDAQ:AAPL"` -> `"NASDAQ"`; no prefix -> None."""
-    if not scanner_symbol or ":" not in scanner_symbol:
-        return None
-    return scanner_symbol.split(":", 1)[0].upper() or None
-
-
 def _load_static_json():
     json_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "egx_tickers.json")
     with open(json_path, "r", encoding="utf-8") as f:
@@ -148,11 +141,12 @@ def _load_tickers(market: MarketConfig):
     # Any other market: the scanner-backed universe (index members first), plus
     # symbols users have validated that the universe does not list.
     db = get_db()
+    universe_rows = universe.load_universe(db, market)
     result = [{
         "symbol": r["symbol"], "name": r["name"], "sector": r["sector"],
         "index": (r["indices"][0] if r["indices"] else r["exchange"]),
         "indices": r["indices"], "exchange": r["exchange"],
-    } for r in universe.load_universe(db, market)]
+    } for r in universe_rows]
     try:
         known = {t["symbol"].upper() for t in result}
         rows = db.execute(
@@ -170,8 +164,9 @@ def _load_tickers(market: MarketConfig):
     except Exception:
         pass
 
-    # An empty result is a scanner outage, not an answer: do not pin it.
-    if result:
+    # An empty universe is a scanner outage, not an answer: do not pin a list
+    # that holds only the discovered rows.
+    if universe_rows:
         _tickers_cache[market.code] = (result, now)
     return result
 
