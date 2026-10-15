@@ -152,6 +152,7 @@ def build_composite_extras(
     index_membership: Optional[str] = None,
     divergence_lookback: int = DIVERGENCE_LOOKBACK_FULL,
     benchmark_label: Optional[str] = None,
+    score_calibrated: bool = True,
 ) -> dict:
     """
     Assemble every input `compute_composite` consumes, plus the by-products
@@ -173,6 +174,9 @@ def build_composite_extras(
                            the relative_strength category is skipped.
       benchmark_label:     The market's benchmark name, for the relative
                            strength reasons only (None reads as EGX30).
+      score_calibrated:    MarketConfig.score_calibrated. Copy only: False
+                           drops the EGX-median and EGX dividend-drag wording
+                           from the reasons. Never changes a score.
       weekly_close:        Pre-computed weekly closes. None -> resampled from
                            `df` (preferred; see _weekly_from_daily).
       include_multi_timeframe:
@@ -402,6 +406,7 @@ def build_composite_extras(
         # Names the benchmark in the relative-strength reasons only; never a
         # scoring input. None reads as EGX30, the label before markets existed.
         "benchmark_label": benchmark_label,
+        "score_calibrated": score_calibrated,
         "pe_ratio": pe_ratio,
         "dividend_yield": dividend_yield,
         "loss_making": loss_making,

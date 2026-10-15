@@ -121,6 +121,7 @@ def _compute_batch_one(symbol: str, interval: str, weights: dict,
             index_membership=index_membership,
             divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
             benchmark_label=market.benchmark_label,
+            score_calibrated=market.score_calibrated,
         )
 
         comp = compute_composite(
@@ -574,6 +575,7 @@ def get_analysis(
             index_membership=get_index_membership(symbol, market),
             divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
             benchmark_label=market.benchmark_label,
+            score_calibrated=market.score_calibrated,
         )
         divergences = built["divergences"]
         volume_price = built["volume_price"]

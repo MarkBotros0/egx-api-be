@@ -404,6 +404,7 @@ def risk_snapshot(
                 index_membership=get_index_membership(symbol, market),
                 divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
                 benchmark_label=market.benchmark_label,
+                score_calibrated=market.score_calibrated,
             )
             scored = score_categories(indicators, built["extras"])
             close = df["close"]

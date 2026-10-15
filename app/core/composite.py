@@ -513,7 +513,8 @@ def score_quality(multi_timeframe: Optional[dict],
                   *,
                   pe_ratio: Optional[float] = None,
                   dividend_yield: Optional[float] = None,
-                  loss_making: Optional[bool] = None) -> tuple:
+                  loss_making: Optional[bool] = None,
+                  calibrated: bool = True) -> tuple:
     """
     Score the quality category (0-100).
 
@@ -540,6 +541,10 @@ def score_quality(multi_timeframe: Optional[dict],
                         not a defect; None means unknown. Both skip the band.
       - loss_making: from diluted EPS < 0. Separate from pe_ratio because the
                      feed reports null, never a negative P/E, for loss-makers.
+      - calibrated: False for a market whose bands were never fitted
+                    (MarketConfig.score_calibrated). The score is unchanged;
+                    reasons that compare against the EGX median are replaced
+                    by the bare figure, never relabelled as another median.
     """
     if (multi_timeframe is None and trend_consistency is None
             and current_drawdown_pct is None and pe_ratio is None
@@ -619,13 +624,16 @@ def score_quality(multi_timeframe: Optional[dict],
             )
         elif pe_ratio < 8:
             score += 12
-            reasons.append(f"Cheap versus the EGX median of ~12 (P/E {pe_ratio:.1f})")
+            reasons.append(f"Cheap versus the EGX median of ~12 (P/E {pe_ratio:.1f})"
+                           if calibrated else f"P/E {pe_ratio:.1f}")
         elif pe_ratio < 15:
             score += 4
-            reasons.append(f"Around the EGX median (P/E {pe_ratio:.1f})")
+            reasons.append(f"Around the EGX median (P/E {pe_ratio:.1f})"
+                           if calibrated else f"P/E {pe_ratio:.1f}")
         elif pe_ratio < 25:
             score -= 2
-            reasons.append(f"Above the EGX median (P/E {pe_ratio:.1f})")
+            reasons.append(f"Above the EGX median (P/E {pe_ratio:.1f})"
+                           if calibrated else f"P/E {pe_ratio:.1f}")
         elif pe_ratio < 40:
             score -= 8
             reasons.append(f"Expensive on earnings (P/E {pe_ratio:.1f})")
@@ -659,11 +667,13 @@ def score_quality(multi_timeframe: Optional[dict],
             reasons.append(
                 f"Above-median dividend (DY {dividend_yield:.1f}%) — real cash returned "
                 "to shareholders, though still under the T-bill"
+                if calibrated else f"Dividend yield {dividend_yield:.1f}%"
             )
         elif dividend_yield >= 2:
             score += 4
             reasons.append(
                 f"Pays about the EGX median dividend (DY {dividend_yield:.1f}%)"
+                if calibrated else f"Dividend yield {dividend_yield:.1f}%"
             )
         else:
             reasons.append(f"Token dividend (DY {dividend_yield:.1f}%)")
@@ -675,7 +685,8 @@ def score_risk_adjusted(annualized_return_pct: Optional[float],
                         risk_free_rate_pct: float,
                         volatility_annualized_pct: Optional[float],
                         atr_pct_of_price: Optional[float],
-                        history_days: Optional[int]) -> tuple:
+                        history_days: Optional[int],
+                        calibrated: bool = True) -> tuple:
     """
     Score the risk-adjusted category (0-100).
 
@@ -686,6 +697,10 @@ def score_risk_adjusted(annualized_return_pct: Optional[float],
 
     Minimum-history gate: returns None if <120 trading days to avoid
     misleading annualization. Caller's renormalization handles that.
+
+    `calibrated` False (MarketConfig.score_calibrated) changes copy only: the
+    hurdle is called the T-bill rate and the EGX-measured dividend drag is not
+    quoted. The score is identical.
     """
     if history_days is not None and history_days < 120:
         return None, []
@@ -715,13 +730,20 @@ def score_risk_adjusted(annualized_return_pct: Optional[float],
         reasons.append(f"Ann. return {annualized_return_pct:.0f}% — marginally beats T-bill")
     elif excess >= -10:
         score -= 10
-        reasons.append(
-            f"Ann. return {annualized_return_pct:.0f}% — UNDERPERFORMS the "
-            f"{risk_free_rate_pct:.0f}% policy rate. Note this compares price "
-            f"only: dividends are not counted, and on the EGX that is worth "
-            f"about {DIVIDEND_DRAG_PP_PER_YEAR:.1f} points a year, so the real "
-            f"gap is narrower."
-        )
+        if calibrated:
+            reasons.append(
+                f"Ann. return {annualized_return_pct:.0f}% — UNDERPERFORMS the "
+                f"{risk_free_rate_pct:.0f}% policy rate. Note this compares price "
+                f"only: dividends are not counted, and on the EGX that is worth "
+                f"about {DIVIDEND_DRAG_PP_PER_YEAR:.1f} points a year, so the real "
+                f"gap is narrower."
+            )
+        else:
+            reasons.append(
+                f"Ann. return {annualized_return_pct:.0f}% — UNDERPERFORMS the "
+                f"{risk_free_rate_pct:.0f}% T-bill rate. Note this compares price "
+                f"only: dividends are not counted, so the real gap is narrower."
+            )
     else:
         score -= 20
         reasons.append(f"Ann. return {annualized_return_pct:.0f}% — severely underperforms cash")
@@ -905,6 +927,9 @@ def score_categories(indicators: dict, extras: Optional[dict] = None) -> dict:
     divergence_score, divergence_reasons = score_divergence(
         extras.get("divergences"),
     )
+    # Copy only: an uncalibrated market's reasons drop the EGX comparisons.
+    # Absent (an extras dict built before markets) reads as calibrated.
+    _calibrated = extras.get("score_calibrated", True) is not False
     quality_score, quality_reasons = score_quality(
         extras.get("multi_timeframe"),
         extras.get("trend_consistency"),
@@ -912,6 +937,7 @@ def score_categories(indicators: dict, extras: Optional[dict] = None) -> dict:
         pe_ratio=extras.get("pe_ratio"),
         dividend_yield=extras.get("dividend_yield"),
         loss_making=extras.get("loss_making"),
+        calibrated=_calibrated,
     )
     # `or` would treat a legitimate 0% rate as missing — check for None.
     _rfr = extras.get("risk_free_rate_pct")
@@ -921,6 +947,7 @@ def score_categories(indicators: dict, extras: Optional[dict] = None) -> dict:
         extras.get("volatility_annualized_pct"),
         extras.get("atr_pct_of_price"),
         extras.get("history_days"),
+        calibrated=_calibrated,
     )
     relative_strength_score, relative_strength_reasons = score_relative_strength(
         extras.get("relative_strength"),

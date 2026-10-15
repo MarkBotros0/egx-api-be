@@ -486,6 +486,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                     index_membership=get_index_membership(symbol, market),
                     divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
                     benchmark_label=bench,
+                    score_calibrated=market.score_calibrated,
                 )
                 divergences_h = built_h["divergences"]
                 volume_price_h = built_h["volume_price"]
@@ -947,9 +948,11 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                         "message": f"{symbol} yields {dy:.1f}% — check before counting on it.",
                         "explanation": "A yield this high is usually a one-off special dividend, or it only looks high because the share price collapsed. Confirm the payout recurs before treating it as a reason to hold.",
                         "learn_concept": "dividend_yield"})
-                elif dy >= 4:
+                elif dy >= 4 and market.code == EG.code:
+                    # EG-only: "above-median" and "loses to the policy rate"
+                    # are EGX facts, and neither holds for another market.
                     signals.append({"type": "dividend_yield_solid", "severity": "info", "symbol": symbol,
-                        "message": f"{symbol} yields {dy:.1f}% — an above-median {market.short_name} payer.",
+                        "message": f"{symbol} yields {dy:.1f}% — an above-median EGX payer.",
                         "explanation": f"Read this as evidence the company generates real cash and returns it, not as income: even this yield loses to the ~{risk_free_rate_pct:.0f}% policy rate. It is a quality marker, not a reason to buy on its own.",
                         "learn_concept": "dividend_yield"})
 

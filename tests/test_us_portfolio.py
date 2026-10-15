@@ -76,17 +76,42 @@ def _frame(n: int, seed: int = 7, drift: float = 0.0) -> pd.DataFrame:
     }, index=idx)
 
 
+def _flat_frame(n: int) -> pd.DataFrame:
+    """A price that goes nowhere over the year: its annualized return sits in
+    the "underperforms the T-bill" band, so that reason is emitted."""
+    i = np.arange(n)
+    close = 20 * (1 + 0.01 * np.sin(i / 7.0))
+    idx = pd.bdate_range("2024-01-01", periods=n)
+    vol = 2e5 + 1e5 * (i % 5)
+    return pd.DataFrame({
+        "Open": close, "High": close * 1.01, "Low": close * 0.99,
+        "Close": close, "Volume": vol.astype(float),
+    }, index=idx)
+
+
 @pytest.fixture
 def fake_feed(monkeypatch):
     calls = []
 
     def fake(symbol, exchange, interval, bars):
         calls.append((symbol, exchange))
-        return _frame(bars)
+        return _flat_frame(bars)
 
     import app.vendor.egxpy as egxpy
     monkeypatch.setattr(egxpy, "get_OHLCV_data", fake)
     return calls
+
+
+# get_pe_for_symbol's row: company_name, pe_ratio, dividend_yield, loss_making,
+# updated_at, dividend_ex_date_recent, dividend_amount_recent. A P/E under 8
+# and a 2-4% yield hit the bands whose EG copy names the EGX median.
+KO_PE = ("Coca-Cola", 6.2, 3.1, False, "2026-10-14", None, None)
+
+BANNED = ("EGP", "EGX30", "EGX", "policy rate")
+
+
+def _reasons(breakdown):
+    return [r for cat in (breakdown or {}).values() for r in (cat.get("reasons") or [])]
 
 
 @pytest.fixture
@@ -99,6 +124,7 @@ def fake_db_with_us_holding(monkeypatch):
     so the stop and target messages (both quoting prices) are emitted.
     """
     db = FakeDB()
+    db.rows_for("FROM pe_data WHERE", [KO_PE])
     db.rows_for("FROM portfolio WHERE", [(
         "h1", "KO", "Coca-Cola", 15.0, "2024-01-02", 10, "", "Beverages",
         1.0, 1000.0, "2024-01-02T00:00:00Z", "2024-01-02T00:00:00Z",
@@ -178,13 +204,18 @@ def test_us_portfolio_analysis_has_no_eg_wording(client, monkeypatch, fake_feed,
     body = r.json()
     assert body["currency"] == "USD"
     text = r.text
-    for banned in ("EGP", "EGX30", "EGX ", "EGX"):
+    for banned in BANNED:
         assert banned not in text, banned
     assert "USD" in text
     assert "S&P 500" in text
     types = {s["type"] for s in body["signals"]}
     assert {"stop_breached", "target_hit", "relative_strength_leader"} <= types
     assert "macro_egx30" not in types
+    assert not types & {"pe_undervalued", "dividend_yield_solid"}
+    # The branches whose EG copy names the EGX actually fired, neutrally.
+    reasons = _reasons(body["holdings"][0]["composite_breakdown"])
+    assert "P/E 6.2" in reasons and "Dividend yield 3.1%" in reasons
+    assert any("UNDERPERFORMS" in x and "T-bill rate" in x for x in reasons), reasons
 
 
 def test_eg_portfolio_analysis_keeps_egp_wording(client, monkeypatch, fake_feed,
@@ -200,6 +231,37 @@ def test_eg_portfolio_analysis_keeps_egp_wording(client, monkeypatch, fake_feed,
     msgs = " ".join(s["message"] for s in signals)
     assert "1000.00 EGP" in msgs and "outperforming EGX30" in msgs
     assert "macro_egx30" in {s["type"] for s in signals}
+
+
+def test_eg_reasons_keep_their_egx_copy(client, monkeypatch, fake_feed, fake_db_with_us_holding):
+    import app.core.benchmark as B
+    import app.routers.portfolio_analysis as PA
+    monkeypatch.setattr(B, "get_benchmark_close", lambda m, i, b: _bench(b))
+    monkeypatch.setattr(PA, "fetch_macro_for", lambda db, m: None)
+    # A low EG rate puts the flat price in the "underperforms" band.
+    fake_db_with_us_holding.rows_for("key = 'risk_free_rate'", [("4",)])
+    body = client.get("/api/portfolio_analysis").json()
+    reasons = _reasons(body["holdings"][0]["composite_breakdown"])
+    assert "Cheap versus the EGX median of ~12 (P/E 6.2)" in reasons
+    assert "Pays about the EGX median dividend (DY 3.1%)" in reasons
+    assert any("policy rate" in x and "on the EGX" in x for x in reasons), reasons
+
+
+def test_us_stock_page_has_no_eg_wording(client, monkeypatch, fake_feed):
+    from app.routers import analysis as analysis_mod
+    db = FakeDB()
+    db.rows_for("FROM pe_data WHERE", [KO_PE])
+    monkeypatch.setattr(analysis_mod, "get_db", lambda: db)
+    monkeypatch.setattr(analysis_mod, "fetch_macro_for", lambda db, market: None)
+    r = client.get("/api/analysis", params={"symbol": "KO", "market": "US", "bars": 60})
+    assert r.status_code == 200, r.text
+    import json
+    body = r.json()
+    body.pop("forecast")
+    text = json.dumps(body, ensure_ascii=False)
+    for banned in BANNED:
+        assert banned not in text, banned
+    assert "P/E 6.2" in r.text and "T-bill rate" in r.text and "S&P 500" in r.text
 
 
 def test_position_signals_default_to_egp():
