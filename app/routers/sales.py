@@ -15,7 +15,10 @@ endpoint in the app and flirts with the 30 s Vercel timeout. Neither ledger
 needs a price fetch, so the Winnings card paints even on a run where the
 analysis times out.
 
-Every route is scoped by the caller's user_id from the JWT.
+Every route is scoped by the caller's user_id from the JWT. The ledger GET is
+scoped by `?market=` (absent means EG). A sale belongs to the market of the
+holding it sells, so POST reads it off that row and ignores any body value;
+DELETE acts on rows by id, which already carry their market.
 """
 
 import uuid
@@ -28,6 +31,7 @@ from app.core.constants import DEFAULT_RISK_FREE_RATE_PCT
 from app.core.db import get_db
 from app.core.holdings import HOLDING_COLUMNS, fetch_open_lots, row_to_holding
 from app.core.dividends import fetch_dividends, summarize_realized
+from app.core.markets import MARKETS, MarketConfig, market_param
 from app.core.macro_series import get_risk_free_steps
 from app.core.sales import (
     SaleValidationError,
@@ -90,14 +94,19 @@ def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
         # resolves the SYMBOL; the shares come from the lot set below, so a
         # sale can still be recorded from a row that is itself fully closed.
         row = db.execute(
-            f"SELECT {HOLDING_COLUMNS} FROM portfolio WHERE id = %s AND user_id = %s",
+            f"SELECT {HOLDING_COLUMNS}, market FROM portfolio WHERE id = %s AND user_id = %s",
             (holding_id, user.id),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Holding not found: {holding_id}")
         anchor = row_to_holding(row)
+        # The sale's market is the holding's, never the body's: the lots it
+        # draws on are that market's lots. Looked up in the registry, not via
+        # get_market — an existing row stays sellable even if its market is
+        # later switched off.
+        market = MARKETS[row[-1] or "EG"]
 
-        lots = fetch_open_lots(db, user.id, anchor["symbol"])
+        lots = fetch_open_lots(db, user.id, anchor["symbol"], market.code)
 
         clean = validate_position_sale(
             lots=lots,
@@ -139,14 +148,14 @@ def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
 
                 sale_id = str(uuid.uuid4())
                 tx.execute(
-                    f"INSERT INTO portfolio_sales ({_SALE_COLUMNS}, user_id) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    f"INSERT INTO portfolio_sales ({_SALE_COLUMNS}, user_id, market) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         sale_id, part["id"], part["symbol"], part["name"],
                         part.get("sector") or "", part["quantity"],
                         float(part["buy_price"]), part["buy_date"],
                         clean["sell_price"], clean["sell_date"],
-                        notes, now, group_id, user.id,
+                        notes, now, group_id, user.id, market.code,
                     ),
                 )
                 remaining_by_lot[part["id"]] = updated[0]
@@ -164,6 +173,8 @@ def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
         rate_steps = get_risk_free_steps(db)
         priced = [compute_sale_metrics(s, rfr, rate_steps=rate_steps) for s in sales]
         return {
+            "market": market.code,
+            "currency": market.currency,
             "sales": priced,
             # What the user placed — one order, however many rows it wrote.
             "orders": group_sale_orders(priced),
@@ -182,13 +193,14 @@ def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
 
 
 @router.get("/api/sales")
-def get_sales(user: CurrentUser = Depends(get_current_user)):
+def get_sales(market: MarketConfig = Depends(market_param),
+              user: CurrentUser = Depends(get_current_user)):
     try:
         db = get_db()
         rows = db.execute(
             f"SELECT {_SALE_COLUMNS} FROM portfolio_sales "
-            "WHERE user_id = %s ORDER BY sell_date DESC, created_at DESC",
-            (user.id,),
+            "WHERE user_id = %s AND market = %s ORDER BY sell_date DESC, created_at DESC",
+            (user.id, market.code),
         ).fetchall()
 
         rfr = _risk_free_rate_pct(db)
@@ -198,11 +210,7 @@ def get_sales(user: CurrentUser = Depends(get_current_user)):
         rate_steps = get_risk_free_steps(db)
         priced = [compute_sale_metrics(_row_to_sale(r), rfr, rate_steps=rate_steps)
                   for r in rows]
-        dividends = fetch_dividends(db, user.id)
-
-        currency_row = db.execute(
-            "SELECT value FROM settings WHERE key = 'currency'"
-        ).fetchone()
+        dividends = fetch_dividends(db, user.id, market.code)
 
         return {
             # The flat per-lot rows. `summarize_realized` eats THESE, not the
@@ -213,7 +221,9 @@ def get_sales(user: CurrentUser = Depends(get_current_user)):
             "orders": group_sale_orders(priced),
             "dividends": dividends,
             "summary": summarize_realized(priced, dividends),
-            "currency": currency_row[0] if currency_row else "EGP",
+            "market": market.code,
+            # A fact of the market, not a setting.
+            "currency": market.currency,
             "risk_free_rate_pct": rfr,
         }
 

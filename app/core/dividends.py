@@ -232,21 +232,22 @@ def row_to_dividend(row) -> dict:
     }
 
 
-def fetch_dividends(db, user_id: str) -> list:
-    """This user's dividends, enriched, newest pay_date first."""
+def fetch_dividends(db, user_id: str, market_code: str = "EG") -> list:
+    """This user's dividends in one market, enriched, newest pay_date first."""
     if not user_id:
         return []
     rows = db.execute(
         f"SELECT {DIVIDEND_COLUMNS} FROM portfolio_dividends "
-        "WHERE user_id = %s ORDER BY pay_date DESC, created_at DESC",
-        (user_id,),
+        "WHERE user_id = %s AND market = %s ORDER BY pay_date DESC, created_at DESC",
+        (user_id, market_code),
     ).fetchall()
     return [enrich_dividend(row_to_dividend(r)) for r in rows]
 
 
-def fetch_dividend_totals(db, user_id: str) -> dict:
+def fetch_dividend_totals(db, user_id: str, market_code: str = "EG") -> dict:
     """
-    {symbol: total EGP collected}. Empty dict when there is no user.
+    {symbol: total collected in the market's currency}, for one market. Empty
+    dict when there is no user.
 
     Used by portfolio_analysis to put a figure against each open holding. One
     indexed aggregate with no price fetch, so it costs nothing against the 30 s
@@ -256,7 +257,7 @@ def fetch_dividend_totals(db, user_id: str) -> dict:
         return {}
     rows = db.execute(
         "SELECT symbol, SUM(amount) FROM portfolio_dividends "
-        "WHERE user_id = %s GROUP BY symbol",
-        (user_id,),
+        "WHERE user_id = %s AND market = %s GROUP BY symbol",
+        (user_id, market_code),
     ).fetchall()
     return {r[0]: round(float(r[1] or 0), 2) for r in rows}

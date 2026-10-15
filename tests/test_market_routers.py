@@ -816,3 +816,207 @@ def test_alert_quiet_hours_use_the_eg_clock():
 def test_default_risk_free_rate_is_egs_registry_fallback():
     from app.core.constants import DEFAULT_RISK_FREE_RATE_PCT
     assert DEFAULT_RISK_FREE_RATE_PCT == EG.risk_free_fallback_pct == 19
+
+
+# ---------------------------------------------------------------------------
+# Per-user data is scoped by market: watchlist, portfolio, sales, dividends,
+# portfolio_analysis. Handlers are called directly with a FakeDB.
+# ---------------------------------------------------------------------------
+
+import app.routers.watchlist as watchlist_mod  # noqa: E402
+import app.routers.portfolio as portfolio_mod  # noqa: E402
+import app.routers.sales as sales_mod  # noqa: E402
+import app.routers.dividends as dividends_mod  # noqa: E402
+
+
+def _patched_db(monkeypatch, mod, responses=None):
+    db = FakeDB(responses)
+    monkeypatch.setattr(mod, "get_db", lambda: db)
+    return db
+
+
+def test_watchlist_is_scoped_by_market(monkeypatch):
+    db = _patched_db(monkeypatch, watchlist_mod)
+    out = watchlist_mod.get_watchlist(market=EG, user=ME)
+    [(sql, params)] = db.statements("SELECT symbol FROM watchlist")
+    assert "market = %s" in sql and params == ("u1", "EG")
+    assert out["market"] == "EG"
+
+
+def test_watchlist_add_writes_market_and_new_conflict_target(monkeypatch):
+    db = _patched_db(monkeypatch, watchlist_mod)
+    monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
+    out = watchlist_mod.add_to_watchlist(
+        watchlist_mod.WatchlistAdd(symbol="aapl", market="US"), market=EG, user=ME)
+    [(sql, params)] = db.statements("INSERT INTO watchlist")
+    assert "ON CONFLICT (user_id, market, symbol)" in sql
+    assert params[:3] == ("u1", "US", "AAPL")
+    assert out["market"] == "US"
+
+
+def test_watchlist_add_without_body_market_uses_the_query_market(monkeypatch):
+    db = _patched_db(monkeypatch, watchlist_mod)
+    monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
+    out = watchlist_mod.add_to_watchlist(
+        watchlist_mod.WatchlistAdd(symbol="aapl"), market=US, user=ME)
+    [(_, params)] = db.statements("INSERT INTO watchlist")
+    assert params[1] == "US" and out["market"] == "US"
+
+
+def test_watchlist_add_refuses_a_disabled_body_market(monkeypatch):
+    from fastapi import HTTPException
+    db = _patched_db(monkeypatch, watchlist_mod)
+    monkeypatch.delenv("ENABLED_MARKETS", raising=False)
+    with pytest.raises(HTTPException) as e:
+        watchlist_mod.add_to_watchlist(
+            watchlist_mod.WatchlistAdd(symbol="aapl", market="US"), market=EG, user=ME)
+    assert e.value.status_code == 400
+    assert db.statements("INSERT INTO watchlist") == []
+
+
+def test_watchlist_delete_is_scoped(monkeypatch):
+    db = _patched_db(monkeypatch, watchlist_mod)
+    watchlist_mod.remove_from_watchlist(symbol="COMI", market=EG, user=ME)
+    [(sql, params)] = db.statements("DELETE FROM watchlist")
+    assert "market = %s" in sql and params == ("u1", "EG", "COMI")
+
+
+def test_portfolio_list_is_scoped_by_market(monkeypatch):
+    db = _patched_db(monkeypatch, portfolio_mod)
+    portfolio_mod.get_portfolio(market=US, user=ME)
+    [(sql, params)] = db.statements("FROM portfolio")
+    assert "market = %s" in sql and params == ("u1", "US")
+
+
+def test_portfolio_currency_comes_from_market_not_settings(monkeypatch):
+    db = _patched_db(monkeypatch, portfolio_mod)
+    out = portfolio_mod.get_portfolio(market=EG, user=ME)
+    assert out["currency"] == "EGP" and out["market"] == "EG"
+    assert db.statements("SELECT value FROM settings WHERE key = 'currency'") == []
+    out = portfolio_mod.get_portfolio(market=US, user=ME)
+    assert out["currency"] == "USD" and out["market"] == "US"
+
+
+def test_portfolio_create_writes_the_body_market(monkeypatch):
+    db = _patched_db(monkeypatch, portfolio_mod)
+    monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
+    out = portfolio_mod.add_holding(
+        {"symbol": "aapl", "buy_price": 10, "quantity": 2, "market": "US"},
+        market=EG, user=ME)
+    [(sql, params)] = db.statements("INSERT INTO portfolio")
+    assert "market" in sql.split("VALUES")[0]
+    assert params[1:4] == ("u1", "US", "AAPL")
+    assert out["market"] == "US"
+
+
+def test_portfolio_create_defaults_to_the_query_market(monkeypatch):
+    db = _patched_db(monkeypatch, portfolio_mod)
+    out = portfolio_mod.add_holding(
+        {"symbol": "comi", "buy_price": 10, "quantity": 2}, market=EG, user=ME)
+    [(_, params)] = db.statements("INSERT INTO portfolio")
+    assert params[2] == "EG" and out["market"] == "EG"
+
+
+_LOT = ("h1", "AAPL", "Apple", 100.0, "2026-01-05", 10, "", "Tech",
+        None, None, "2026-01-05T00:00:00Z", "2026-01-05T00:00:00Z")
+
+
+def test_sale_takes_the_holdings_market_not_the_bodys(monkeypatch):
+    db = _patched_db(monkeypatch, sales_mod, [
+        ("WHERE id = %s AND user_id = %s", [_LOT + ("US",)]),
+        ("AND quantity > 0", [_LOT]),
+        ("RETURNING quantity", [(6,)]),
+    ])
+    monkeypatch.setattr(sales_mod, "get_risk_free_steps", lambda db: [])
+    out = sales_mod.record_sale(
+        {"holding_id": "h1", "quantity": 4, "sell_price": 120, "sell_date": "2026-02-01",
+         "market": "EG"},
+        user=ME)
+    [(sql, params)] = db.statements("AND quantity > 0")
+    assert "market = %s" in sql and params == ("u1", "AAPL", "US")
+    [(sql, params)] = db.statements("INSERT INTO portfolio_sales")
+    assert "market" in sql.split("VALUES")[0] and params[-1] == "US"
+    assert out["market"] == "US" and out["currency"] == "USD"
+
+
+def test_sales_ledger_is_scoped_by_market_with_market_currency(monkeypatch):
+    db = _patched_db(monkeypatch, sales_mod)
+    monkeypatch.setattr(sales_mod, "get_risk_free_steps", lambda db: [])
+    out = sales_mod.get_sales(market=US, user=ME)
+    for needle in ("FROM portfolio_sales", "FROM portfolio_dividends"):
+        [(sql, params)] = db.statements(needle)
+        assert "market = %s" in sql and params == ("u1", "US"), needle
+    assert out["market"] == "US" and out["currency"] == "USD"
+    assert db.statements("WHERE key = 'currency'") == []
+
+
+def test_dividend_create_writes_market_and_dedupes_within_it(monkeypatch):
+    db = _patched_db(monkeypatch, dividends_mod)
+    monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
+    out = dividends_mod.record_dividend(
+        {"symbol": "aapl", "amount": 5, "pay_date": "2026-02-01", "market": "US"},
+        market=EG, user=ME)
+    [(sql, params)] = db.statements("FROM portfolio_dividends")
+    assert "market = %s" in sql and params == ("u1", "US")
+    [(sql, params)] = db.statements("INSERT INTO portfolio_dividends")
+    assert "market" in sql.split("VALUES")[0] and params[1:3] == ("u1", "US")
+    assert out["market"] == "US" and out["currency"] == "USD"
+
+
+def test_dividend_duplicate_message_names_the_markets_currency(monkeypatch):
+    from fastapi import HTTPException
+    dup = ("d1", "AAPL", "Apple", "", 5.0, "2026-02-01", None, "", "2026-02-01T00:00:00Z")
+    _patched_db(monkeypatch, dividends_mod, [("FROM portfolio_dividends", [dup])])
+    monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
+    with pytest.raises(HTTPException) as e:
+        dividends_mod.record_dividend(
+            {"symbol": "AAPL", "amount": 5, "pay_date": "2026-02-01"}, market=US, user=ME)
+    assert e.value.status_code == 409 and "USD" in e.value.detail
+
+
+@pytest.fixture
+def pa_env(monkeypatch, fake_feed):
+    import app.routers.portfolio_analysis as pa_mod
+    from app.core import benchmark as bench_mod
+    db = FakeDB()
+    benchmarks = []
+    monkeypatch.setattr(pa_mod, "get_db", lambda: db)
+    monkeypatch.setattr(pa_mod, "fetch_macro", lambda db: None)
+    monkeypatch.setattr(bench_mod, "get_benchmark_close",
+                        lambda m, interval, bars: benchmarks.append(m.code) or None)
+    db.benchmarks = benchmarks
+    db.feed = fake_feed
+    return db
+
+
+def test_portfolio_analysis_defaults_to_eg(client, pa_env):
+    pa_env.rows_for("FROM portfolio WHERE", [_LOT[:1] + ("COMI",) + _LOT[2:]])
+    r = client.get("/api/portfolio_analysis")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["market"] == "EG" and body["currency"] == "EGP"
+    [(sql, params)] = pa_env.statements("FROM portfolio WHERE")
+    assert "market = %s" in sql and params == ("u1", "EG")
+    assert pa_env.benchmarks == ["EG"]
+    assert pa_env.feed == [("COMI", "EGX")]
+    for needle in ("FROM pe_data", "FROM portfolio_dividends"):
+        stmts = pa_env.statements(needle)
+        assert stmts and all("market = %s" in s and "EG" in p for s, p in stmts), needle
+
+
+def test_portfolio_analysis_us_uses_us_exchange_benchmark_and_pe(client, pa_env, monkeypatch):
+    monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
+    pa_env.rows_for("FROM portfolio WHERE", [_LOT])
+    r = client.get("/api/portfolio_analysis", params={"market": "US"})
+    assert r.status_code == 200, r.text
+    assert r.json()["market"] == "US" and r.json()["currency"] == "USD"
+    assert pa_env.benchmarks == ["US"]
+    assert pa_env.feed == [("AAPL", "NASDAQ")]
+    [(_, params)] = pa_env.statements("FROM pe_data")
+    assert "US" in params
+
+
+def test_portfolio_analysis_refuses_unknown_market(client, pa_env):
+    assert client.get("/api/portfolio_analysis", params={"market": "XX"}).status_code == 400
+    assert client.post("/api/portfolio_analysis", params={"market": "XX"},
+                       json={"portfolio": []}).status_code == 400

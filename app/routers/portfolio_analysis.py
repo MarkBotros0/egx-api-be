@@ -1,8 +1,12 @@
 """
 /api/portfolio_analysis — Analyze a portfolio of stock holdings.
 
-GET  — Read the current user's holdings from Postgres and analyze them
-POST — Accept holdings in request body (body: {portfolio: [...]})
+GET  — Read the current user's holdings in `?market=` from Postgres and analyze them
+POST — Accept holdings in request body (body: {portfolio: [...]}), priced in `?market=`
+
+Absent `?market=` means EG. The market picks the exchange each holding is
+fetched from, the benchmark, the P/E rows and the dividend totals — the same
+inputs /api/analysis uses for that market, so a holding scores identically here.
 """
 
 import zlib
@@ -16,6 +20,7 @@ from app.core.db import get_db
 from app.core.dividends import fetch_dividend_totals
 from app.core.holdings import fetch_open_holdings
 from app.core.macro_fetch import fetch_macro
+from app.core.markets import EG, MarketConfig, market_param
 from app.core.composite import compute_composite, get_weights_from_db, DEFAULT_WEIGHTS
 from app.core.levels import compute_key_levels, compute_entry_exit
 from app.core.extras_builder import build_composite_extras
@@ -180,14 +185,13 @@ def build_position_signals(positions: list[dict], *, risk_free_rate_pct: float,
     return out
 
 
-def _analyze(holdings, user_id: str = None):
+def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
     if not holdings:
         raise HTTPException(status_code=400, detail="No holdings provided")
 
     from app.vendor.egxpy import get_OHLCV_data
     from app.core.benchmark import get_benchmark_close
     from app.core.cache import get as cache_get, set as cache_set, make_key
-    from app.core.markets import EG
     import pandas as pd
     import numpy as np
 
@@ -201,7 +205,7 @@ def _analyze(holdings, user_id: str = None):
     # price fetch — it costs nothing against the 30 s budget. It must key off
     # user_id and NOT off `holdings`, because POST /api/portfolio_analysis
     # takes holdings from the request body.
-    dividends_by_symbol = fetch_dividend_totals(get_db(), user_id)
+    dividends_by_symbol = fetch_dividend_totals(get_db(), user_id, market.code)
 
     # Nothing stops two portfolio rows sharing a symbol, and a dividend belongs
     # to the SYMBOL, not to one purchase lot. When that happens the UI labels
@@ -231,7 +235,7 @@ def _analyze(holdings, user_id: str = None):
         # strength are computed against an identical benchmark series on
         # every page. A shorter window here gave the same stock a different
         # beta on the portfolio page than on its detail page.
-        egx30_close = get_benchmark_close(EG, "Daily", INTERNAL_BARS_MIN)
+        egx30_close = get_benchmark_close(market, "Daily", INTERNAL_BARS_MIN)
         if egx30_close is not None:
             egx30_returns = calc_daily_returns(egx30_close)
     except Exception:
@@ -279,7 +283,7 @@ def _analyze(holdings, user_id: str = None):
             # SMA200 with a single valid point, so golden/death crosses could
             # never be detected for a recently-bought holding, and made beta
             # depend on how long the user had owned the stock.
-            df = get_OHLCV_data(symbol, "EGX", "Daily", INTERNAL_BARS_MIN)
+            df = get_OHLCV_data(symbol, market.primary_exchange, "Daily", INTERNAL_BARS_MIN)
             if df is None or df.empty:
                 # `id` travels with the error row on purpose: the spec promises
                 # a sale can be recorded even when the price feed is down, and
@@ -441,7 +445,7 @@ def _analyze(holdings, user_id: str = None):
 
             pe_info_h = None
             try:
-                pe_info_h = get_pe_for_symbol(get_db(), symbol)
+                pe_info_h = get_pe_for_symbol(get_db(), symbol, market.code)
             except Exception:
                 pe_info_h = None
 
@@ -1190,6 +1194,8 @@ def _analyze(holdings, user_id: str = None):
     signals.sort(key=lambda s: severity_order.get(s["severity"], 4))
 
     return {
+        "market": market.code,
+        "currency": market.currency,
         "holdings": stock_analyses,
         "excluded_holdings": excluded_holdings,
         "portfolio_metrics": {
@@ -1233,11 +1239,12 @@ def _analyze(holdings, user_id: str = None):
 
 
 @router.get("/api/portfolio_analysis")
-def get_portfolio_analysis(user: CurrentUser = Depends(get_current_user)):
+def get_portfolio_analysis(market: MarketConfig = Depends(market_param),
+                           user: CurrentUser = Depends(get_current_user)):
     try:
         db = get_db()
-        holdings = fetch_open_holdings(db, user.id)
-        return _analyze(holdings, user.id)
+        holdings = fetch_open_holdings(db, user.id, market.code)
+        return _analyze(holdings, user.id, market)
     except HTTPException:
         raise
     except Exception as e:
@@ -1247,11 +1254,12 @@ def get_portfolio_analysis(user: CurrentUser = Depends(get_current_user)):
 @router.post("/api/portfolio_analysis")
 def post_portfolio_analysis(
     body: dict,
+    market: MarketConfig = Depends(market_param),
     user: CurrentUser = Depends(get_current_user),
 ):
     try:
         holdings = body.get("portfolio", [])
-        return _analyze(holdings, user.id)
+        return _analyze(holdings, user.id, market)
     except HTTPException:
         raise
     except Exception as e:

@@ -1,12 +1,14 @@
 """
 Portfolio CRUD — Manage stock holdings via Postgres.
 
-GET    /api/portfolio          — List the current user's holdings
-POST   /api/portfolio          — Add a new holding for the current user
-PUT    /api/portfolio?id=xxx   — Update one of the current user's holdings
-DELETE /api/portfolio?id=xxx   — Remove one of the current user's holdings
+GET    /api/portfolio?market=XX — List the current user's holdings in a market
+POST   /api/portfolio           — Add a new holding (body `market` beats `?market=`)
+PUT    /api/portfolio?id=xxx    — Update one of the current user's holdings
+DELETE /api/portfolio?id=xxx    — Remove one of the current user's holdings
 
 Every route is scoped by the caller's user_id (from the JWT Bearer token).
+Lists and creates are scoped by market (absent means EG); PUT and DELETE act
+on a row by id, which already carries its market, so they take none.
 """
 
 import uuid
@@ -17,30 +19,31 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
 from app.core.holdings import HOLDING_COLUMNS, fetch_open_holdings, row_to_holding
+from app.core.markets import MarketConfig, get_market, market_param
 
 router = APIRouter()
 
 
 @router.get("/api/portfolio")
-def get_portfolio(user: CurrentUser = Depends(get_current_user)):
+def get_portfolio(market: MarketConfig = Depends(market_param),
+                  user: CurrentUser = Depends(get_current_user)):
     try:
         db = get_db()
-        holdings = fetch_open_holdings(db, user.id)
-
-        settings = db.execute(
-            "SELECT value FROM settings WHERE key = 'currency'"
-        ).fetchone()
-        currency = settings[0] if settings else "EGP"
-
-        return {"portfolio": holdings, "currency": currency}
+        holdings = fetch_open_holdings(db, user.id, market.code)
+        # The currency is a fact of the market, not a setting.
+        return {"portfolio": holdings, "market": market.code,
+                "currency": market.currency}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/api/portfolio", status_code=201)
-def add_holding(body: dict, user: CurrentUser = Depends(get_current_user)):
+def add_holding(body: dict,
+                market: MarketConfig = Depends(market_param),
+                user: CurrentUser = Depends(get_current_user)):
     try:
+        target = get_market(body["market"]) if body.get("market") else market
         symbol = body.get("symbol", "").upper()
         if not symbol:
             raise HTTPException(status_code=400, detail="Missing required field: symbol")
@@ -64,16 +67,17 @@ def add_holding(body: dict, user: CurrentUser = Depends(get_current_user)):
 
         db = get_db()
         db.execute(
-            """INSERT INTO portfolio (id, user_id, symbol, name, buy_price, buy_date, quantity,
-               notes, sector, target_price, stop_loss, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (holding_id, user.id, symbol, name, float(buy_price), buy_date, int(quantity),
-             notes, sector, target_price, stop_loss, now, now),
+            """INSERT INTO portfolio (id, user_id, market, symbol, name, buy_price, buy_date,
+               quantity, notes, sector, target_price, stop_loss, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (holding_id, user.id, target.code, symbol, name, float(buy_price), buy_date,
+             int(quantity), notes, sector, target_price, stop_loss, now, now),
         )
         db.commit()
 
         return {
             "id": holding_id,
+            "market": target.code,
             "symbol": symbol,
             "name": name,
             "buy_price": float(buy_price),

@@ -12,7 +12,9 @@ Unlike a sale, recording a dividend is a SINGLE statement — it decrements no
 share count — so there is nothing for db.transaction() to keep atomic. Deleting
 one restores nothing for the same reason.
 
-Every route is scoped by the caller's user_id from the JWT.
+Every route is scoped by the caller's user_id from the JWT. POST records into
+a market (body `market` beats `?market=`, absent means EG); DELETE acts on a
+row by id, which already carries its market.
 """
 
 import uuid
@@ -22,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
+from app.core.markets import MarketConfig, get_market, market_param
 from app.core.dividends import (
     DividendValidationError,
     enrich_dividend,
@@ -34,8 +37,11 @@ router = APIRouter()
 
 
 @router.post("/api/dividends", status_code=201)
-def record_dividend(body: dict, user: CurrentUser = Depends(get_current_user)):
+def record_dividend(body: dict,
+                    market: MarketConfig = Depends(market_param),
+                    user: CurrentUser = Depends(get_current_user)):
     try:
+        target = get_market(body["market"]) if body.get("market") else market
         db = get_db()
 
         clean = validate_dividend(
@@ -49,11 +55,13 @@ def record_dividend(body: dict, user: CurrentUser = Depends(get_current_user)):
         # A double-tapped submit on a phone is the likeliest way this ledger
         # goes silently wrong: a duplicate dividend corrupts no share count, so
         # nothing else would ever reveal it.
-        if is_duplicate(fetch_dividends(db, user.id), clean):
+        # Scoped to the market: the same symbol + date + amount in another
+        # market is a different payment.
+        if is_duplicate(fetch_dividends(db, user.id, target.code), clean):
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    f"You already recorded a dividend of {clean['amount']:.2f} EGP "
+                    f"You already recorded a dividend of {clean['amount']:.2f} {target.currency} "
                     f"for {clean['symbol']} on {clean['pay_date']}."
                 ),
             )
@@ -66,15 +74,18 @@ def record_dividend(body: dict, user: CurrentUser = Depends(get_current_user)):
 
         db.execute(
             "INSERT INTO portfolio_dividends "
-            "(id, user_id, symbol, name, sector, amount, pay_date, shares, notes, created_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "(id, user_id, market, symbol, name, sector, amount, pay_date, shares, notes, "
+            "created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
-                dividend_id, user.id, clean["symbol"], name, sector,
+                dividend_id, user.id, target.code, clean["symbol"], name, sector,
                 clean["amount"], clean["pay_date"], clean["shares"], notes, now,
             ),
         )
 
         return {
+            "market": target.code,
+            "currency": target.currency,
             "dividend": enrich_dividend({
                 "id": dividend_id,
                 "symbol": clean["symbol"],

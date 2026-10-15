@@ -50,9 +50,9 @@ def fetch_open_holdings(db, user_id: str, market_code: str = "EG") -> list[dict]
     return [row_to_holding(r) for r in rows]
 
 
-def fetch_open_lots(db, user_id: str, symbol: str) -> list[dict]:
+def fetch_open_lots(db, user_id: str, symbol: str, market_code: str = "EG") -> list[dict]:
     """
-    Every open lot of ONE symbol, oldest purchase first.
+    Every open lot of ONE symbol in ONE market, oldest purchase first.
 
     Buying the same symbol twice leaves two rows, and the user sells out of the
     position rather than out of a lot — so recording a sale needs all of them,
@@ -61,8 +61,8 @@ def fetch_open_lots(db, user_id: str, symbol: str) -> list[dict]:
     """
     rows = db.execute(
         f"SELECT {HOLDING_COLUMNS} FROM portfolio "
-        "WHERE user_id = %s AND symbol = %s AND quantity > 0 "
+        "WHERE user_id = %s AND symbol = %s AND market = %s AND quantity > 0 "
         "ORDER BY buy_date, created_at",
-        (user_id, symbol),
+        (user_id, symbol, market_code),
     ).fetchall()
     return [row_to_holding(r) for r in rows]
