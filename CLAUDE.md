@@ -39,7 +39,7 @@ user management*.
 `GoogleSignInButton`). `FE_BASE_URL` no longer exists anywhere: the address the
 emailed links point at is the FIRST entry of the backend's `FRONTEND_ORIGIN`.
 
-## Markets (EG today, US coming)
+## Markets (EG live, US behind `ENABLED_MARKETS`)
 
 The app shows one market at a time. Every per-market fact — currency, timezone,
 trading days and hours, holiday calendar, TradingView exchanges and scanner
@@ -52,8 +52,10 @@ Add a fact there, not as a literal.
   not-enabled codes are 400. Watchlist, portfolio and dividend POST bodies take
   an optional `market` that beats the query one; a sale takes its holding's.
 - `ENABLED_MARKETS` (default `EG`) gates which codes the API accepts. US is fully
-  wired but refused until sub-project 2 enables it. `GET /api/markets`
-  (signed-in only) lists the enabled markets with their display fields.
+  wired (sub-project 2) but refused until the env var lists it (`EG,US`).
+  `GET /api/markets` (signed-in only) lists the enabled markets with their
+  display fields: `short_name`, `score_calibrated` and `indices[{id,label}]`
+  alongside the rest.
 - `ENABLED_MARKETS` must ALWAYS include `EG`: an absent `market` means EG
   everywhere (query params, POST bodies, DB defaults, client fallbacks), so
   dropping EG would 400 every old client.
@@ -97,8 +99,48 @@ Add a fact there, not as a literal.
   enabled. A deep link `stock/[symbol]?market=XX` reads that market's data
   without switching the app (no watch star on another market's stock).
 - Still EGX-only (later sub-projects): scoring calibration (P/E and yield bands,
-  z-cone, regime, breadth), macro, Arab Finance news, Learn content, the web
-  changer. Spec: `docs/superpowers/specs/2026-10-15-multi-market-foundation-design.md`.
+  z-cone, regime, breadth), macro (EGX30/USDEGP; `fetch_macro_for` returns nothing
+  for US), score alerts (US alerts are sub-project 4), Arab Finance news, Learn
+  content, the web changer. Spec: `docs/superpowers/specs/2026-10-15-multi-market-foundation-design.md`.
+
+**US core (sub-project 2).**
+- **Universe and exchange.** `app/core/universe.py` owns the `market_universe`
+  table (`market, symbol, name, sector, exchange, kind, indices[], updated_at`):
+  the union of the market's index symbolsets (SPX, NDX, DJI) plus every listing a
+  user searched for and added (`indices = {}`). Kinds are `stock`/`fund`/`dr`;
+  ADRs ("dr") count as stocks. API: `refresh_universe` (all-or-nothing, batched
+  writes), `load_universe`, `lookup_listing` (exact scanner lookup on
+  NASDAQ/NYSE/AMEX), `search_symbols` (name search), `resolve_exchange(db, market,
+  symbol)` (EG is always `EGX`; US reads `market_universe`, then
+  `discovered_tickers`, then the scanner, and remembers the answer) and
+  `exchange_map`. **Never pass `market.primary_exchange` for a symbol fetch** — a
+  wrong exchange waits ~5.5s and returns nothing (KO on NASDAQ) and ~70% of the
+  S&P 500 is on NYSE; `tests/test_exchange_guard.py` enforces it. An unknown US
+  symbol is `404 "Unknown symbol"` on the price routes and
+  `422 "Unknown US symbol"` on portfolio/watchlist add (EG add stays lenient).
+- **Endpoints.** `GET /api/tickers/search?q=&market=` (name/symbol search through
+  `search_symbols`); `GET /api/tickers?market=US` rows carry `indices`
+  (list of index ids) and come from the universe, EG rows still from
+  `data/egx_tickers.json` merged with the scanner.
+- **US crons** (cron-job.org, same secret headers as EG; `CRON_SECRET` /
+  `PE_REFRESH_SECRET`):
+  - `POST /api/cron/universe?market=US` **daily** — rebuilds the universe and
+    also refreshes the US T-bill rate. (In `PUBLIC_ENDPOINTS`, `X-Cron-Secret`.)
+  - `POST /api/cron/risk_snapshot?market=US&limit=30` on the EG cadence. US
+    fetches ~0.5s/symbol, so `limit=30` fits the 20s deadline (EG stays at 6).
+    It measures the index members plus every US symbol held or watched.
+  - `POST /api/pe/refresh?market=US` **nightly** — scans exactly the universe's
+    `EXCHANGE:SYMBOL` tickers; status keys are suffixed (`pe_last_*:US`). It
+    skips the EG-only macro and auth-prune steps.
+  - Alerts run for EG only: the US risk_snapshot answers `alerts: {skipped: "market"}`.
+- **US risk-free rate:** `TVC:US03MY` (3-month T-bill), stored under settings key
+  `risk_free_rate:US`, fallback 4.0 (`MarketConfig.risk_free_fallback_pct`). The
+  sales grade for a US sale trades against it (there is no EGINTR history for US).
+- **US scores are preliminary** (`score_calibrated: false`): the P/E and dividend
+  reasons are neutral (there is no EGX median to centre on), risk-adjusted copy
+  says "T-bill rate", and liquidity uses a lenient `"US"` tier with the NILEX
+  floors. Recalibration is sub-project 3. `scripts/smoke_us.py` is a manual live
+  check of the US data path (hits real TradingView, never run it from pytest).
 
 **Deploying the market migration.** Deploy the backend in ONE step, not as a
 rolling mix: once the new code has migrated the keys, an old instance's
@@ -131,6 +173,7 @@ egx-api-be/                     # Python FastAPI backend
       dividend_history.py       # Yahoo dividend history: parse, cadence, + dividend_events table upsert/read
       pe_fetch.py               # Fundamentals feed (P/E, dividend yield, loss-making, last ex-date) via TradingView scanner
       tradingview.py            # Shared TradingView scanner client (URL/headers), also used by tickers.py
+      universe.py               # US universe (market_universe) + resolve_exchange: which exchange a symbol trades on
       index_membership.py       # Static EGX30/70/100/NILEX lookup — no network, for the scoring hot path
       regime.py                 # Market-condition reading: bands + the evidence behind them
       forecast.py               # Calibrated outcome ranges (EGX-fitted quantiles, no drift)
@@ -153,7 +196,7 @@ egx-api-be/                     # Python FastAPI backend
       pe.py                     # GET /api/pe ; POST /api/pe/refresh (cron-triggered)
       market_regime.py          # GET /api/market_regime (market-wide condition reading)
       risk.py                   # GET /api/risk (per-stock risk grade)
-      cron.py                   # POST /api/cron/risk_snapshot (chunked; external scheduler)
+      cron.py                   # POST /api/cron/risk_snapshot (chunked), /api/cron/universe (external scheduler)
       ohlcv.py                  # GET /api/ohlcv
       compare.py                # GET /api/compare
       historical.py             # GET /api/historical
@@ -461,7 +504,7 @@ sync, per-device — it is a reading aid, and losing it costs nothing.
 ## API Endpoints
 
 ### GET /api/tickers
-Returns list of all EGX tickers. Query: `index`, `sector`, `search` (case-insensitive substring match on symbol + name). Ticker list loaded once per container (module-level cache).
+Returns the market's tickers (EGX by default). Query: `market`, `index`, `sector`, `search` (case-insensitive substring match on symbol + name). Ticker list loaded once per container (module-level cache).
 
 ### GET /api/ohlcv
 Raw OHLCV data. Query: `symbol`, `interval`, `bars`.
@@ -1015,6 +1058,7 @@ PUBLIC_ENDPOINTS = frozenset({
     ("POST", "/api/auth/apple"),
     ("POST", "/api/pe/refresh"),          # scheduled; guarded by PE_REFRESH_SECRET
     ("POST", "/api/cron/risk_snapshot"),  # scheduled; guarded by CRON_SECRET
+    ("POST", "/api/cron/universe"),       # scheduled; guarded by CRON_SECRET
 })
 ```
 
