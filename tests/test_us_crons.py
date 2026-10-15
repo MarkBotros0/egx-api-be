@@ -224,3 +224,56 @@ def test_get_pe_us_reads_us_status_keys(monkeypatch):
     assert r.status_code == 200
     keys = [p for s, p in db.log if "FROM settings" in s]
     assert keys == [("pe_last_successful_fetch:US",), ("pe_last_attempt_status:US",)]
+
+
+# --- batched writes -----------------------------------------------------------
+
+def test_pe_data_is_written_in_BATCHES_not_one_row_at_a_time():
+    from app.core import pe_fetch as P
+    rows = [{**r, "dividend_ex_date_recent": "2026-05-01", "dividend_amount_recent": 0.5}
+            for r in _rows(515)]
+    db = FakeDB()
+    out = P.refresh_pe_data(db, US, rows=rows, tickers=[f"NYSE:S{i}" for i in range(515)])
+    assert out["success"] is True and out["count"] == 515
+    inserts = db.statements("INSERT INTO pe_data")
+    assert len(inserts) == 3
+    assert [len(p) // 13 for _, p in inserts] == [250, 250, 15]
+    assert sorted(p[i] for _, p in inserts for i in range(1, len(p), 13)) == \
+        sorted(f"S{i}" for i in range(515))
+    assert len(db.statements("INSERT INTO dividend_events")) == 3
+
+
+def test_pe_batch_keeps_the_last_duplicate_and_skips_empty_rows():
+    from app.core import pe_fetch as P
+    rows = _rows(100) + [{"symbol": "S0", "pe_ratio": 99.0, "dividend_yield": None,
+                          "loss_making": None},
+                         {"symbol": "EMPTY", "pe_ratio": None, "dividend_yield": None,
+                          "loss_making": None}]
+    db = FakeDB()
+    out = P.refresh_pe_data(db, EG, rows=rows)
+    assert out["count"] == 101 and out["skipped_empty"] == 1
+    [(sql, params)] = db.statements("INSERT INTO pe_data")
+    assert "ON CONFLICT (market, symbol) DO UPDATE" in sql
+    symbols = params[1::13]
+    assert len(symbols) == 100 and "EMPTY" not in symbols
+    s0 = params[symbols.index("S0") * 13: symbols.index("S0") * 13 + 13]
+    assert s0[0] == "EG" and s0[3] == 99.0
+
+
+def test_dividend_events_batch_keeps_first_duplicate_and_counts_inserts():
+    from app.core.dividend_history import insert_dividend_events
+
+    class Counting(FakeDB):
+        def execute(self, sql, params=()):
+            res = super().execute(sql, params)
+            res.rowcount = len(params) // 6 - 1      # pretend one row conflicted
+            return res
+
+    db = Counting()
+    n = insert_dividend_events(db, [("KO", "2026-01-01", 1.0), ("KO", "2026-01-01", 2.0),
+                                    ("KO", None, 3.0), ("PEP", "2026-02-01", 4.0)],
+                               source="scanner", market_code="US")
+    [(sql, params)] = db.statements("INSERT INTO dividend_events")
+    assert "ON CONFLICT (market, symbol, ex_date) DO NOTHING" in sql
+    assert params[3] == 1.0 and len(params) == 12
+    assert n == 1

@@ -102,6 +102,9 @@ MIN_EXPECTED_ROWS = 100
 # floor scales with it: at least half the universe, never under this.
 MIN_EXPECTED_ROWS_NON_EG = 50
 
+# Rows per multi-row pe_data upsert (see _upsert_pe_batch).
+PE_WRITE_BATCH = 250
+
 # "EXCHANGE:SYMBOL" strings per scanner call when scanning by ticker list.
 TICKERS_PER_SCAN = 500
 
@@ -248,6 +251,10 @@ def refresh_pe_data(db, market: MarketConfig = EG,
 
     written = 0
     skipped = 0
+    # Deduplicated on the PRIMARY KEY, keeping the last row — what row-by-row
+    # upserts would have left — because Postgres refuses an ON CONFLICT DO
+    # UPDATE that touches the same row twice in one statement.
+    to_write: dict = {}
     for row in rows:
         # Nothing to say about this company — don't create a row that makes
         # get_pe_for_symbol return a truthy all-null dict.
@@ -256,36 +263,12 @@ def refresh_pe_data(db, market: MarketConfig = EG,
                 and row.get("loss_making") is None):
             skipped += 1
             continue
-
-        db.execute(
-            """
-            INSERT INTO pe_data
-                (market, symbol, company_name, pe_ratio, dividend_yield,
-                 loss_making, market_cap, shares_outstanding, beta_1y,
-                 value_traded, dividend_ex_date_recent, dividend_amount_recent,
-                 updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (market, symbol) DO UPDATE SET
-                company_name            = EXCLUDED.company_name,
-                pe_ratio                = EXCLUDED.pe_ratio,
-                dividend_yield          = EXCLUDED.dividend_yield,
-                loss_making             = EXCLUDED.loss_making,
-                market_cap              = EXCLUDED.market_cap,
-                shares_outstanding      = EXCLUDED.shares_outstanding,
-                beta_1y                 = EXCLUDED.beta_1y,
-                value_traded            = EXCLUDED.value_traded,
-                dividend_ex_date_recent = EXCLUDED.dividend_ex_date_recent,
-                dividend_amount_recent  = EXCLUDED.dividend_amount_recent,
-                updated_at              = EXCLUDED.updated_at
-            """,
-            (market.code, row["symbol"], row.get("company_name"), row.get("pe_ratio"),
-             row.get("dividend_yield"), row.get("loss_making"),
-             row.get("market_cap"), row.get("shares_outstanding"),
-             row.get("beta_1y"), row.get("value_traded"),
-             row.get("dividend_ex_date_recent"), row.get("dividend_amount_recent"),
-             now),
-        )
+        to_write[row["symbol"]] = row
         written += 1
+
+    items = list(to_write.values())
+    for start in range(0, len(items), PE_WRITE_BATCH):
+        _upsert_pe_batch(db, items[start:start + PE_WRITE_BATCH], now, market.code)
 
     # fundamentals_history has a `market` column (DEFAULT 'EG'), but its writer
     # and readers are not market-aware yet: the INSERT omits the column and
@@ -307,31 +290,68 @@ def refresh_pe_data(db, market: MarketConfig = EG,
     }
 
 
+def _upsert_pe_batch(db, batch: list, now: str, market_code: str) -> None:
+    """
+    One multi-row upsert into pe_data for up to PE_WRITE_BATCH rows.
+
+    It was one INSERT per row: ~300 EGX rows, ~515 US ones, each a Neon round
+    trip inside the same 30-second request as the scanner POSTs and the annual
+    archive. Batched it is 1-3 statements — same idiom as
+    fundamentals_annual._upsert_batch and macro_series.upsert_many.
+    """
+    params: list = []
+    for row in batch:
+        params += [market_code, row["symbol"], row.get("company_name"),
+                   row.get("pe_ratio"), row.get("dividend_yield"),
+                   row.get("loss_making"), row.get("market_cap"),
+                   row.get("shares_outstanding"), row.get("beta_1y"),
+                   row.get("value_traded"), row.get("dividend_ex_date_recent"),
+                   row.get("dividend_amount_recent"), now]
+    values_sql = ", ".join(["(" + ", ".join(["%s"] * 13) + ")"] * len(batch))
+    db.execute(
+        f"""
+        INSERT INTO pe_data
+            (market, symbol, company_name, pe_ratio, dividend_yield,
+             loss_making, market_cap, shares_outstanding, beta_1y,
+             value_traded, dividend_ex_date_recent, dividend_amount_recent,
+             updated_at)
+        VALUES {values_sql}
+        ON CONFLICT (market, symbol) DO UPDATE SET
+            company_name            = EXCLUDED.company_name,
+            pe_ratio                = EXCLUDED.pe_ratio,
+            dividend_yield          = EXCLUDED.dividend_yield,
+            loss_making             = EXCLUDED.loss_making,
+            market_cap              = EXCLUDED.market_cap,
+            shares_outstanding      = EXCLUDED.shares_outstanding,
+            beta_1y                 = EXCLUDED.beta_1y,
+            value_traded            = EXCLUDED.value_traded,
+            dividend_ex_date_recent = EXCLUDED.dividend_ex_date_recent,
+            dividend_amount_recent  = EXCLUDED.dividend_amount_recent,
+            updated_at              = EXCLUDED.updated_at
+        """,
+        tuple(params),
+    )
+
+
 def _append_dividend_events(db, rows: list, market: MarketConfig = EG) -> int:
     """
     Append the scanner's ONE latest coupon per symbol into `dividend_events`.
     The table's PRIMARY KEY makes this idempotent — only a NEW (symbol, ex_date)
     lands — so the refresh grows the store forward for free, no extra fetch.
     Deep back-history is seeded separately from Yahoo (backfill_dividends).
+    Written in batches (`insert_dividend_events`), not one round trip per payer.
     Swallowed like the fundamentals log: the current-value feed must not go
     down with an archive only two read models consult.
     """
-    from app.core.dividend_history import upsert_dividends
-    total = 0
-    for row in rows:
-        ex = row.get("dividend_ex_date_recent")
-        if not ex:
-            continue
-        try:
-            total += upsert_dividends(
-                db, row["symbol"],
-                [{"ex_date": ex, "amount": row.get("dividend_amount_recent")}],
-                source="scanner",
-                market_code=market.code,
-            )
-        except Exception:
-            continue
-    return total
+    from app.core.dividend_history import insert_dividend_events
+    events = [(row["symbol"], row.get("dividend_ex_date_recent"),
+               row.get("dividend_amount_recent"))
+              for row in rows if row.get("dividend_ex_date_recent")]
+    try:
+        return insert_dividend_events(db, events, source="scanner",
+                                      market_code=market.code)
+    except Exception:
+        return 0
 
 
 def _latest_history(db) -> dict:

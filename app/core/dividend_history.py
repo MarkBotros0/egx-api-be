@@ -149,6 +149,10 @@ def fetch_dividends(
 # Persisted table (dividend_events) — the store the refresh appends to
 # ---------------------------------------------------------------------------
 
+# Rows per multi-row INSERT; see insert_dividend_events.
+DIVIDEND_WRITE_BATCH = 250
+
+
 def upsert_dividends(db, symbol: str, dividends: list[dict], source: str,
                      market_code: str = EG.code) -> int:
     """
@@ -157,23 +161,42 @@ def upsert_dividends(db, symbol: str, dividends: list[dict], source: str,
     refresh can hand its latest coupon straight in and only NEW dates land.
     Returns how many rows were actually inserted.
     """
-    if not dividends:
-        return 0
     sym = (symbol or "").strip().upper()
+    return insert_dividend_events(
+        db, [(sym, d.get("ex_date"), d.get("amount")) for d in dividends or []],
+        source, market_code)
+
+
+def insert_dividend_events(db, events: list, source: str,
+                           market_code: str = EG.code) -> int:
+    """
+    `events` = [(symbol, ex_date, amount)], written as one multi-row
+    `INSERT ... ON CONFLICT DO NOTHING` per DIVIDEND_WRITE_BATCH rows rather
+    than one round trip each — the nightly refresh appends a coupon for every
+    payer inside a 30-second request. Events without an ex_date are skipped and
+    a repeated (symbol, ex_date) keeps its first amount, exactly as row-by-row
+    inserts would. Returns how many rows were actually inserted.
+    """
     now = datetime.now(timezone.utc).isoformat()
+    unique: dict = {}
+    for sym, ex_date, amount in events:
+        if ex_date and (sym, ex_date) not in unique:
+            unique[(sym, ex_date)] = amount
+    items = list(unique.items())
     inserted = 0
-    for d in dividends:
-        ex_date = d.get("ex_date")
-        if not ex_date:
-            continue
+    for start in range(0, len(items), DIVIDEND_WRITE_BATCH):
+        batch = items[start:start + DIVIDEND_WRITE_BATCH]
+        params: list = []
+        for (sym, ex_date), amount in batch:
+            params += [market_code, sym, ex_date, amount, source, now]
         cur = db.execute(
             "INSERT INTO dividend_events "
-            "(market, symbol, ex_date, amount, source, created_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (market, symbol, ex_date) DO NOTHING",
-            (market_code, sym, ex_date, d.get("amount"), source, now),
+            "(market, symbol, ex_date, amount, source, created_at) VALUES "
+            + ", ".join(["(%s, %s, %s, %s, %s, %s)"] * len(batch))
+            + " ON CONFLICT (market, symbol, ex_date) DO NOTHING",
+            tuple(params),
         )
-        # psycopg exposes rowcount; a DO NOTHING that hit the conflict is 0.
+        # psycopg exposes rowcount; rows that hit the conflict are not counted.
         inserted += getattr(cur, "rowcount", 0) or 0
     return inserted
 
