@@ -57,7 +57,7 @@ def scan(columns: list, market: MarketConfig = EG,
     Default: every common stock on the market's exchanges (unchanged).
     `symbolset`: an index's members (e.g. "SYML:SP;SPX"), no filter.
     `tickers`: exactly these "EXCHANGE:SYMBOL" listings, no filter.
-    `extra_filter`: appended to the exchange filter; widens type to stock+fund
+    `extra_filter`: appended to the exchange filter; widens type to stock+fund+dr
     (name search must find ETFs). `sort_by`: descending sort column.
 
     Returns the raw `data` array: [{"s": "EGX:COMI", "d": [...]}, ...] with
@@ -70,7 +70,7 @@ def scan(columns: list, market: MarketConfig = EG,
     elif symbolset is not None:
         body["symbols"] = {"symbolset": [symbolset]}
     else:
-        type_filter = ({"left": "type", "operation": "in_range", "right": ["stock", "fund"]}
+        type_filter = ({"left": "type", "operation": "in_range", "right": ["stock", "fund", "dr"]}
                        if extra_filter else
                        {"left": "type", "operation": "equal", "right": "stock"})
         body["filter"] = [_exchange_filter(market), type_filter, *(extra_filter or [])]

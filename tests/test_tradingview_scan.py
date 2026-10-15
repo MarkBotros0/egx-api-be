@@ -51,5 +51,5 @@ def test_scan_tickers_and_extra_filter_and_sort(monkeypatch):
     f = {"left": "description", "operation": "match", "right": "coca"}
     tradingview.scan(["name"], market=US, extra_filter=[f], sort_by="market_cap_basic", limit=20)
     assert seen["body"]["filter"][-1] == f
-    assert seen["body"]["filter"][1] == {"left": "type", "operation": "in_range", "right": ["stock", "fund"]}
+    assert seen["body"]["filter"][1] == {"left": "type", "operation": "in_range", "right": ["stock", "fund", "dr"]}
     assert seen["body"]["sort"] == {"sortBy": "market_cap_basic", "sortOrder": "desc"}

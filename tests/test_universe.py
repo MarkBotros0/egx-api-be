@@ -167,3 +167,20 @@ def test_refresh_db_error_returns_failure_and_skips_exchange_cache(monkeypatch):
     out = U.refresh_universe(db, US)
     assert out["success"] is False and out["count"] == 0 and out["error"] == "RuntimeError: db down"
     assert U._exchange_cache == {}
+
+def test_refresh_keeps_dr_rows(monkeypatch):
+    sets = dict(SETS)
+    sets["SYML:NASDAQ;NDX"] = NDX + [{"s": "NASDAQ:ASML", "d": ["ASML", "ASML Holding", "Electronic Technology", "dr"]}]
+    def scan(columns, market=EG, timeout=20, limit=500, *, tickers=None, symbolset=None,
+             extra_filter=None, sort_by=None):
+        return sets[symbolset]
+    monkeypatch.setattr(U, "scan", scan)
+    db = FakeDB()
+    assert U.refresh_universe(db, US)["count"] == 4
+    flat = db.statements("INSERT INTO market_universe")[0][1]
+    assert any(flat[i + 1] == "ASML" and flat[i + 5] == "dr" for i in range(0, len(flat), 8))
+
+def test_lookup_returns_dr_listing(monkeypatch):
+    monkeypatch.setattr(U, "scan", _fake_scan(tickers_answer=[{"s": "NYSE:TSM", "d": ["TSM", "TSMC", "Electronic Technology", "dr"]}]))
+    got = U.lookup_listing(US, "TSM")
+    assert got["exchange"] == "NYSE" and got["kind"] == "dr"

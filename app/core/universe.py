@@ -24,7 +24,7 @@ from app.core.markets import EG, MarketConfig
 from app.core.tradingview import scan
 
 _COLUMNS = ["name", "description", "sector", "type"]
-_KINDS = ("stock", "fund")
+_KINDS = ("stock", "fund", "dr")   # ADRs ("dr") count as stocks
 _UNIVERSE_TTL = 3600
 _MISS_TTL = 3600
 WRITE_BATCH = 250      # rows per multi-row INSERT: ~515 single-row writes would risk Vercel's 30s limit
