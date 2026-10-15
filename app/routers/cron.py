@@ -51,10 +51,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from app.core import universe as universe_mod
+from app.core.universe import load_universe, refresh_universe
 from app.core.alert_store import prune_baselines, run_detection
 from app.core.benchmark import get_benchmark_close
 from app.core.cache import get as cache_get, make_key, set as cache_set
-from app.core.markets import EG, MarketConfig, market_param
+from app.core.markets import EG, US, MarketConfig, market_param
 from app.core.card_snapshot import SPARKLINE_BARS, upsert_snapshot
 from app.core.composite import CATEGORY_ORDER, score_categories
 from app.core.constants import (
@@ -68,7 +69,11 @@ from app.core.expo_push import deliver_pending
 from app.core.extras_builder import build_composite_extras
 from app.core.index_membership import get_index_membership
 from app.core.indicators import compute_all
-from app.core.macro_fetch import read_cached_macro, read_risk_free_rate
+from app.core.macro_fetch import (
+    read_cached_macro,
+    read_risk_free_rate,
+    refresh_us_risk_free,
+)
 from app.core.pe_fetch import get_pe_for_symbols
 from app.core.risk_grade import is_tradeable, measure
 
@@ -248,15 +253,31 @@ def _universe(market: MarketConfig = EG) -> list:
     EG reads the static ticker file `data/egx_tickers.json` through
     index_membership rather than through `tickers._load_tickers()`, which can
     fire a 10-second TradingView POST on a cold container — the same trap
-    documented for the scoring hot path. Other markets have no universe yet
-    (sub-project 3), so they measure nothing.
+    documented for the scoring hot path.
+
+    Other markets measure their index members (the universe rows with any
+    `indices`) plus every symbol someone holds open or watches in that market,
+    so a searched-and-added listing still gets a card. A failing table read
+    costs only that table's symbols.
 
     Bonds and structured products whose "symbol" is really an ISIN are dropped
     by `market.is_valid_symbol` — matched on LENGTH, because EGSA is a real
     four-character EGX ticker that a prefix rule silently discards.
     """
     if market.code != EG.code:
-        return []
+        db = get_db()
+        syms = {r["symbol"] for r in load_universe(db, market) if r["indices"]}
+        for sql in (
+            # Open holdings only, the same filter as holdings.fetch_open_holdings:
+            # a fully-sold row (quantity 0) is kept as an undo anchor, not owned.
+            "SELECT DISTINCT symbol FROM portfolio WHERE market = %s AND quantity > 0",
+            "SELECT DISTINCT symbol FROM watchlist WHERE market = %s",
+        ):
+            try:
+                syms |= {r[0].upper() for r in db.execute(sql, (market.code,)).fetchall()}
+            except Exception:
+                pass
+        return sorted(s for s in syms if market.is_valid_symbol(s))
     from app.core.index_membership import _load
 
     return [s for s in sorted(_load().keys()) if market.is_valid_symbol(s)]
@@ -458,10 +479,15 @@ def risk_snapshot(
         _upsert(symbol, stats, is_tradeable(close, volume, market), ok=True, card=card)
         written += 1
 
-    alerts = run_alerts(db, scored_for_alerts, now,
-                        time.monotonic() - started,
-                        deadline=call_started + ALERTS_SEND_DEADLINE_SECONDS,
-                        market_code=market.code)
+    # Score alerts are EG-only for now: their copy, quiet hours and session
+    # dates are Cairo-calibrated.
+    if market.code == EG.code:
+        alerts = run_alerts(db, scored_for_alerts, now,
+                            time.monotonic() - started,
+                            deadline=call_started + ALERTS_SEND_DEADLINE_SECONDS,
+                            market_code=market.code)
+    else:
+        alerts = {"skipped": "market"}
 
     # How much of the universe is still carrying a measurement from before this
     # run started. This is the number to watch on the scheduler: it should fall
@@ -504,3 +530,23 @@ def risk_snapshot(
         "universe": plan["universe"],
         "measured_at": now,
     }
+
+
+@router.post("/api/cron/universe")
+def universe_refresh(
+    x_cron_secret: Optional[str] = Header(default=None),
+    market: MarketConfig = Depends(market_param),
+):
+    """
+    Rebuild a non-EG market's universe from its index symbolsets (all or
+    nothing, see core/universe.refresh_universe), and for US refresh the
+    3-month T-bill rate on the same call. Daily is plenty: index membership
+    changes a few times a year. Guarded by CRON_SECRET like risk_snapshot.
+    """
+    _require_secret(x_cron_secret)
+    if market.code == EG.code:
+        raise HTTPException(status_code=400, detail="EG universe is the ticker file")
+    db = get_db()
+    result = refresh_universe(db, market)
+    risk_free = refresh_us_risk_free(db) if market.code == US.code else None
+    return {"market": market.code, "universe": result, "risk_free": risk_free}

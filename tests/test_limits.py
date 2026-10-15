@@ -24,6 +24,7 @@ from app.core import limits
 from app.core.accounts import USER_OWNED_TABLES, AccountStore
 from app.core.auth import hash_password
 from app.core.email import get_mailer
+from app.core.markets import EG
 from app.main import app
 from app.routers.auth import get_store
 
@@ -321,13 +322,13 @@ def test_the_nightly_refresh_prunes_best_effort(monkeypatch, capsys):
     monkeypatch.setattr(pe_router, "refresh_macro_series", lambda db: {"success": True})
     seen = []
     monkeypatch.setattr(pe_router, "prune_auth", lambda store, now: seen.append(store) or {"users": 1})
-    out = pe_router.trigger_refresh(None)
+    out = pe_router.trigger_refresh(None, EG)
     assert out["success"] is True and out["auth_prune"] == {"users": 1}
     assert isinstance(seen[0], AccountStore)
 
     def boom(store, now):
         raise RuntimeError("db down")
     monkeypatch.setattr(pe_router, "prune_auth", boom)
-    out = pe_router.trigger_refresh(None)
+    out = pe_router.trigger_refresh(None, EG)
     assert out["success"] is True and "auth_prune" not in out
     assert "prune failed" in capsys.readouterr().out

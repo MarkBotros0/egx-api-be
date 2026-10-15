@@ -98,6 +98,34 @@ DY_SANITY_MAX = 60.0
 # that shrank — see refresh_pe_data for why partial writes are refused.
 MIN_EXPECTED_ROWS = 100
 
+# Other markets are scanned by an explicit ticker list (their universe), so the
+# floor scales with it: at least half the universe, never under this.
+MIN_EXPECTED_ROWS_NON_EG = 50
+
+# "EXCHANGE:SYMBOL" strings per scanner call when scanning by ticker list.
+TICKERS_PER_SCAN = 500
+
+
+def _status_key(market: MarketConfig, base: str) -> str:
+    """The settings key for a pe feed status: unchanged for EG, `base:<code>` otherwise."""
+    return base if market.code == EG.code else f"{base}:{market.code}"
+
+
+def scan_by_tickers(scan_fn, columns: list, market: MarketConfig,
+                    tickers: Optional[list]) -> list:
+    """
+    `scan_fn(columns, market=...)` for the whole market, or, when `tickers` is
+    given, one call per TICKERS_PER_SCAN-sized chunk of them. `scan_fn` is
+    passed in so each caller's module-level `scan` stays the patchable seam.
+    """
+    if tickers is None:
+        return scan_fn(columns, market=market)
+    raw: list = []
+    for start in range(0, len(tickers), TICKERS_PER_SCAN):
+        chunk = list(tickers[start:start + TICKERS_PER_SCAN])
+        raw += scan_fn(columns, market=market, tickers=chunk, limit=len(chunk))
+    return raw
+
 
 # ---------------------------------------------------------------------------
 # Fetch + normalize
@@ -129,14 +157,16 @@ def _clean_float(value, maximum: Optional[float] = None) -> Optional[float]:
     return f
 
 
-def fetch_fundamentals_rows(market: MarketConfig = EG) -> list:
+def fetch_fundamentals_rows(market: MarketConfig = EG,
+                            tickers: Optional[list] = None) -> list:
     """
-    One POST for the whole universe of `market`. Returns
+    One POST for the whole universe of `market` — or, with `tickers`
+    ("EXCHANGE:SYMBOL" strings), one per chunk of TICKERS_PER_SCAN. Returns
         [{"symbol", "company_name", "pe_ratio", "dividend_yield", "loss_making"}]
 
     Raises on HTTP/JSON error — the caller owns the never-wipe guarantee.
     """
-    raw = scan(TV_COLUMNS, market=market)
+    raw = scan_by_tickers(scan, TV_COLUMNS, market, tickers)
 
     out = []
     for row in raw:
@@ -179,35 +209,41 @@ def fetch_fundamentals_rows(market: MarketConfig = EG) -> list:
 # ---------------------------------------------------------------------------
 
 def refresh_pe_data(db, market: MarketConfig = EG,
-                    rows: Optional[list] = None) -> dict:
+                    rows: Optional[list] = None,
+                    tickers: Optional[list] = None) -> dict:
     """
     Refresh the fundamentals feed for `market` and upsert into pe_data.
 
     Passing `rows` skips the HTTP call — the seam used by tests and local dev.
+    `tickers` ("EXCHANGE:SYMBOL", the market's universe) scans exactly those
+    listings, and sets the non-EG row floor.
 
     NEVER WIPES. On failure the existing rows remain and only
-    `pe_last_attempt_status` changes, so the read path keeps serving
-    last-known-good rather than falling back to "no data".
+    `pe_last_attempt_status` (`:<code>` outside EG) changes, so the read path
+    keeps serving last-known-good rather than falling back to "no data".
     """
     now = datetime.now(timezone.utc).isoformat()
+    status_key = _status_key(market, "pe_last_attempt_status")
 
     try:
         if rows is None:
-            rows = fetch_fundamentals_rows(market)
+            rows = fetch_fundamentals_rows(market, tickers=tickers)
     except Exception as e:
-        _write_setting(db, "pe_last_attempt_status", f"error: {type(e).__name__}: {e}")
+        _write_setting(db, status_key, f"error: {type(e).__name__}: {e}")
         return {"success": False, "count": 0, "error": str(e)}
 
     if not rows:
-        _write_setting(db, "pe_last_attempt_status", "error: no rows returned")
+        _write_setting(db, status_key, "error: no rows returned")
         return {"success": False, "count": 0, "error": "no rows returned"}
 
     # Refuse a truncated response WITHOUT writing anything. A partial refresh
     # that updates 50 symbols and silently leaves 240 stale is worse than
     # "everything is stale", because nothing on screen distinguishes the two.
-    if len(rows) < MIN_EXPECTED_ROWS:
-        msg = f"error: only {len(rows)} rows (expected >= {MIN_EXPECTED_ROWS})"
-        _write_setting(db, "pe_last_attempt_status", msg)
+    min_rows = (MIN_EXPECTED_ROWS if market.code == EG.code
+                else max(MIN_EXPECTED_ROWS_NON_EG, len(tickers or []) // 2))
+    if len(rows) < min_rows:
+        msg = f"error: only {len(rows)} rows (expected >= {min_rows})"
+        _write_setting(db, status_key, msg)
         return {"success": False, "count": 0, "error": msg}
 
     written = 0
@@ -258,8 +294,8 @@ def refresh_pe_data(db, market: MarketConfig = EG,
                 if market.code == EG.code else 0)
     dividends_appended = _append_dividend_events(db, rows, market)
 
-    _write_setting(db, "pe_last_successful_fetch", now)
-    _write_setting(db, "pe_last_attempt_status", "ok")
+    _write_setting(db, _status_key(market, "pe_last_successful_fetch"), now)
+    _write_setting(db, status_key, "ok")
 
     return {
         "success": True,

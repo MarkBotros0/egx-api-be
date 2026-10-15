@@ -11,7 +11,9 @@ Cached rows live in the Postgres `macro_data` table with a TTL checked on read.
 All scraping is wrapped in try/except — returns partial/null data, never crashes.
 """
 
+import math
 from datetime import datetime, timedelta
+from typing import Optional
 
 from app.core.markets import EG
 from app.core.constants import (
@@ -171,6 +173,38 @@ def read_risk_free_rate(db) -> float:
     except Exception:
         pass
     return float(DEFAULT_RISK_FREE_RATE_PCT)
+
+
+# The US risk-free series: the 3-month T-bill yield, in percent.
+US_RISK_FREE_SYMBOL = "US03MY"
+US_RISK_FREE_EXCHANGE = "TVC"
+
+
+def refresh_us_risk_free(db) -> Optional[float]:
+    """
+    Store the last daily close of TVC:US03MY as `settings.risk_free_rate:US`.
+
+    Returns the value, or None when the feed has nothing or anything fails —
+    never raises, so the universe cron it rides on cannot go down with it.
+    A failure leaves the previously stored value in place.
+    """
+    try:
+        from app.vendor.egxpy import get_OHLCV_data
+        df = get_OHLCV_data(US_RISK_FREE_SYMBOL, US_RISK_FREE_EXCHANGE, "Daily", 5)
+        if df is None or df.empty:
+            return None
+        df.columns = [str(c).lower() for c in df.columns]
+        value = float(df["close"].iloc[-1])
+        if not math.isfinite(value):
+            return None
+        db.execute(
+            "INSERT INTO settings (key, value) VALUES ('risk_free_rate:US', %s) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            (str(value),),
+        )
+        return value
+    except Exception:
+        return None
 
 
 def _fetch_interest_rate(db):

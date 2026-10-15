@@ -784,7 +784,6 @@ def test_cron_universe_drops_isins_through_the_market():
     from app.routers.cron import _universe
     universe = _universe(EG)
     assert universe and all(EG.is_valid_symbol(s) for s in universe)
-    assert _universe(US) == []
 
 
 # ---------------------------------------------------------------------------

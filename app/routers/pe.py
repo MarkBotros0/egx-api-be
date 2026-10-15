@@ -21,7 +21,8 @@ from app.core.fundamentals_annual import refresh_annual_fundamentals
 from app.core.limits import prune_auth
 from app.core.macro_series import refresh_current as refresh_macro_series
 from app.core.markets import EG, MarketConfig, market_param
-from app.core.pe_fetch import get_pe_for_symbol, refresh_pe_data
+from app.core.pe_fetch import _status_key, get_pe_for_symbol, refresh_pe_data
+from app.core.universe import load_universe
 
 router = APIRouter()
 
@@ -46,10 +47,12 @@ def get_pe(symbol: Optional[str] = Query(None),
             (market.code,),
         ).fetchall()
         last_row = db.execute(
-            "SELECT value FROM settings WHERE key = 'pe_last_successful_fetch'"
+            "SELECT value FROM settings WHERE key = %s",
+            (_status_key(market, "pe_last_successful_fetch"),),
         ).fetchone()
         status_row = db.execute(
-            "SELECT value FROM settings WHERE key = 'pe_last_attempt_status'"
+            "SELECT value FROM settings WHERE key = %s",
+            (_status_key(market, "pe_last_attempt_status"),),
         ).fetchone()
         return {
             "market": market.code,
@@ -75,18 +78,22 @@ def get_pe(symbol: Optional[str] = Query(None),
 
 
 @router.post("/api/pe/refresh")
-def trigger_refresh(x_refresh_secret: Optional[str] = Header(default=None)):
+def trigger_refresh(x_refresh_secret: Optional[str] = Header(default=None),
+                    market: MarketConfig = Depends(market_param)):
     """
     Manual + cron-triggered refresh. When PE_REFRESH_SECRET env var is set,
     the X-Refresh-Secret header must match (used in production to prevent
     random callers from triggering EGX scrapes).
 
-    EG only in this sub-project: the feed's row-count guards and the
-    pe_last_* status keys are calibrated for the EGX universe.
+    `?market=` absent means EG, unchanged. Another market scans exactly its
+    universe (`EXCHANGE:SYMBOL` from `load_universe`), writes `pe_last_*:<code>`
+    status keys, and skips the EG-only macro and auth-prune steps.
     """
     expected = os.environ.get("PE_REFRESH_SECRET")
     if expected and x_refresh_secret != expected:
         raise HTTPException(status_code=403, detail="Forbidden")
+    if market.code != EG.code:
+        return _refresh_other_market(market)
     try:
         db = get_db()
         result = refresh_pe_data(db, EG)
@@ -123,4 +130,21 @@ def trigger_refresh(x_refresh_secret: Optional[str] = Header(default=None)):
         result["auth_prune"] = prune_auth(AccountStore(db), datetime.now(timezone.utc))
     except Exception as e:
         print(f"[auth] prune failed: {type(e).__name__}: {e}")
+    return result
+
+
+def _refresh_other_market(market: MarketConfig) -> dict:
+    """pe_data + the annual archive for a non-EG market, by its universe's tickers."""
+    try:
+        db = get_db()
+        tickers = [f"{r['exchange']}:{r['symbol']}" for r in load_universe(db, market)]
+        result = refresh_pe_data(db, market, tickers=tickers)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    # Same never-fail-the-feed rule as EG.
+    try:
+        result["annual"] = refresh_annual_fundamentals(db, market, tickers=tickers)
+    except Exception as e:
+        result["annual"] = {"success": False,
+                            "error": f"{type(e).__name__}: {e}"}
     return result

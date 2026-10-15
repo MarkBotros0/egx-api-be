@@ -42,6 +42,7 @@ def test_only_the_ways_in_and_the_crons_are_public():
     middleware stops checking once a route is on this list:
       /api/pe/refresh        -> PE_REFRESH_SECRET
       /api/cron/risk_snapshot -> CRON_SECRET
+      /api/cron/universe      -> CRON_SECRET
     """
     assert PUBLIC_ENDPOINTS == frozenset({
         ("POST", "/api/auth/login"),
@@ -54,6 +55,7 @@ def test_only_the_ways_in_and_the_crons_are_public():
         ("POST", "/api/auth/apple"),
         ("POST", "/api/pe/refresh"),
         ("POST", "/api/cron/risk_snapshot"),
+        ("POST", "/api/cron/universe"),
     })
 
 

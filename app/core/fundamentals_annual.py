@@ -44,6 +44,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from app.core.markets import EG, MarketConfig
+from app.core.pe_fetch import scan_by_tickers
 from app.core.tradingview import scan
 
 # Positional column request; each `d` aligns to this order. The first is the
@@ -114,14 +115,16 @@ def _num(value) -> Optional[float]:
     return f if f == f else None      # NaN -> None
 
 
-def fetch_annual_rows(raw: Optional[list] = None, market: MarketConfig = EG) -> list:
+def fetch_annual_rows(raw: Optional[list] = None, market: MarketConfig = EG,
+                      tickers: Optional[list] = None) -> list:
     """
-    One POST, exploded into one record per (symbol, fiscal year).
+    One POST (one per 500 `tickers`, when given), exploded into one record per
+    (symbol, fiscal year).
 
     Passing `raw` skips the HTTP call — the seam used by tests.
     """
     if raw is None:
-        raw = scan(TV_HISTORY_COLUMNS, market=market)
+        raw = scan_by_tickers(scan, TV_HISTORY_COLUMNS, market, tickers)
 
     out = []
     for row in raw:
@@ -157,7 +160,8 @@ def fetch_annual_rows(raw: Optional[list] = None, market: MarketConfig = EG) -> 
 
 
 def refresh_annual_fundamentals(db, market: MarketConfig = EG,
-                                rows: Optional[list] = None) -> dict:
+                                rows: Optional[list] = None,
+                                tickers: Optional[list] = None) -> dict:
     """
     Upsert the annual archive. NEVER WIPES, matching refresh_pe_data.
 
@@ -169,7 +173,7 @@ def refresh_annual_fundamentals(db, market: MarketConfig = EG,
     now = datetime.now(timezone.utc).isoformat()
     try:
         if rows is None:
-            rows = fetch_annual_rows(market=market)
+            rows = fetch_annual_rows(market=market, tickers=tickers)
     except Exception as e:
         return {"success": False, "written": 0, "error": f"{type(e).__name__}: {e}"}
 
