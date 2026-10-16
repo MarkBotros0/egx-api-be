@@ -114,3 +114,12 @@ def test_fetch_only_stops_before_scoring(bt, tmp_path):
     assert bt.main(["--market", "US", "--cache-dir", str(cache), "--universe-file", str(uf),
                     "--fetch-only"]) == 0
     assert not (cache / "panel.pkl").exists()
+
+
+def test_a_us_run_without_rate_history_falls_back_to_the_us_rate(bt):
+    import pandas as pd
+    bt.configure("US")
+    assert bt.flat_rate() == 4.0
+    assert bt.rate_for_date([], pd.Timestamp("2020-01-01")) == 4.0
+    bt.configure("EG")
+    assert bt.flat_rate() == bt.RISK_FREE_RATE

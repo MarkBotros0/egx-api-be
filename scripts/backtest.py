@@ -148,7 +148,7 @@ def write_run_meta(panel_path: str, rate_steps) -> dict:
     meta = {
         "dated_risk_free": bool(rate_steps),
         "rate_steps": len(rate_steps or []),
-        "flat_rate_pct": None if rate_steps else RISK_FREE_RATE,
+        "flat_rate_pct": None if rate_steps else flat_rate(),
         "confounded": sorted(confounded_categories(rate_steps)),
     }
     with open(run_meta_path(panel_path), "w", encoding="utf-8") as f:
@@ -179,7 +179,16 @@ def read_run_meta(panel_path: str) -> dict:
         }
 
 
-def rate_for_date(rate_steps, as_of, fallback: float = RISK_FREE_RATE) -> float:
+def flat_rate() -> float:
+    """The flat fallback for THIS run's market: EG's policy rate, or the
+    market's own risk-free fallback (US: 4.0) — never EG's 19% on US stocks."""
+    if SPEC.code == "EG":
+        return RISK_FREE_RATE
+    from app.core.markets import MARKETS
+    return float(MARKETS[SPEC.code].risk_free_fallback_pct)
+
+
+def rate_for_date(rate_steps, as_of, fallback: float | None = None) -> float:
     """
     The cash return over the trailing year ending `as_of`, as an annual rate.
 
@@ -193,6 +202,7 @@ def rate_for_date(rate_steps, as_of, fallback: float = RISK_FREE_RATE) -> float:
     as_of] contribute, so a 2024 hike cannot touch a 2020 scoring date. (EGINTR
     carries a zero publication lag, so a rate in force is a rate that was known.)
     """
+    fallback = flat_rate() if fallback is None else fallback
     if not rate_steps:
         return float(fallback)
     start = as_of - timedelta(days=365)
@@ -679,7 +689,7 @@ def score_symbol(symbol: str, bench_close: pd.Series, dates: list,
                 include_multi_timeframe=True,
                 # The rate that actually prevailed over THIS date's
                 # trailing year, not one flat number for twenty years.
-                risk_free_rate_pct=(rates or {}).get(as_of, RISK_FREE_RATE),
+                risk_free_rate_pct=(rates or {}).get(as_of, flat_rate()),
                 # Fundamentals are a today-only snapshot — passing them here
                 # would be look-ahead. This is what fundamentals_history will
                 # eventually make possible.
@@ -840,7 +850,7 @@ def main(argv=None):
               f"graded against its own trailing year")
     else:
         print(f"policy rate: NO dated history — running flat at "
-              f"{RISK_FREE_RATE}%; WITHHOLDING {sorted(confounded)}")
+              f"{flat_rate()}%; WITHHOLDING {sorted(confounded)}")
 
     rows = universe_rows_for(spec, args.universe_file)
     if not rows:
