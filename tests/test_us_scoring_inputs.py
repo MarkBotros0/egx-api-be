@@ -44,9 +44,12 @@ def test_membership_never_borrows_eg_tiers():
     assert get_index_membership("COMI", US) == "US"
 
 
-def test_us_liquidity_uses_lenient_floor():
-    vol = pd.Series([10_000.0] * 30)
-    out = liquidity_score(vol, index_membership="US")
+def test_us_liquidity_uses_its_own_floor():
+    from app.core.calibration import for_market
+    cal = for_market("US")
+    thin_below, low_below = cal.liquidity_tiers["US"]
+    vol = pd.Series([float((thin_below + low_below) // 2)] * 30)
+    out = liquidity_score(vol, index_membership="US", cal=cal)
     assert out["index_membership"] == "US" and out["classification"] == "low"
 
 

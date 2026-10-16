@@ -36,6 +36,7 @@ from app.core.constants import (
     DIVERGENCE_LOOKBACK_FULL,
     TRADING_DAYS_PER_YEAR,
 )
+from app.core.calibration import for_market
 from app.core.indicators import (
     annualized_return,
     daily_returns,
@@ -153,6 +154,7 @@ def build_composite_extras(
     divergence_lookback: int = DIVERGENCE_LOOKBACK_FULL,
     benchmark_label: Optional[str] = None,
     score_calibrated: bool = True,
+    market_code: str = "EG",
 ) -> dict:
     """
     Assemble every input `compute_composite` consumes, plus the by-products
@@ -177,6 +179,9 @@ def build_composite_extras(
       score_calibrated:    MarketConfig.score_calibrated. Copy only: False
                            drops the EGX-median and EGX dividend-drag wording
                            from the reasons. Never changes a score.
+      market_code:         the market's code. Selects the liquidity tiers and,
+                           via extras["market"], the valuation bands
+                           score_quality uses.
       weekly_close:        Pre-computed weekly closes. None -> resampled from
                            `df` (preferred; see _weekly_from_daily).
       include_multi_timeframe:
@@ -332,6 +337,7 @@ def build_composite_extras(
             index_membership=index_membership,
             lookback=_LIQUIDITY_LOOKBACK,
             calendar=calendar,
+            cal=for_market(market_code),
         )
     except Exception:
         liquidity = None
@@ -407,6 +413,7 @@ def build_composite_extras(
         # scoring input. None reads as EGX30, the label before markets existed.
         "benchmark_label": benchmark_label,
         "score_calibrated": score_calibrated,
+        "market": market_code,
         "pe_ratio": pe_ratio,
         "dividend_yield": dividend_yield,
         "loss_making": loss_making,

@@ -405,6 +405,7 @@ def risk_snapshot(
                 divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
                 benchmark_label=market.benchmark_label,
                 score_calibrated=market.score_calibrated,
+                market_code=market.code,
             )
             scored = score_categories(indicators, built["extras"])
             close = df["close"]

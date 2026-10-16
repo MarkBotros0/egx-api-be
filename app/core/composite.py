@@ -53,6 +53,8 @@ from app.core.constants import (
     SCORE_SELL_MAX,
     SCORE_STRONG_SELL_MAX,
 )
+from app.core.calibration import FundamentalsCal, band_index, for_market
+from app.core.markets import DEFAULT_CODE
 
 
 # "Beginner Safe" default — tilts toward stable, leading, cash-beating stocks.
@@ -514,7 +516,8 @@ def score_quality(multi_timeframe: Optional[dict],
                   pe_ratio: Optional[float] = None,
                   dividend_yield: Optional[float] = None,
                   loss_making: Optional[bool] = None,
-                  calibrated: bool = True) -> tuple:
+                  calibrated: bool = True,
+                  fundamentals: Optional[FundamentalsCal] = None) -> tuple:
     """
     Score the quality category (0-100).
 
@@ -545,6 +548,7 @@ def score_quality(multi_timeframe: Optional[dict],
                     (MarketConfig.score_calibrated). The score is unchanged;
                     reasons that compare against the EGX median are replaced
                     by the bare figure, never relabelled as another median.
+      - fundamentals: the market's FundamentalsCal (boundaries + median label). None reads as EG. Points are the same on every market; only the boundaries move.
     """
     if (multi_timeframe is None and trend_consistency is None
             and current_drawdown_pct is None and pe_ratio is None
@@ -609,76 +613,62 @@ def score_quality(multi_timeframe: Optional[dict],
         score -= 15
         reasons.append("Company is loss-making — earnings-based valuation doesn't apply")
 
-    # P/E sub-component, centred on the EGX MEDIAN (~12.4), not on a
-    # developed-market idea of cheap. The previous bands gave +8 to anything
-    # under 20, which is most of this market — so simply HAVING P/E data was
-    # worth points, and only ~22% of EGX stocks have it. Bands now aim to give
-    # the median stock roughly nothing, making this a relative signal.
-    if pe_ratio is not None:
-        if pe_ratio < 3:
-            # Not a bargain — a P/E under 3 in this market means the earnings
-            # are non-recurring or the price has collapsed. MEGM trades at 0.7.
-            score += 3
-            reasons.append(
-                f"P/E {pe_ratio:.1f} — implausibly low; check the earnings are recurring"
-            )
-        elif pe_ratio < 8:
-            score += 12
-            reasons.append(f"Cheap versus the EGX median of ~12 (P/E {pe_ratio:.1f})"
-                           if calibrated else f"P/E {pe_ratio:.1f}")
-        elif pe_ratio < 15:
-            score += 4
-            reasons.append(f"Around the EGX median (P/E {pe_ratio:.1f})"
-                           if calibrated else f"P/E {pe_ratio:.1f}")
-        elif pe_ratio < 25:
-            score -= 2
-            reasons.append(f"Above the EGX median (P/E {pe_ratio:.1f})"
-                           if calibrated else f"P/E {pe_ratio:.1f}")
-        elif pe_ratio < 40:
-            score -= 8
-            reasons.append(f"Expensive on earnings (P/E {pe_ratio:.1f})")
-        else:
-            score -= 14
-            reasons.append(
-                f"Very expensive (P/E {pe_ratio:.1f}) — needs confirmed growth to justify"
-            )
+    fund = fundamentals if fundamentals is not None else for_market(DEFAULT_CODE).fundamentals
 
-    # Dividend yield. Deliberately NON-monotonic: a very high yield on the EGX
-    # is almost always a special dividend or a collapsed share price, not
-    # income quality. Every reason frames the payout as evidence of
-    # cash-generative discipline, never as "good income" — even 7% loses badly
-    # to the ~19% policy rate, and saying otherwise would mislead.
-    # 0.0 means "pays nothing", which is normal for a growth company and not a
-    # defect, so it scores the same as unknown.
+    # P/E, centred on the MARKET's median rather than a developed-market idea
+    # of cheap: the median stock lands in the same band on every market, so
+    # merely HAVING P/E data is never worth points. Boundaries are per market
+    # (app/core/calibration/<market>.py); the points are EG's everywhere.
+    if pe_ratio is not None:
+        i = band_index(fund.pe_bands, pe_ratio)
+        score += fund.pe_bands[i][1]
+        reasons.append(_pe_reason(i, pe_ratio, fund, calibrated))
+
+    # Dividend yield. Deliberately NON-monotonic: a very high yield is almost
+    # always a special dividend or a collapsed price, not income quality. Every
+    # reason frames the payout as evidence of cash generation, never as income.
+    # 0.0 means "pays nothing" — normal for a growth company, scored as unknown.
     if dividend_yield is not None and dividend_yield > 0:
-        if dividend_yield >= 15:
-            score -= 8
-            reasons.append(
-                f"Extreme yield (DY {dividend_yield:.1f}%) — typically a special "
-                "dividend or a collapsed share price, not steady income"
-            )
-        elif dividend_yield >= 8:
-            score += 4
-            reasons.append(
-                f"Very high dividend (DY {dividend_yield:.1f}%) — check it recurs"
-            )
-        elif dividend_yield >= 4:
-            score += 8
-            reasons.append(
-                f"Above-median dividend (DY {dividend_yield:.1f}%) — real cash returned "
-                "to shareholders, though still under the T-bill"
-                if calibrated else f"Dividend yield {dividend_yield:.1f}%"
-            )
-        elif dividend_yield >= 2:
-            score += 4
-            reasons.append(
-                f"Pays about the EGX median dividend (DY {dividend_yield:.1f}%)"
-                if calibrated else f"Dividend yield {dividend_yield:.1f}%"
-            )
-        else:
-            reasons.append(f"Token dividend (DY {dividend_yield:.1f}%)")
+        i = band_index(fund.dy_bands, dividend_yield)
+        score += fund.dy_bands[i][1]
+        reasons.append(_dy_reason(i, dividend_yield, fund, calibrated))
 
     return _clamp(score), reasons
+
+
+def _pe_reason(i: int, pe: float, fund: FundamentalsCal, calibrated: bool) -> str:
+    median = f"the {fund.label} median"
+    if i == 0:
+        # Not a bargain — earnings non-recurring or the price collapsed.
+        return f"P/E {pe:.1f} — implausibly low; check the earnings are recurring"
+    if i == 1:
+        return (f"Cheap versus {median} of ~{fund.pe_median:.0f} (P/E {pe:.1f})"
+                if calibrated else f"P/E {pe:.1f}")
+    if i == 2:
+        return f"Around {median} (P/E {pe:.1f})" if calibrated else f"P/E {pe:.1f}"
+    if i == 3:
+        return f"Above {median} (P/E {pe:.1f})" if calibrated else f"P/E {pe:.1f}"
+    if i == 4:
+        return f"Expensive on earnings (P/E {pe:.1f})"
+    return f"Very expensive (P/E {pe:.1f}) — needs confirmed growth to justify"
+
+
+def _dy_reason(i: int, dy: float, fund: FundamentalsCal, calibrated: bool) -> str:
+    if i == 0:
+        return f"Token dividend (DY {dy:.1f}%)"
+    if i == 1:
+        return (f"Pays about the {fund.label} median dividend (DY {dy:.1f}%)"
+                if calibrated else f"Dividend yield {dy:.1f}%")
+    if i == 2:
+        if not calibrated:
+            return f"Dividend yield {dy:.1f}%"
+        tail = ", though still under the T-bill" if fund.dy_mid_under_risk_free else ""
+        return (f"Above-median dividend (DY {dy:.1f}%) — real cash returned "
+                f"to shareholders{tail}")
+    if i == 3:
+        return f"Very high dividend (DY {dy:.1f}%) — check it recurs"
+    return (f"Extreme yield (DY {dy:.1f}%) — typically a special dividend or a "
+            "collapsed share price, not steady income")
 
 
 def score_risk_adjusted(annualized_return_pct: Optional[float],
@@ -927,9 +917,10 @@ def score_categories(indicators: dict, extras: Optional[dict] = None) -> dict:
     divergence_score, divergence_reasons = score_divergence(
         extras.get("divergences"),
     )
-    # Copy only: an uncalibrated market's reasons drop the EGX comparisons.
-    # Absent (an extras dict built before markets) reads as calibrated.
+    # Copy only: an uncalibrated market's reasons drop the median comparisons.
+    # Absent (an extras dict built before markets) reads as calibrated EG.
     _calibrated = extras.get("score_calibrated", True) is not False
+    _cal = for_market(extras.get("market") or DEFAULT_CODE)
     quality_score, quality_reasons = score_quality(
         extras.get("multi_timeframe"),
         extras.get("trend_consistency"),
@@ -938,6 +929,7 @@ def score_categories(indicators: dict, extras: Optional[dict] = None) -> dict:
         dividend_yield=extras.get("dividend_yield"),
         loss_making=extras.get("loss_making"),
         calibrated=_calibrated,
+        fundamentals=_cal.fundamentals,
     )
     # `or` would treat a legitimate 0% rate as missing — check for None.
     _rfr = extras.get("risk_free_rate_pct")
@@ -947,7 +939,10 @@ def score_categories(indicators: dict, extras: Optional[dict] = None) -> dict:
         extras.get("volatility_annualized_pct"),
         extras.get("atr_pct_of_price"),
         extras.get("history_days"),
-        calibrated=_calibrated,
+        # The "policy rate" wording and the 3.7pp dividend drag were measured
+        # on the EGX; a market whose bundle did not measure them gets the
+        # neutral T-bill copy. Score unchanged either way.
+        calibrated=_calibrated and _cal.dividend_drag_measured,
     )
     relative_strength_score, relative_strength_reasons = score_relative_strength(
         extras.get("relative_strength"),

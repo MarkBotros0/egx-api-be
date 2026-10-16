@@ -8,8 +8,12 @@ so you can learn what each indicator measures and why traders use it.
 No external TA libraries — everything is built from first principles.
 """
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
+
+from app.core.calibration import Calibration, for_market
 
 
 # ---------------------------------------------------------------------------
@@ -919,18 +923,8 @@ def annualized_return(close: pd.Series, lookback: int = 252,
 # Liquidity Score (index-aware)
 # ---------------------------------------------------------------------------
 
-# Typical EGX daily volume floors per index tier (shares/day).
-# Rough calibration — thin-liquidity stocks within their index are flagged.
-_INDEX_LIQ_FLOORS = {
-    "EGX30":   {"thin": 100_000,   "low": 500_000},
-    "EGX70":   {"thin": 50_000,    "low": 200_000},
-    "EGX100":  {"thin": 30_000,    "low": 100_000},
-    "NILEX":   {"thin": 5_000,     "low": 20_000},
-    # Every US symbol, until US floors are calibrated in sub-project 3. Equal
-    # to NILEX, the most lenient tier: an uncalibrated floor should flag only
-    # the genuinely untraded, not the whole market.
-    "US":      {"thin": 5_000,     "low": 20_000},
-}
+# Per-tier volume floors (thin_below, low_below, shares/day) are fitted per
+# market and live in the calibration bundle (`Calibration.liquidity_tiers`).
 
 # Share of the lookback window that may have zero volume before the stock is
 # called untradeable regardless of its average. A genuinely liquid EGX name
@@ -995,7 +989,8 @@ def _traded_share_of_calendar(volume: pd.Series, calendar) -> float | None:
 
 
 def liquidity_score(volume: pd.Series, index_membership: str | None = None,
-                    lookback: int = 20, calendar=None) -> dict:
+                    lookback: int = 20, calendar=None,
+                    cal: Optional[Calibration] = None) -> dict:
     """
     Classify liquidity for a stock using volume averaged over `lookback` days,
     compared against index-appropriate thresholds.
@@ -1013,6 +1008,8 @@ def liquidity_score(volume: pd.Series, index_membership: str | None = None,
     `index_membership` is echoed back because the caller's message needs to say
     WHICH floor was used — "thin for an EGX30 name" and "thin for a NILEX name"
     are ~20x apart, and a bare "thin" hides that the judgement is relative.
+
+    `cal`: the market's calibration bundle (tiers + default tier). None reads as EG.
     """
     empty = {"avg_volume": None, "classification": None, "thin": False,
              "index_membership": None, "dead_sessions": None,
@@ -1024,7 +1021,10 @@ def liquidity_score(volume: pd.Series, index_membership: str | None = None,
     if np.isnan(avg):
         return empty
 
-    tier_echo = (index_membership or "").upper() or None
+    cal = cal if cal is not None else for_market("EG")
+    canonical = {name.upper(): name for name in cal.liquidity_tiers}
+    wanted = (index_membership or "").upper()
+    tier_echo = canonical.get(wanted, wanted) or None
 
     # Absence from the market's calendar, checked BEFORE the row-based tests
     # because it is the only one that can see days the symbol has no row for.
@@ -1059,17 +1059,15 @@ def liquidity_score(volume: pd.Series, index_membership: str | None = None,
             "traded_share": round(traded_share, 3) if traded_share is not None else None,
         }
 
-    tier = (index_membership or "").upper()
-    if tier not in _INDEX_LIQ_FLOORS:
-        # Unknown tier — EGX100 is the middle-of-the-road default, and was the
-        # behaviour for every symbol before membership was plumbed through.
-        tier = "EGX100"
-    floors = _INDEX_LIQ_FLOORS[tier]
+    # Unknown tier → the market's default (EG: EGX100, the behaviour every EG
+    # symbol had before membership was plumbed through; US: other-listed).
+    tier = canonical.get(wanted, cal.liquidity_default_tier)
+    thin_below, low_below = cal.liquidity_tiers[tier]
 
-    if avg < floors["thin"]:
+    if avg < thin_below:
         classification = "thin"
         thin = True
-    elif avg < floors["low"]:
+    elif avg < low_below:
         classification = "low"
         thin = False
     else:

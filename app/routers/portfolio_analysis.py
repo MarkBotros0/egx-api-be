@@ -487,6 +487,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                     divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
                     benchmark_label=bench,
                     score_calibrated=market.score_calibrated,
+                    market_code=market.code,
                 )
                 divergences_h = built_h["divergences"]
                 volume_price_h = built_h["volume_price"]
