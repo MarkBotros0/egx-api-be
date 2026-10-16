@@ -30,11 +30,17 @@ _MISS_TTL = 3600
 WRITE_BATCH = 250      # rows per multi-row INSERT: ~515 single-row writes would risk Vercel's 30s limit
 
 _universe_cache: dict[str, tuple[list, float]] = {}
+_member_cache: dict[str, tuple[frozenset, float]] = {}
+# An EMPTY member set is cached too, briefly: it is the state a fresh database
+# sits in until the universe cron runs, and re-reading it for every symbol of
+# a batch or cron call would cost a round trip each.
+_MEMBER_EMPTY_TTL = 300
 _exchange_cache: dict[tuple[str, str], tuple[Optional[str], float]] = {}
 
 
 def clear_caches() -> None:
     _universe_cache.clear()
+    _member_cache.clear()
     _exchange_cache.clear()
 
 
@@ -99,9 +105,31 @@ def refresh_universe(db, market: MarketConfig) -> dict:
     except Exception as e:
         return {"success": False, "count": 0, "error": f"{type(e).__name__}: {e}"}
     _universe_cache.pop(market.code, None)
+    _member_cache.pop(market.code, None)
     for r in rows.values():
         _exchange_cache[(market.code, r["symbol"])] = (r["exchange"], time.time())
     return {"success": True, "count": len(rows), "error": None}
+
+
+def index_members(db, market: MarketConfig) -> Optional[frozenset]:
+    """
+    The symbols listed in one of `market`'s index symbolsets, for the scoring
+    hot path. READ-ONLY: unlike `load_universe` it never refreshes the table,
+    so it never reaches the scanner — a liquidity tier must not wait on a
+    network call per symbol. None when the table cannot be read.
+    """
+    hit = _member_cache.get(market.code)
+    if hit is not None:
+        ttl = _UNIVERSE_TTL if hit[0] else _MEMBER_EMPTY_TTL
+        if time.time() - hit[1] < ttl:
+            return hit[0]
+    try:
+        rows = _read(db, market)
+    except Exception:
+        return None
+    members = frozenset(r["symbol"].upper() for r in rows if r.get("indices"))
+    _member_cache[market.code] = (members, time.time())
+    return members
 
 
 def _read(db, market: MarketConfig) -> list:

@@ -550,11 +550,16 @@ def other_listed_tier(thin: int, low: int, eg_tiers) -> tuple:
 
 def fit_liquidity_tiers(eg_frames: dict, frames: dict, members, market) -> tuple:
     """
-    Index members get the share-volume floors at the same percentiles of THEIR
-    distribution that EG's EGX30 floors sit at in the EGX30's. There is no
-    history for non-members (the panel is index members only), so other
-    listings get those floors scaled by EG's NILEX/EGX30 ratio — the same
-    relative leniency NILEX gets against EGX30.
+    Share-volume floors at the same percentiles of the index members'
+    distribution that EG's EGX30 floors sit at in the EGX30's, scaled by EG's
+    NILEX/EGX30 ratio for OTHER listings (the panel has no non-member history).
+
+    Index members themselves get NO share-count floor, (0, 0). On the first US
+    fit the member floors came out at 500k / 1M shares/day and labelled 18
+    S&P members "thin, hard to exit" — AZO among them at ~$1B/day — because a
+    share count means nothing across prices from $5 to $6,000. Index inclusion
+    already screens for liquidity, and `liquidity_score`'s dead-session and
+    calendar tests still catch a member that genuinely stops trading.
     """
     eg = for_market(EG).liquidity_tiers
     ref = volume_samples(eg_frames, symbols_in_index("EGX30"))
@@ -569,9 +574,10 @@ def fit_liquidity_tiers(eg_frames: dict, frames: dict, members, market) -> tuple
     low = int(round_down_nice(float(np.quantile(tgt, p_low))))
     if low <= thin:
         raise CalibrationRefused(f"liquidity tiers collapsed: thin {thin} >= low {low}")
-    tiers = {index_member_tier(market): (thin, low),
+    tiers = {index_member_tier(market): (0, 0),
              market.code: other_listed_tier(thin, low, eg)}
     report = {"p_thin": round(p_thin, 3), "p_low": round(p_low, 3),
+              "member_share_floors": (thin, low),
               "thin_share": round(float((tgt < thin).mean()), 3),
               "n_ref": int(len(ref)), "n_target": int(len(tgt))}
     return tiers, report
@@ -661,6 +667,29 @@ def risk_cal_from(risk: dict, fitted_at: str) -> RiskCal:
     )
 
 
+def composite_failures(spec: CacheSpec) -> tuple:
+    """
+    The composite-score test, run on THIS market's panel, for the Calibration
+    screen's "what failed" list. Listed only when it failed the project's
+    |t| > 3.0 bar — a market where the score did rank returns would need a
+    different sentence, not this one.
+    """
+    from scripts.backtest import information_coefficient
+
+    panel = pd.read_pickle(os.path.join(spec.cache_dir, "panel.pkl"))
+    if "fwd_21" not in panel.columns:
+        return ()
+    ic = information_coefficient(panel, "score", 21)
+    if ic.get("ic") is None or ic.get("t_stat") is None or abs(ic["t_stat"]) >= 3.0:
+        return ()
+    return ({
+        "claim": "The composite score ranks stocks by future return",
+        "measured": (f"IC ≈ 0 ({ic['ic']:+.3f} at 21 days, t {ic['t_stat']:.2f} "
+                     f"over {ic['n_dates']} dates)"),
+        "outcome": "Buy/Sell labels stay removed; the score describes condition.",
+    },)
+
+
 def build_bundle(market, spec: CacheSpec, *, eg_spec: CacheSpec, eg_pe, eg_dy, pe, dy,
                  today: date) -> tuple:
     fitted_at = today.isoformat()
@@ -686,7 +715,7 @@ def build_bundle(market, spec: CacheSpec, *, eg_spec: CacheSpec, eg_pe, eg_dy, p
         liquidity_default_tier=market.code,
         liquid_min_turnover=floor,
         liquid_min_price=price_floor,
-        measured_failures=(),
+        measured_failures=composite_failures(spec),
         breadth_measured=False,
         dividend_drag_measured=False,
         provisional=False,

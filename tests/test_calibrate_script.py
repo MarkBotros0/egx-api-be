@@ -30,7 +30,8 @@ def caches(tmp_path):
                [{"symbol": s, "exchange": "NYSE", "indices": ["SPX"]} for s in US_SYMS])
     rng = np.random.default_rng(5)
     dates = frames["SPY"].index[100:760:21]
-    pd.DataFrame([{"symbol": s, "date": d, "score": float(rng.uniform(30, 70))}
+    pd.DataFrame([{"symbol": s, "date": d, "score": float(rng.uniform(30, 70)),
+                   "fwd_21": float(rng.normal(0.0, 5.0))}
                   for d in dates for s in US_SYMS]).to_pickle(us_dir / "panel.pkl")
     eg30 = symbols_in_index("EGX30")[:6]
     write_frames(str(eg_dir), {s: make_frame(400, 40 + i, volume=300_000.0, vol_spread=0.8)
@@ -68,8 +69,10 @@ def test_build_bundle_on_a_fixture_cache(caches):
     assert sorted(bundle.risk.quintiles) == [1, 2, 3, 4, 5]
     assert bundle.regime.universe_indexes == ("SPX",) and bundle.regime.universe_label == "S&P 500"
     assert set(bundle.liquidity_tiers) == {"US large-cap", "US"}
-    for thin, low in bundle.liquidity_tiers.values():
-        assert 0 < thin < low
+    # Index members carry no share-count floor; other listings a real one.
+    assert bundle.liquidity_tiers["US large-cap"] == (0, 0)
+    thin, low = bundle.liquidity_tiers["US"]
+    assert 0 < thin < low
     assert bundle.liquidity_default_tier == "US"
     assert bundle.liquid_min_price == 5.0
     m = bundle.liquid_min_turnover / 10 ** math.floor(math.log10(bundle.liquid_min_turnover))
@@ -79,7 +82,9 @@ def test_build_bundle_on_a_fixture_cache(caches):
     assert fund.label == "US"
     assert band_index(fund.pe_bands, fund.pe_median) == band_index(eg_fund.pe_bands, eg_fund.pe_median)
     assert band_index(fund.dy_bands, fund.dy_median) == band_index(eg_fund.dy_bands, eg_fund.dy_median)
-    assert (bundle.breadth_measured, bundle.dividend_drag_measured, bundle.measured_failures) == (False, False, ())
+    assert (bundle.breadth_measured, bundle.dividend_drag_measured) == (False, False)
+    # Random fixture scores rank nothing, so the composite test is listed as failed.
+    assert [x["claim"] for x in bundle.measured_failures] == ["The composite score ranks stocks by future return"]
     assert "thin_share" in report["liquidity"]
 
 
@@ -160,3 +165,14 @@ def test_the_other_listed_tier_never_collapses():
     assert other_listed_tier(500_000, 1_000_000, eg) == (25_000, 40_000)
     with pytest.raises(CalibrationRefused):
         other_listed_tier(500_000, 500_000, eg)
+
+
+def test_a_score_that_did_rank_returns_is_not_listed_as_a_failure(tmp_path):
+    from scripts.calibrate import composite_failures
+    from scripts.market_cache import spec_for
+    dates = pd.bdate_range("2020-01-01", periods=30)
+    rows = [{"symbol": f"S{i}", "date": d, "score": float(i), "fwd_21": float(i)}
+            for d in dates for i in range(20)]
+    (tmp_path / "US").mkdir()
+    pd.DataFrame(rows).to_pickle(tmp_path / "US" / "panel.pkl")
+    assert composite_failures(spec_for("US", str(tmp_path / "US"))) == ()

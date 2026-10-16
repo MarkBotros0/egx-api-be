@@ -125,7 +125,10 @@ def test_us_bundle_is_fitted_on_us_data():
     assert us.liquidity_default_tier == "US"
     assert us.fundamentals.label == "US"
     assert us.regime.universe_indexes == ("SPX",)
-    assert (us.breadth_measured, us.dividend_drag_measured, us.measured_failures) == (False, False, ())
+    assert (us.breadth_measured, us.dividend_drag_measured) == (False, False)
+    # Measured on the US backtest panel, not copied from EG.
+    assert [x["claim"] for x in us.measured_failures] == ["The composite score ranks stocks by future return"]
+    assert all("EGX" not in str(x) for x in us.measured_failures)
 
 
 def test_registry_floors_agree_with_the_bundle():

@@ -11,8 +11,10 @@ already reads — but `_load_tickers()` also merges a live TradingView POST
 container. Calling it from the scoring path would put every dashboard card
 behind a ticker-list fetch.
 
-This module reads the static JSON directly instead: one file read per process,
-no network, no DB. Index membership changes roughly twice a year and the JSON
+For EG this module reads the static JSON directly instead: one file read per
+process, no network, no DB. Other markets (US) read their index members from
+`market_universe` through `universe.index_members` — a cached, read-only DB
+query that never refreshes the table or reaches the scanner. Index membership changes roughly twice a year and the JSON
 is a deploy artifact, so there is nothing to refresh at runtime.
 
 Unknown symbols return None, which is the SAFE answer — `liquidity_score`
@@ -77,14 +79,12 @@ def get_index_membership(symbol: str, market=EG, db=None) -> Optional[str]:
     if market.code != EG.code:
         if db is None or not symbol:
             return market.code
-        try:
-            from app.core import universe as universe_mod
-            rows = universe_mod.load_universe(db, market)
-        except Exception:
+        from app.core import universe as universe_mod
+        # Read-only and cached: never a scanner refresh from the scoring path.
+        members = universe_mod.index_members(db, market)
+        if members is None:
             return market.code
-        wanted = symbol.upper()
-        member = any(r.get("symbol", "").upper() == wanted and r.get("indices") for r in rows)
-        return index_member_tier(market) if member else market.code
+        return index_member_tier(market) if symbol.upper() in members else market.code
     if not symbol:
         return None
     return _load().get(symbol.upper())

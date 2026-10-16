@@ -23,7 +23,8 @@ def _universe(monkeypatch, rows=None, boom=False):
             {"symbol": "AAPL", "indices": ["SPX", "NDX"]},
             {"symbol": "XYZQ", "indices": []},
         ]
-    monkeypatch.setattr(universe_mod, "load_universe", fake)
+    universe_mod.clear_caches()
+    monkeypatch.setattr(universe_mod, "_read", fake)
 
 
 def test_us_index_members_get_the_large_cap_tier(monkeypatch):
@@ -44,15 +45,19 @@ def test_us_membership_degrades_to_other_listed(monkeypatch):
     assert get_index_membership("AAPL", US, db=object()) == "US"     # unreadable universe
 
 
-def test_us_large_cap_floors_apply_and_name_the_tier():
+def test_us_large_caps_are_never_thin_by_share_count_but_others_are():
+    """A share count means nothing across $5-$6,000 prices: the first fit
+    called AZO (~$1B/day on ~300k shares) thin. Members get no share floor."""
     from app.core.composite import score_volume
     from app.core.indicators import liquidity_score
-    thin_below, low_below = US_CAL.liquidity_tiers["US large-cap"]
-    out = liquidity_score(pd.Series([float(thin_below) / 2] * 30), "US large-cap", cal=US_CAL)
-    assert out["index_membership"] == "US large-cap" and out["classification"] == "thin"
+    member = liquidity_score(pd.Series([300_000.0] * 30), "US large-cap", cal=US_CAL)
+    assert member["index_membership"] == "US large-cap" and member["classification"] == "normal"
+    thin_below, _ = US_CAL.liquidity_tiers["US"]
+    other = liquidity_score(pd.Series([float(thin_below) / 2] * 30), "US", cal=US_CAL)
+    assert other["classification"] == "thin"
     # One real volume input: liquidity alone never carries the category.
-    _, reasons = score_volume(True, True, None, None, liquidity=out)
-    assert any("a US large-cap name" in r for r in reasons)
+    _, reasons = score_volume(True, True, None, None, liquidity=other)
+    assert any("a US name" in r for r in reasons)
 
 
 def test_us_is_calibrated():
@@ -98,3 +103,19 @@ def test_no_egx_or_egypt_in_any_us_reason():
                                     "history_days": 300})["risk_adjusted"][1]
     assert any("T-bill" in r for r in lagging)
     assert not any("EGX" in r or "policy rate" in r for r in lagging)
+
+
+def test_membership_never_refreshes_the_universe_and_caches_an_empty_table(monkeypatch):
+    """The scoring path must not reach the scanner: an empty table is read once
+    and cached, never refreshed per symbol."""
+    from app.core import universe as universe_mod
+    from app.core.index_membership import get_index_membership
+    reads = []
+    universe_mod.clear_caches()
+    monkeypatch.setattr(universe_mod, "_read", lambda db, market: reads.append(1) or [])
+    monkeypatch.setattr(universe_mod, "refresh_universe",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("network refresh")))
+    for sym in ("AAPL", "KO", "XYZQ"):
+        assert get_index_membership(sym, US, db=object()) == "US"
+    assert reads == [1]
+    universe_mod.clear_caches()

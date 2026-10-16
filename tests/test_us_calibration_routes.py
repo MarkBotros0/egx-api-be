@@ -109,8 +109,11 @@ def test_us_calibration_route_serves_the_us_record(client):
     assert body["forecast"]["universe"] == us.forecast.universe_label
     assert body["forecast"]["z_table"] == {str(k): v for k, v in us.forecast.z_cone.items()}
     assert body["risk_grade"]["n_observations"] == us.risk.n_observations
-    assert [x["claim"] for x in body["what_failed"]] == ["Market condition predicts the next three months"]
-    assert body["what_failed"][0]["measured"] == (
+    assert [x["claim"] for x in body["what_failed"]] == [
+        "The composite score ranks stocks by future return",
+        "Market condition predicts the next three months",
+    ]
+    assert body["what_failed"][1]["measured"] == (
         f"rho {us.regime.rho}, Newey-West t {us.regime.t} over {us.regime.n} readings")
     assert "EGX" not in json.dumps(body) and "Egypt" not in json.dumps(body)
 
