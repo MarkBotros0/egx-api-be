@@ -65,6 +65,10 @@ SERIES = {
     # A price, not a release: knowable the day it prints, hence lag 0. Same
     # symbol the macro card already uses, so the two cannot disagree.
     "USDEGP": ("USD/EGP", "FX_IDC", 0, "rate"),
+    # US 3-month T-bill yield — a quoted yield, knowable the day it prints.
+    # Feeds the US backtest's dated risk-free rate only; the live app reads the
+    # single current value under settings key risk_free_rate:US.
+    "US03MY": ("US 3-month T-bill yield", "TVC", 0, "percent"),
 }
 
 # The policy rate is a stand-in for a risk-free rate. There is no free
@@ -73,6 +77,7 @@ SERIES = {
 # stated wherever a Sharpe ratio is explained rather than papered over.
 RISK_FREE_SERIES = "EGINTR"
 FX_SERIES = "USDEGP"
+US_RISK_FREE_SERIES = "US03MY"
 
 
 def released_at(period: str, lag_days: int) -> str:
@@ -131,9 +136,11 @@ def upsert(db, series_code: str, period: str, value: float,
     )
 
 
-def get_risk_free_steps(db) -> list:
+def get_risk_free_steps(db, series_code: str = RISK_FREE_SERIES) -> list:
     """
     The whole policy-rate history as [(date, annual_pct), ...], oldest first.
+
+    `series_code`: EGINTR (default) or US03MY.
 
     Feeds `returns.annualized_cash_rate_pct`, which compounds it across one
     trade's holding window. Read ONCE per request and passed down — the steps
@@ -155,7 +162,7 @@ def get_risk_free_steps(db) -> list:
         rows = db.execute(
             "SELECT observed_period, value FROM macro_series "
             "WHERE series_code = %s ORDER BY observed_period",
-            (RISK_FREE_SERIES,),
+            (series_code,),
         ).fetchall()
     except Exception:
         return []

@@ -19,9 +19,11 @@ and any macro-conditioned result becomes unfalsifiable.
 Verified reachable before this was written:
   ECONOMICS:EGINTR   300 monthly bars, 2001-05 -> 2026-08
   FX_IDC:USDEGP    5,000 daily bars,  2006-09 -> 2026-09  (last 51.000)
+  TVC:US03MY       5,000 daily bars,  2006-11 -> today
 
 Run:  ./.venv/Scripts/python.exe -m scripts.backfill_macro
       ./.venv/Scripts/python.exe -m scripts.backfill_macro --dry-run
+      ./.venv/bin/python -m scripts.backfill_macro --series US03MY
 """
 
 from __future__ import annotations
@@ -35,8 +37,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.core.macro_series import SERIES, released_at, upsert_many  # noqa: E402
 
 # Monthly for economic releases; daily for the FX rate, which is a price.
-_INTERVAL = {"ECONOMICS": "Monthly", "FX_IDC": "Daily"}
-_BARS = {"ECONOMICS": 300, "FX_IDC": 5000}
+_INTERVAL = {"ECONOMICS": "Monthly", "FX_IDC": "Daily", "TVC": "Daily"}
+_BARS = {"ECONOMICS": 300, "FX_IDC": 5000, "TVC": 5000}
 
 # Rows per multi-row INSERT, so the FX series is ten round trips rather than
 # 5,000. Six bound parameters per row keeps a batch of 500 far inside
@@ -56,12 +58,12 @@ def fetch_history(code: str, exchange: str):
     return df["close"].astype(float) if "close" in df.columns else None
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true",
                     help="fetch and report without writing")
-    ap.add_argument("--only", help="a single series code")
-    args = ap.parse_args()
+    ap.add_argument("--only", "--series", dest="only", help="a single series code, e.g. US03MY")
+    args = ap.parse_args(argv)
 
     db = None
     if not args.dry_run:

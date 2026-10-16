@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import pandas as pd
 import pytest
 
 from app.core.macro_series import (
@@ -171,3 +172,34 @@ def test_an_empty_batch_writes_nothing():
     db = _RecordingDB()
     assert upsert_many(db, FX_SERIES, []) == 0
     assert db.calls == []
+
+
+def test_us_t_bill_is_a_daily_price_series_with_no_lag():
+    from app.core.macro_series import US_RISK_FREE_SERIES
+    assert US_RISK_FREE_SERIES == "US03MY"
+    assert SERIES["US03MY"] == ("US 3-month T-bill yield", "TVC", 0, "percent")
+
+
+def test_risk_free_steps_read_the_series_they_are_asked_for():
+    from app.core.macro_series import get_risk_free_steps
+    db = _RecordingDB()
+    db.execute = lambda sql, params=(): (db.calls.append((sql, params)) or
+                                         type("R", (), {"fetchall": lambda s: [("2026-10-01", 4.21)]})())
+    assert get_risk_free_steps(db, "US03MY") == [("2026-10-01", 4.21)]
+    assert db.calls[-1][1] == ("US03MY",)
+    get_risk_free_steps(db)
+    assert db.calls[-1][1] == ("EGINTR",)
+
+
+def test_backfill_fetches_tvc_daily_and_honours_series(monkeypatch):
+    import scripts.backfill_macro as bf
+    calls = []
+
+    def fake_ohlcv(symbol, exchange, interval, bars):
+        calls.append((symbol, exchange, interval, bars))
+        idx = pd.date_range("2026-01-01", periods=3)
+        return pd.DataFrame({"close": [4.1, 4.2, 4.3]}, index=idx)
+
+    monkeypatch.setattr("app.vendor.egxpy.get_OHLCV_data", fake_ohlcv)
+    assert bf.main(["--series", "US03MY", "--dry-run"]) == 0
+    assert calls == [("US03MY", "TVC", "Daily", 5000)]
