@@ -31,6 +31,7 @@ from app.core.db import get_db
 from app.core.holdings import HOLDING_COLUMNS, fetch_open_lots, row_to_holding
 from app.core.dividends import fetch_dividends, summarize_realized
 from app.core.macro_fetch import read_risk_free_rate
+from app.core.quantity import out as qty_out, to_decimal
 from app.core.markets import MARKETS, MarketConfig, market_param
 from app.core.macro_series import get_risk_free_steps
 from app.core.sales import (
@@ -51,7 +52,7 @@ _SALE_COLUMNS = (
 def _row_to_sale(row) -> dict:
     return {
         "id": row[0], "holding_id": row[1], "symbol": row[2], "name": row[3],
-        "sector": row[4], "quantity": row[5], "buy_price": row[6],
+        "sector": row[4], "quantity": qty_out(row[5]), "buy_price": row[6],
         "buy_date": row[7], "sell_price": row[8], "sell_date": row[9],
         "notes": row[10], "created_at": row[11], "sale_group_id": row[12],
     }
@@ -115,6 +116,7 @@ def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
             sell_price=body.get("sell_price"),
             sell_date=body.get("sell_date"),
             today=date.today(),
+            share_decimals=market.share_decimals,
         )
 
         now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
@@ -136,7 +138,8 @@ def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
                     "UPDATE portfolio SET quantity = quantity - %s, updated_at = %s "
                     "WHERE id = %s AND user_id = %s AND quantity >= %s "
                     "RETURNING quantity",
-                    (part["quantity"], now, part["id"], user.id, part["quantity"]),
+                    (to_decimal(part["quantity"]), now, part["id"], user.id,
+                     to_decimal(part["quantity"])),
                 ).fetchone()
                 if updated is None:
                     # The plan was built from rows read above, so reaching here
@@ -270,13 +273,13 @@ def delete_sale(id: str = Query(...), user: CurrentUser = Depends(get_current_us
                 back = tx.execute(
                     "UPDATE portfolio SET quantity = quantity + %s, updated_at = %s "
                     "WHERE id = %s AND user_id = %s RETURNING quantity",
-                    (int(quantity), now, holding_id, user.id),
+                    (to_decimal(quantity), now, holding_id, user.id),
                 ).fetchone()
                 restored.append({
                     "sale_id": row_id,
                     "holding_id": holding_id,
-                    "quantity": int(quantity),
-                    "restored_quantity": back[0] if back else None,
+                    "quantity": qty_out(quantity),
+                    "restored_quantity": qty_out(back[0]) if back else None,
                 })
 
         return {"deleted": id, "restored": restored}

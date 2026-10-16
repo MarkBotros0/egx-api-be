@@ -12,7 +12,10 @@ delivers for open positions, applied to closed ones.
 """
 
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Optional
+
+from app.core.quantity import fmt, out as qty_out, parse_shares, to_decimal
 
 from app.core.returns import (annualized_cash_rate_pct, annualized_return,
                                days_between)
@@ -29,17 +32,12 @@ def _parse_date(value: str) -> Optional[date]:
         return None
 
 
-def _coerce_quantity(quantity) -> int:
-    if isinstance(quantity, bool) or not isinstance(quantity, int):
-        try:
-            if float(quantity) != int(float(quantity)):
-                raise ValueError
-            quantity = int(float(quantity))
-        except (TypeError, ValueError):
-            raise SaleValidationError("Quantity must be a whole number of shares.")
-    if quantity <= 0:
-        raise SaleValidationError("Quantity must be at least 1 share.")
-    return quantity
+def _coerce_quantity(quantity, share_decimals: int = 0) -> Decimal:
+    """Whole shares on a market with share_decimals 0 (EG); fractions elsewhere."""
+    try:
+        return parse_shares(quantity, share_decimals)
+    except ValueError as e:
+        raise SaleValidationError(str(e))
 
 
 def _coerce_price(sell_price) -> float:
@@ -82,7 +80,7 @@ def sort_lots(lots: list[dict]) -> list[dict]:
     )
 
 
-def plan_sale_allocation(lots: list[dict], quantity: int) -> list[dict]:
+def plan_sale_allocation(lots: list[dict], quantity) -> list[dict]:
     """
     Split one sell across the open lots of a symbol, oldest first (FIFO).
 
@@ -98,14 +96,16 @@ def plan_sale_allocation(lots: list[dict], quantity: int) -> list[dict]:
     restoring shares to the lot they came from.
 
     Returns a copy of each lot with `quantity` set to the part being sold and
-    `lot_quantity` to what that lot held before it.
+    `lot_quantity` to what that lot held before it. Quantities are summed and
+    split as Decimal (core/quantity.py) and returned in wire form — an int when
+    whole, so whole-share markets are unchanged.
     """
-    quantity = int(quantity)
-    open_lots = [lot for lot in lots if int(lot.get("quantity") or 0) > 0]
-    held = sum(int(lot["quantity"]) for lot in open_lots)
+    quantity = to_decimal(quantity)
+    open_lots = [lot for lot in lots if to_decimal(lot.get("quantity")) > 0]
+    held = sum((to_decimal(lot["quantity"]) for lot in open_lots), Decimal(0))
     if quantity > held:
         raise SaleValidationError(
-            f"You hold {held} shares — you cannot sell {quantity}."
+            f"You hold {fmt(held)} shares — you cannot sell {fmt(quantity)}."
         )
 
     remaining = quantity
@@ -113,15 +113,15 @@ def plan_sale_allocation(lots: list[dict], quantity: int) -> list[dict]:
     for lot in sort_lots(open_lots):
         if remaining <= 0:
             break
-        available = int(lot["quantity"])
+        available = to_decimal(lot["quantity"])
         take = min(available, remaining)
-        plan.append({**lot, "quantity": take, "lot_quantity": available})
+        plan.append({**lot, "quantity": qty_out(take), "lot_quantity": qty_out(available)})
         remaining -= take
     return plan
 
 
 def validate_position_sale(*, lots: list[dict], quantity, sell_price, sell_date,
-                           today: date) -> dict:
+                           today: date, share_decimals: int = 0) -> dict:
     """
     Check a sell request against the whole POSITION — every open lot of one
     symbol — and return the FIFO plan alongside the normalized fields.
@@ -129,13 +129,13 @@ def validate_position_sale(*, lots: list[dict], quantity, sell_price, sell_date,
     Returns {quantity, sell_price, sell_date, allocation}. Raises
     SaleValidationError with a message written for the user, not the log.
     """
-    open_lots = [lot for lot in lots if int(lot.get("quantity") or 0) > 0]
-    held = sum(int(lot["quantity"]) for lot in open_lots)
+    open_lots = [lot for lot in lots if to_decimal(lot.get("quantity")) > 0]
+    held = sum((to_decimal(lot["quantity"]) for lot in open_lots), Decimal(0))
 
-    quantity = _coerce_quantity(quantity)
+    quantity = _coerce_quantity(quantity, share_decimals)
     if quantity > held:
         raise SaleValidationError(
-            f"You hold {held} shares — you cannot sell {quantity}."
+            f"You hold {fmt(held)} shares — you cannot sell {fmt(quantity)}."
         )
     sell_price = _coerce_price(sell_price)
     parsed = _coerce_sell_date(sell_date, today)
@@ -157,7 +157,7 @@ def validate_position_sale(*, lots: list[dict], quantity, sell_price, sell_date,
             )
 
     return {
-        "quantity": quantity,
+        "quantity": qty_out(quantity),
         "sell_price": sell_price,
         "sell_date": parsed.isoformat(),
         "allocation": allocation,
@@ -197,7 +197,7 @@ def compute_sale_metrics(sale: dict, risk_free_rate_pct: float,
     stale, not flat. None keeps the step-function reading a policy rate needs:
     EGINTR holds until the next decision, so EG is unchanged.
     """
-    quantity = int(sale["quantity"])
+    quantity = float(to_decimal(sale["quantity"]))   # whole on EG; fractional on US
     buy_price = float(sale["buy_price"])
     sell_price = float(sale["sell_price"])
 
@@ -288,7 +288,7 @@ def group_sale_orders(sales: list[dict]) -> list[dict]:
         order = orders[key]
         lots = order["lots"]
 
-        quantity = sum(int(l["quantity"]) for l in lots)
+        quantity = qty_out(sum((to_decimal(l["quantity"]) for l in lots), Decimal(0)))
         cost = sum(float(l["cost"]) for l in lots)
         proceeds = sum(float(l["proceeds"]) for l in lots)
         realized_pnl = proceeds - cost

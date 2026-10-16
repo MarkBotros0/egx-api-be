@@ -28,6 +28,7 @@ from app.core.levels import compute_key_levels, compute_entry_exit
 from app.core.extras_builder import build_composite_extras
 from app.core.index_membership import get_index_membership
 from app.core.pe_fetch import get_pe_for_symbol
+from app.core.quantity import out as qty_out, to_decimal
 from app.core.returns import (  # noqa: F401  (MIN_DAYS_FOR_ANNUALIZATION re-exported)
     MIN_DAYS_FOR_ANNUALIZATION,
     annualized_return as _annualized_return,
@@ -372,7 +373,9 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
     for h in holdings:
         symbol = h.get("symbol", "").upper()
         buy_price = float(h.get("buy_price", 0))
-        quantity = int(h.get("quantity", 0))
+        # int on a whole-share market (EG); a float fraction on US — never
+        # int(), which silently dropped 0.5 of a US share.
+        quantity = qty_out(h.get("quantity") or 0)
         buy_date = h.get("buy_date", "")
         target_price = h.get("target_price")
         stop_loss = h.get("stop_loss")
@@ -679,7 +682,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                 "earliest_buy_date": buy_date,
                 "stop_loss": None, "target_price": None,
             })
-            pos["quantity"] += quantity
+            pos["quantity"] = qty_out(to_decimal(pos["quantity"]) + to_decimal(quantity))
             pos["invested"] += invested
             pos["current_value"] += current_value
             # Identical across lots by construction — one symbol, one fetch.

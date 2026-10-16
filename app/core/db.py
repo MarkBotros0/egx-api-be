@@ -203,6 +203,35 @@ def _rename_column(db, table: str, old: str, new: str) -> None:
     """)
 
 
+# Share counts: NUMERIC(24, 6), exact — whole shares on EG, fractions to six
+# places on US (core/quantity.py). Older databases created them INTEGER.
+SHARE_COLUMNS = (("portfolio", "quantity"), ("portfolio_sales", "quantity"),
+                 ("portfolio_dividends", "shares"))
+
+
+def _widen_share_column(db, table: str, column: str) -> None:
+    """
+    INTEGER -> NUMERIC(24, 6), idempotently. Every integer converts exactly, so
+    no row changes value. Re-checked under the table lock like `_rename_column`.
+    """
+    is_int = (
+        "EXISTS (SELECT 1 FROM information_schema.columns "
+        f"WHERE table_schema = current_schema() AND table_name = '{table}' "
+        f"AND column_name = '{column}' AND data_type = 'integer')"
+    )
+    db.execute(f"""
+        DO $$
+        BEGIN
+            IF {is_int} THEN
+                LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE;
+                IF {is_int} THEN
+                    ALTER TABLE {table} ALTER COLUMN {column} TYPE NUMERIC(24, 6);
+                END IF;
+            END IF;
+        END $$
+    """)
+
+
 def _add_market_columns(db) -> None:
     for table, key in _MARKET_KEYS.items():
         db.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS market TEXT NOT NULL DEFAULT 'EG'")
@@ -278,7 +307,7 @@ def init_db(db: _DB) -> None:
             name TEXT NOT NULL,
             buy_price DOUBLE PRECISION NOT NULL,
             buy_date TEXT NOT NULL,
-            quantity INTEGER NOT NULL,
+            quantity NUMERIC(24, 6) NOT NULL,
             notes TEXT DEFAULT '',
             sector TEXT DEFAULT '',
             target_price DOUBLE PRECISION,
@@ -301,7 +330,7 @@ def init_db(db: _DB) -> None:
             symbol TEXT NOT NULL,
             name TEXT NOT NULL,
             sector TEXT DEFAULT '',
-            quantity INTEGER NOT NULL,
+            quantity NUMERIC(24, 6) NOT NULL,
             buy_price DOUBLE PRECISION NOT NULL,
             buy_date TEXT NOT NULL,
             sell_price DOUBLE PRECISION NOT NULL,
@@ -347,7 +376,7 @@ def init_db(db: _DB) -> None:
             sector     TEXT DEFAULT '',
             amount     DOUBLE PRECISION NOT NULL,
             pay_date   TEXT NOT NULL,
-            shares     INTEGER,
+            shares     NUMERIC(24, 6),
             notes      TEXT DEFAULT '',
             created_at TEXT NOT NULL
         )
@@ -356,6 +385,8 @@ def init_db(db: _DB) -> None:
         "CREATE INDEX IF NOT EXISTS idx_portfolio_dividends_user "
         "ON portfolio_dividends(user_id, symbol)"
     )
+    for table, column in SHARE_COLUMNS:
+        _widen_share_column(db, table, column)
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS settings (

@@ -20,7 +20,8 @@ from app.core import universe
 from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
 from app.core.holdings import HOLDING_COLUMNS, fetch_open_holdings, row_to_holding
-from app.core.markets import MarketConfig, get_market, market_param
+from app.core.markets import MARKETS, MarketConfig, get_market, market_param
+from app.core.quantity import out as qty_out, parse_shares
 
 router = APIRouter()
 
@@ -56,6 +57,12 @@ def add_holding(body: dict,
         quantity = body.get("quantity")
         if quantity is None:
             raise HTTPException(status_code=400, detail="Missing required field: quantity")
+        # Whole shares on EG, up to 6 decimals on US (MarketConfig.share_decimals).
+        # int() used to truncate 1.5 to 1 without a word.
+        try:
+            quantity = parse_shares(quantity, target.share_decimals)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         db = get_db()
         # EG stays lenient: its ticker file drifts and the user may hold a
@@ -81,7 +88,7 @@ def add_holding(body: dict,
                quantity, notes, sector, target_price, stop_loss, created_at, updated_at)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (holding_id, user.id, target.code, symbol, name, float(buy_price), buy_date,
-             int(quantity), notes, sector, target_price, stop_loss, now, now),
+             quantity, notes, sector, target_price, stop_loss, now, now),
         )
         db.commit()
 
@@ -92,7 +99,7 @@ def add_holding(body: dict,
             "name": name,
             "buy_price": float(buy_price),
             "buy_date": buy_date,
-            "quantity": int(quantity),
+            "quantity": qty_out(quantity),
             "notes": notes,
             "sector": sector,
             "target_price": target_price,
@@ -125,6 +132,11 @@ def update_holding(
         if not row:
             raise HTTPException(status_code=404, detail=f"Holding not found: {id}")
 
+        # The holding's own market decides the share rule, not the query's.
+        mrow = db.execute("SELECT market FROM portfolio WHERE id = %s AND user_id = %s",
+                          (id, user.id)).fetchone()
+        holding_market = MARKETS.get((mrow[0] if mrow else None) or "EG", MARKETS["EG"])
+
         updatable = ["symbol", "name", "buy_price", "buy_date", "quantity", "notes",
                      "sector", "target_price", "stop_loss"]
         set_clauses = []
@@ -138,7 +150,10 @@ def update_holding(
                 if key in ("buy_price", "target_price", "stop_loss") and val is not None:
                     val = float(val)
                 if key == "quantity" and val is not None:
-                    val = int(val)
+                    try:
+                        val = parse_shares(val, holding_market.share_decimals)
+                    except ValueError as e:
+                        raise HTTPException(status_code=400, detail=str(e))
                 set_clauses.append(f"{key} = %s")
                 values.append(val)
 

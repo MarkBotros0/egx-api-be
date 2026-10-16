@@ -16,6 +16,8 @@ sales.py needs one that deliberately IGNORES this filter so a sale can be
 undone against a fully-closed holding.
 """
 
+from app.core.quantity import out as qty_out
+
 HOLDING_COLUMNS = (
     "id, symbol, name, buy_price, buy_date, quantity, notes, sector, "
     "target_price, stop_loss, created_at, updated_at"
@@ -30,7 +32,7 @@ def row_to_holding(row) -> dict:
         "name": row[2],
         "buy_price": row[3],
         "buy_date": row[4],
-        "quantity": row[5],
+        "quantity": qty_out(row[5]),   # int when whole (EG); float for a US fraction
         "notes": row[6],
         "sector": row[7],
         "target_price": row[8],

@@ -342,6 +342,30 @@ Add a fact there, not as a literal.
   AST guard that no `macro=` argument is ever the display reading.
 - **Score alerts** per market — see *Score alerts* (quiet hours in the market's
   timezone, market-scoped queue, US cron schedule).
+- **Fractional shares (US).** A market fact: `MarketConfig.share_decimals`
+  (EG 0 — whole shares, the EGX has none fractional; US 6) and
+  `price_decimals` (EG 3, US 4 — fractional-buy average costs and sub-$1
+  quotes), both sent by `/api/markets` for the clients' input rules.
+  - Schema: `portfolio.quantity`, `portfolio_sales.quantity` and
+    `portfolio_dividends.shares` are **NUMERIC(24, 6)**. `init_db` widens old
+    INTEGER columns with `db._widen_share_column` (idempotent, re-checked under
+    an ACCESS EXCLUSIVE lock; every integer converts exactly). Verified on a
+    real Postgres: an old EG row reads back as `300` (int), and 0.1 + 0.2 shares
+    sold as 0.3 leave exactly 0.
+  - `core/quantity.py`: `parse_shares(value, share_decimals)` (EG keeps its
+    "whole number" / "at least 1 share" wording), `to_decimal`, `out` (wire
+    form: int when whole, so EG responses are unchanged) and `fmt`. ALL share
+    arithmetic is Decimal — `plan_sale_allocation`, held totals, order and
+    by-symbol sums — never float, never `int()` (which silently dropped half a
+    share in `portfolio_analysis` and truncated 1.5 to 1 on add). Import it as
+    `qty_out`: `out` is a common local variable name.
+  - Validated per market on add/edit holding (the HOLDING's market on edit),
+    on a sale (the holding's market) and on dividend `shares`.
+  - Shared `lib/positions.ts` rounds share sums to six places (`roundShares`);
+    mobile `logic/money.ts` `inputRules(market)` drives `parseShares` /
+    `parseMoney` and the decimal keypad; EG keeps its exact messages.
+  - Tests: `tests/test_fractional_shares.py`, mobile `money.test.ts` /
+    `sale.test.ts`.
 
 **Deploying the market migration.** Deploy the backend in ONE step, not as a
 rolling mix: once the new code has migrated the keys, an old instance's
@@ -2891,7 +2915,8 @@ actually landed after the 5-10% withholding tax, so it is routinely not a round
 two-decimal figure.
 
 Quantity and dividend `shares` deliberately carry NO step, so they default to
-integers. EGX has no fractional shares.
+integers. EGX has no fractional shares. (The US allows fractions — see
+*Fractional shares* under *US gaps*; the web forms are EG-only.)
 
 ## Styling
 
@@ -2934,7 +2959,7 @@ user_settings (user_id, key, value, PRIMARY KEY (user_id, key))
                  -- A separate table, not a user_id column on `settings`:
                  -- changing that PK is not idempotent in Postgres, and keeping
                  -- `settings` as the global tier makes the migration free.
-portfolio (id, user_id, market, symbol, name, buy_price, buy_date, quantity, notes,
+portfolio (id, user_id, market, symbol, name, buy_price, buy_date, quantity NUMERIC(24,6), notes,
            sector, target_price, stop_loss, created_at, updated_at)
 portfolio_sales (id, user_id, market, holding_id, symbol, name, sector, quantity,
                  buy_price, buy_date, sell_price, sell_date, notes, created_at,

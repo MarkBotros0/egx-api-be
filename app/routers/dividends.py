@@ -50,6 +50,7 @@ def record_dividend(body: dict,
             pay_date=body.get("pay_date"),
             shares=body.get("shares"),
             today=date.today(),
+            share_decimals=target.share_decimals,
         )
 
         # A double-tapped submit on a phone is the likeliest way this ledger

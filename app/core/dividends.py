@@ -20,6 +20,8 @@ compared to the T-bill.
 from datetime import date, datetime
 from typing import Optional
 
+from app.core.quantity import out as qty_out, parse_shares, to_decimal
+
 
 class DividendValidationError(ValueError):
     """A dividend that is not internally consistent. Maps to HTTP 400."""
@@ -32,7 +34,8 @@ def _parse_date(value: str) -> Optional[date]:
         return None
 
 
-def validate_dividend(*, symbol, amount, pay_date, shares, today: date) -> dict:
+def validate_dividend(*, symbol, amount, pay_date, shares, today: date,
+                      share_decimals: int = 0) -> dict:
     """
     Check a dividend request. Returns normalized
     {symbol, amount, pay_date, shares}.
@@ -70,7 +73,7 @@ def validate_dividend(*, symbol, amount, pay_date, shares, today: date) -> dict:
 
     if shares is None or (isinstance(shares, str) and not shares.strip()):
         shares = None
-    else:
+    elif share_decimals == 0:
         if isinstance(shares, bool):
             raise DividendValidationError("Shares must be a whole number of shares.")
         try:
@@ -80,6 +83,12 @@ def validate_dividend(*, symbol, amount, pay_date, shares, today: date) -> dict:
         if as_float != int(as_float) or int(as_float) <= 0:
             raise DividendValidationError("Shares must be a whole number of shares.")
         shares = int(as_float)
+    else:
+        # Fractional-share market (US): see core/quantity.py.
+        try:
+            shares = qty_out(parse_shares(shares, share_decimals, what="Shares"))
+        except ValueError as e:
+            raise DividendValidationError(str(e))
 
     return {
         "symbol": symbol,
@@ -99,7 +108,7 @@ def enrich_dividend(row: dict) -> dict:
     """
     shares = row.get("shares")
     amount = float(row.get("amount") or 0)
-    per_share = round(amount / shares, 4) if shares else None
+    per_share = round(amount / float(shares), 4) if shares else None
     return {**row, "amount_per_share": per_share}
 
 
@@ -166,7 +175,7 @@ def summarize_realized(priced_sales: list, dividends: list) -> dict:
     for s in priced_sales:
         agg = _bucket(s["symbol"], s.get("name"), s.get("sector"))
         agg["sales_count"] += 1
-        agg["quantity"] += int(s["quantity"])
+        agg["quantity"] = qty_out(to_decimal(agg["quantity"]) + to_decimal(s["quantity"]))
         agg["cost"] += s["cost"]
         agg["proceeds"] += s["proceeds"]
 
@@ -226,7 +235,7 @@ def row_to_dividend(row) -> dict:
         "sector": row[3],
         "amount": row[4],
         "pay_date": row[5],
-        "shares": row[6],
+        "shares": qty_out(row[6]) if row[6] is not None else None,
         "notes": row[7],
         "created_at": row[8],
     }

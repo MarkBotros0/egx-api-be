@@ -77,6 +77,14 @@ class MarketConfig:
     # day: EGX trades Sun-Thu (W-THU), US Mon-Fri (W-FRI). Feeds the Daily
     # view's weekly trend (multi-timeframe alignment).
     week_end_rule: str = "W-FRI"
+    # Decimal places a share count may carry: 0 = whole shares only (the EGX
+    # has no fractional shares); US brokers hold fractions, quoted to 6.
+    # See core/quantity.py.
+    share_decimals: int = 0
+    # Decimal places a price may be entered with (client input rule): the EGX
+    # quotes to 3 (CIEB 27.697); US average costs on fractional buys and
+    # sub-$1 quotes run to 4.
+    price_decimals: int = 3
 
     @property
     def primary_exchange(self) -> str:
@@ -132,6 +140,7 @@ US = MarketConfig(
     risk_free_fallback_pct=4.0,
     risk_free_series="US03MY", risk_free_max_gap_days=10,
     yahoo_class_separator="-", news_index="SPX", risk_free_label="3-month T-bill",
+    share_decimals=6, price_decimals=4,
     # Fitted by scripts/calibrate.py --market US (app/core/calibration/us.py):
     # p5 of 60-day mean dollar turnover across SPX/NDX/DJI members, rounded
     # down; 5 USD is the usual penny-stock line.
@@ -233,5 +242,8 @@ def public_market(market: MarketConfig, today: date) -> dict:
         # market whose own measurement hides the card. See RegimeCal.show.
         "regime_shown": _regime_shown(market),
         "indices": [{"id": i.id, "label": i.label} for i in market.indices],
+        # Input rules: whole shares on EG, fractions on US (core/quantity.py).
+        "share_decimals": market.share_decimals,
+        "price_decimals": market.price_decimals,
         "holidays": market_holidays(market, today) if market.publish_holidays else [],
     }
