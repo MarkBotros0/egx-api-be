@@ -941,7 +941,7 @@ def test_sale_takes_the_holdings_market_not_the_bodys(monkeypatch):
         ("AND quantity > 0", [_LOT]),
         ("RETURNING quantity", [(6,)]),
     ])
-    monkeypatch.setattr(sales_mod, "get_risk_free_steps", lambda db: [])
+    monkeypatch.setattr(sales_mod, "get_risk_free_steps", lambda db, series=None: [])
     out = sales_mod.record_sale(
         {"holding_id": "h1", "quantity": 4, "sell_price": 120, "sell_date": "2026-02-01",
          "market": "EG"},
@@ -955,7 +955,7 @@ def test_sale_takes_the_holdings_market_not_the_bodys(monkeypatch):
 
 def test_sales_ledger_is_scoped_by_market_with_market_currency(monkeypatch):
     db = _patched_db(monkeypatch, sales_mod)
-    monkeypatch.setattr(sales_mod, "get_risk_free_steps", lambda db: [])
+    monkeypatch.setattr(sales_mod, "get_risk_free_steps", lambda db, series=None: [])
     out = sales_mod.get_sales(market=US, user=ME)
     for needle in ("FROM portfolio_sales", "FROM portfolio_dividends"):
         [(sql, params)] = db.statements(needle)

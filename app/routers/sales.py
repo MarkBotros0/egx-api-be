@@ -31,7 +31,7 @@ from app.core.db import get_db
 from app.core.holdings import HOLDING_COLUMNS, fetch_open_lots, row_to_holding
 from app.core.dividends import fetch_dividends, summarize_realized
 from app.core.macro_fetch import read_risk_free_rate
-from app.core.markets import EG, MARKETS, MarketConfig, market_param
+from app.core.markets import MARKETS, MarketConfig, market_param
 from app.core.macro_series import get_risk_free_steps
 from app.core.sales import (
     SaleValidationError,
@@ -59,14 +59,13 @@ def _row_to_sale(row) -> dict:
 
 def _rate_steps(db, market: MarketConfig) -> list:
     """
-    The dated rate history a trade in `market` is graded against.
-
-    The stored history is EGINTR, Egypt's policy rate, so it grades EG trades
-    only. Any other market gets [] and `compute_sale_metrics` falls back to
-    that market's own scalar from `read_risk_free_rate` — a US trade is never
-    held to Egypt's rate.
+    The dated rate history a trade in `market` is graded against: the market's
+    own `risk_free_series` (EGINTR for EG, the US03MY T-bill for US). A market
+    without one gets [] and `compute_sale_metrics` falls back to that market's
+    scalar from `read_risk_free_rate` — a trade is never held to another
+    market's rate.
     """
-    return get_risk_free_steps(db) if market.code == EG.code else []
+    return get_risk_free_steps(db, market.risk_free_series) if market.risk_free_series else []
 
 
 @router.post("/api/sales", status_code=201)
@@ -173,7 +172,8 @@ def record_sale(body: dict, user: CurrentUser = Depends(get_current_user)):
         # Read ONCE for the whole request, not once per lot consumed.
         rfr = read_risk_free_rate(db, market)
         rate_steps = _rate_steps(db, market)
-        priced = [compute_sale_metrics(s, rfr, rate_steps=rate_steps) for s in sales]
+        priced = [compute_sale_metrics(s, rfr, rate_steps=rate_steps,
+                                       max_stale_days=market.risk_free_max_gap_days) for s in sales]
         return {
             "market": market.code,
             "currency": market.currency,
@@ -210,7 +210,8 @@ def get_sales(market: MarketConfig = Depends(market_param),
         # every trade, and a ledger of fifty closed positions must not make
         # fifty macro queries.
         rate_steps = _rate_steps(db, market)
-        priced = [compute_sale_metrics(_row_to_sale(r), rfr, rate_steps=rate_steps)
+        priced = [compute_sale_metrics(_row_to_sale(r), rfr, rate_steps=rate_steps,
+                                       max_stale_days=market.risk_free_max_gap_days)
                   for r in rows]
         dividends = fetch_dividends(db, user.id, market.code)
 

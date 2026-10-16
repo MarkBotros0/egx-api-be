@@ -58,6 +58,12 @@ class MarketConfig:
     short_name: str = ""
     adjective: str = ""          # "Egyptian", "US" (as in "US stocks") — copy only.
     score_calibrated: bool = True
+    # The macro_series code a realized trade is graded against (EGINTR, US03MY).
+    risk_free_series: Optional[str] = None
+    # How far a sale may run past the series' last stored day and still be
+    # graded on it. None = a step function that holds until the next decision
+    # (a policy rate). A daily yield that stopped printing is stale, not flat.
+    risk_free_max_gap_days: Optional[int] = None
 
     @property
     def primary_exchange(self) -> str:
@@ -88,6 +94,7 @@ EG = MarketConfig(
     exchanges=("EGX",), scanner_region="egypt",
     benchmark_symbol="EGX30", benchmark_exchange="EGX", benchmark_label="EGX30",
     risk_free_fallback_pct=19,
+    risk_free_series="EGINTR",
     liquid_min_turnover=1_000_000, liquid_min_price=0.5,
     isin_prefix="EG",
     # Unverified: the `holidays` library ESTIMATES Islamic dates, and the old
@@ -108,6 +115,7 @@ US = MarketConfig(
     benchmark_symbol="SPX", benchmark_exchange="SP", benchmark_label="S&P 500",
     # 3-month T-bill fallback; live value from TVC:US03MY.
     risk_free_fallback_pct=4.0,
+    risk_free_series="US03MY", risk_free_max_gap_days=10,
     # Fitted by scripts/calibrate.py --market US (app/core/calibration/us.py):
     # p5 of 60-day mean dollar turnover across SPX/NDX/DJI members, rounded
     # down; 5 USD is the usual penny-stock line.

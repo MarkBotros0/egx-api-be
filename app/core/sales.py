@@ -164,8 +164,18 @@ def validate_position_sale(*, lots: list[dict], quantity, sell_price, sell_date,
     }
 
 
+def _history_reaches(rate_steps, sold_on, max_stale_days) -> bool:
+    """True when the dated history covers the sale's end (see compute_sale_metrics)."""
+    if max_stale_days is None:
+        return True
+    if sold_on is None:
+        return False
+    last = max((d for d in (_parse_date(s) for s, _ in rate_steps) if d), default=None)
+    return last is not None and (sold_on - last).days <= max_stale_days
+
+
 def compute_sale_metrics(sale: dict, risk_free_rate_pct: float,
-                         rate_steps=None) -> dict:
+                         rate_steps=None, max_stale_days=None) -> dict:
     """
     Add realized P&L, holding period and the T-bill verdict to one sale.
 
@@ -180,6 +190,12 @@ def compute_sale_metrics(sale: dict, risk_free_rate_pct: float,
     to the previous behaviour instead of failing. The hurdle actually applied is
     returned as `t_bill_hurdle_pct` either way, because a card cannot explain a
     verdict it cannot see.
+
+    `max_stale_days` (`MarketConfig.risk_free_max_gap_days`): when set, a sale
+    dated more than that many days after the history's last step is graded on
+    the scalar instead — a DAILY yield (US03MY) that stopped being stored is
+    stale, not flat. None keeps the step-function reading a policy rate needs:
+    EGINTR holds until the next decision, so EG is unchanged.
     """
     quantity = int(sale["quantity"])
     buy_price = float(sale["buy_price"])
@@ -203,7 +219,8 @@ def compute_sale_metrics(sale: dict, risk_free_rate_pct: float,
     )
 
     hurdle = (annualized_cash_rate_pct(rate_steps, sale["buy_date"], sale["sell_date"])
-              if rate_steps else None)
+              if rate_steps and _history_reaches(rate_steps, sold_on, max_stale_days)
+              else None)
     if hurdle is None:
         hurdle = float(risk_free_rate_pct)
 

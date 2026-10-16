@@ -221,6 +221,10 @@ def refresh_us_risk_free(db) -> Optional[float]:
     """
     Store the last daily close of TVC:US03MY as `settings.risk_free_rate:US`.
 
+    The same few daily bars are also upserted into `macro_series` (US03MY),
+    so the dated history US sales are graded against keeps growing after the
+    one-off backfill. That write is best-effort; the scalar is what matters.
+
     Returns the value, or None when the feed has nothing or anything fails —
     never raises, so the universe cron it rides on cannot go down with it.
     A failure leaves the previously stored value in place.
@@ -239,6 +243,13 @@ def refresh_us_risk_free(db) -> Optional[float]:
             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
             (str(value),),
         )
+        try:
+            from app.core.macro_series import US_RISK_FREE_SERIES, upsert_many
+            upsert_many(db, US_RISK_FREE_SERIES,
+                        [(p.date().isoformat(), float(v))
+                         for p, v in df["close"].items() if math.isfinite(float(v))])
+        except Exception as e:
+            print(f"[risk_free] US03MY history append failed: {type(e).__name__}")
         return value
     except Exception:
         return None
