@@ -191,7 +191,7 @@ Add a fact there, not as a literal.
   pins EG to the pre-move literals and the registry floors to the bundle's.
 - **Consumers take the bundle of the market they serve:** `expected_move` /
   `outcome_band` (`method` is now `calibrated_quantile`), `classify_regime`,
-  `grade_universe`, `score_quality` (P/E and yield BOUNDARIES; points are EG's
+  `grade_universe`, `score_quality` (P/E and yield BOUNDARIES; points are EG's — except the two extreme bands, 0 where `extreme_causes_measured` is False;
   on every market), `liquidity_score` (tiers), `/api/calibration`,
   `/api/market_regime`, `/api/risk`. `extras["market"]` (set by
   `build_composite_extras(market_code=)`) picks the bundle inside scoring.
@@ -204,17 +204,14 @@ Add a fact there, not as a literal.
   then fits:
   - liquidity floors: turnover = p5 of 60-day mean dollar turnover, rounded
     down to 1/2/5×10^k; price 5 USD;
-  - tiers: member share floors at the percentiles EGX30's floors sit at in
-    EGX30's volume distribution (needs an EG cache:
-    `backtest --market EG --fetch-only`) — used ONLY to derive "US" (other
-    listed) = those floors × EG's NILEX/EGX30 ratio, because the panel has no
-    non-member history. Scaled exactly, never re-rounded (`other_listed_tier`):
-    re-rounding collapsed 25k/40k onto 20k/20k on the first fit, and a
-    collapsed tier is now refused. **"US large-cap" (any index member) has NO
-    share-count floor, (0, 0):** the fitted 500k/1M called 18 S&P members
-    "thin, hard to exit" — AZO at ~$1B/day — because a share count means
-    nothing across $5–$6,000 prices. Index inclusion already screens for
-    liquidity; the dead-session and calendar tests still apply to members;
+  - tiers: **NO share-count floor on US at all — (0, 0) for "US large-cap" and
+    "US"** (`fit_liquidity_tiers(market)`). History: the first fits mapped US
+    onto EG — member floors at EGX30's percentiles (500k/1M called 18 S&P
+    members "thin, hard to exit", AZO at ~$1B/day: a share count means nothing
+    across $5–$6,000 prices) and other listings = those × EG's NILEX/EGX30 ratio
+    (25k/40k). Both were EG-derived and never measured on US, so both are gone
+    (2026-10-16). The dead-session and calendar tests, which read each stock's
+    own trading, still apply;
   - valuation bands: each EG boundary's quantile in EG's current `pe_data`,
     read off the market's — so the median stock lands in the band EG's median
     does (the script refuses otherwise, and refuses on <50 rows);
@@ -249,7 +246,7 @@ Add a fact there, not as a literal.
 | P/E band uppers (EG points +3/+12/+4/−2/−8/−14) | 7.8, 17.8, 29.5, 37.9, 47.1; median 23.7 |
 | yield band uppers (EG points 0/+4/+8/+4/−8) | 1.27, 2.27, 4.65, 8.02; median 1.97 |
 | liquidity floors | turnover ≥ 100,000,000 USD/day, price > 5.0 USD |
-| liquidity tiers (thin / low, shares/day) | US large-cap: no share floor (0 / 0); US: 25,000 / 40,000 |
+| liquidity tiers (thin / low, shares/day) | none on US: (0 / 0) for both tiers (the EG-derived floors were removed) |
 
 **US gaps (`feat/us-gaps`, 2026-10-16).** What used to be EG-only and now is per market:
 - **Sales grade.** `MarketConfig.risk_free_series` (EG `EGINTR`, US `US03MY`)
@@ -280,6 +277,28 @@ Add a fact there, not as a literal.
   the US median of ~24"). Concepts that fit both (relative to the market's own
   median: cheap / expensive / above-median payer) stay on both. Never carry an
   EG concept or empirical claim onto another market without measuring it there.
+- **Audit 2026-10-16 — every other EG concept found on US, removed:**
+  - weekly bars end on the market's own last session (`MarketConfig.week_end_rule`:
+    EG `W-THU`, US `W-FRI`; a US week used to be cut on Thursday);
+  - the US share-count liquidity tier (see *US calibration*);
+  - the extreme P/E / yield bands add 0 points on US (EG keeps +3 / −8);
+  - composite explanations: EG keeps "2007-2026" and "the lowest-scoring
+    bounced"; US states only its own measured IC; the loss-making copy drops
+    "macro" on US;
+  - the US macro card sends no up/down/bullish label (EGX30's ±2% buckets) and
+    no T-bill "direction";
+  - mobile: P/E and yield colours are EG-scale, so EG only; the "below 3" /
+    "above 15%" tooltips are EG only; the forecast caveat names devaluation on
+    EG only; the score disclaimer states each market's own test (an
+    uncalibrated market is told nothing); the weights sheet explains the
+    SCORE's market; quiet-hours copy names each market's time zone;
+  - no Learn link to an Egyptian lesson off EG: `lib/learn.ts`
+    `EG_ONLY_LEARN_CONCEPTS` / `learnLinkFits`, kept honest by
+    `egx-api-mobile/src/features/learn/__tests__/egOnlyLearnLinks.test.ts`,
+    which scans the curriculum for Egyptian facts;
+  - `lib/markets.ts` `US_FALLBACK` / `fallbackMarket`: before `/api/markets`
+    answers, a stored or deep-linked US market reads as US, never as EG; once
+    the list is in, it is authoritative (US not enabled → EG).
 - **Dividends.** Yahoo's code is a market fact (`MarketConfig.yahoo_suffix`,
   `yahoo_class_separator`): EG `COMI.CA`; US bare, class shares with a dash
   (`BRK.B` → `BRK-B`); rows are stored under our symbol and market.
@@ -2392,7 +2411,7 @@ competitive as income — even 8% loses. Reason strings must present a dividend 
 of `0.0` means "pays nothing", which is normal for a growth company; it scores
 identically to unknown.
 
-Boundaries are per market (FundamentalsCal.pe_bands / dy_bands); the points are EG's everywhere, and the median stock lands in the same band on every market.
+Boundaries are per market (FundamentalsCal.pe_bands / dy_bands); the points are EG's everywhere, and the median stock lands in the same band on every market — EXCEPT the bottom P/E band and the top yield band, which score 0 on a market where their EG-measured causes were not measured (`extreme_causes_measured`, see *US gaps*).
 
 ### Liquidity — penalty-only, index-aware, zero-aware
 
