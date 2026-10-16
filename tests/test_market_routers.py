@@ -455,16 +455,19 @@ def test_tickers_us_comes_from_the_universe_and_not_the_egx_file(client, tickers
         seen.append(market.code)
         return [
             {"symbol": "AAPL", "name": "Apple", "sector": "Tech", "exchange": "NASDAQ",
-             "kind": "stock", "indices": []},
+             "kind": "stock", "indices": ["NDX"]},
             {"symbol": "IBM", "name": "IBM", "sector": "Tech", "exchange": "NYSE",
-             "kind": "stock", "indices": []},
+             "kind": "stock", "indices": ["DJI"]},
+            # Resolver-remembered only (indices empty, not discovered): not listed.
+            {"symbol": "VOO", "name": "Vanguard", "sector": None, "exchange": "AMEX",
+             "kind": "fund", "indices": []},
         ]
 
     monkeypatch.setattr(universe, "load_universe", fake_universe)
     r = client.get("/api/tickers", params={"market": "US"})
     assert r.status_code == 200, r.text
     assert seen == ["US"]
-    assert {t["symbol"]: t["index"] for t in r.json()} == {"AAPL": "NASDAQ", "IBM": "NYSE"}
+    assert {t["symbol"]: t["index"] for t in r.json()} == {"AAPL": "NDX", "IBM": "DJI"}
     _, params = tickers_db.statements("FROM discovered_tickers")[0]
     assert params == ("US",)
 
@@ -620,7 +623,10 @@ def test_news_refuses_unknown_market(client, news_env):
 
 def test_news_us_uses_the_us_exchange_and_skips_egyptian_sources(
         client, news_env, monkeypatch):
+    from app.routers import news as news_mod
     monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
+    monkeypatch.setattr(news_mod.universe, "resolve_exchange",
+                        lambda db, m, s: "NASDAQ" if s == "COMI" else None)
     r = client.get("/api/news", params={"market": "US"})
     assert r.status_code == 200, r.text
     assert news_env.urls == [

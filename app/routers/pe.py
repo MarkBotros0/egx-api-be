@@ -20,7 +20,7 @@ from app.core.db import get_db
 from app.core.fundamentals_annual import refresh_annual_fundamentals
 from app.core.limits import prune_auth
 from app.core.macro_series import refresh_current as refresh_macro_series
-from app.core.markets import EG, MarketConfig, market_param
+from app.core.markets import EG, MarketConfig, market_param, registered_market_param
 from app.core.pe_fetch import _status_key, get_pe_for_symbol, refresh_pe_data
 from app.core.universe import load_universe
 
@@ -79,7 +79,7 @@ def get_pe(symbol: Optional[str] = Query(None),
 
 @router.post("/api/pe/refresh")
 def trigger_refresh(x_refresh_secret: Optional[str] = Header(default=None),
-                    market: MarketConfig = Depends(market_param)):
+                    market: MarketConfig = Depends(registered_market_param)):
     """
     Manual + cron-triggered refresh. When PE_REFRESH_SECRET env var is set,
     the X-Refresh-Secret header must match (used in production to prevent

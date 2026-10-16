@@ -249,7 +249,6 @@ def refresh_pe_data(db, market: MarketConfig = EG,
         _write_setting(db, status_key, msg)
         return {"success": False, "count": 0, "error": msg}
 
-    written = 0
     skipped = 0
     # Deduplicated on the PRIMARY KEY, keeping the last row — what row-by-row
     # upserts would have left — because Postgres refuses an ON CONFLICT DO
@@ -264,9 +263,10 @@ def refresh_pe_data(db, market: MarketConfig = EG,
             skipped += 1
             continue
         to_write[row["symbol"]] = row
-        written += 1
 
+    # Rows actually written: a repeated symbol collapses into one.
     items = list(to_write.values())
+    written = len(items)
     for start in range(0, len(items), PE_WRITE_BATCH):
         _upsert_pe_batch(db, items[start:start + PE_WRITE_BATCH], now, market.code)
 

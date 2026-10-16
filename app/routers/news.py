@@ -71,9 +71,12 @@ def get_news(user: CurrentUser = Depends(get_current_user),
     requested = yours + market_half
 
     def fetcher(symbol: str) -> list:
-        # Each symbol's news is keyed by its own listing exchange; one the
-        # resolver cannot place falls back to the market's first exchange.
-        exchange = universe.resolve_exchange(db, market, symbol) or market.exchanges[0]
+        # Each symbol's news is keyed by its own listing exchange. One the
+        # resolver cannot place is SKIPPED, never guessed: a wrong exchange
+        # waits ~5.5s for nothing (see tests/test_exchange_guard.py).
+        exchange = universe.resolve_exchange(db, market, symbol)
+        if exchange is None:
+            return []
         return fetch_symbol_news(symbol, exchange=exchange)
 
     # The two sources run side by side under the same deadline, so adding

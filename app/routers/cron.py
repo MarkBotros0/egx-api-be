@@ -55,7 +55,7 @@ from app.core.universe import load_universe, refresh_universe
 from app.core.alert_store import prune_baselines, run_detection
 from app.core.benchmark import get_benchmark_close
 from app.core.cache import get as cache_get, make_key, set as cache_set
-from app.core.markets import EG, US, MarketConfig, market_param
+from app.core.markets import EG, US, MarketConfig, registered_market_param
 from app.core.card_snapshot import SPARKLINE_BARS, upsert_snapshot
 from app.core.composite import CATEGORY_ORDER, score_categories
 from app.core.constants import (
@@ -294,7 +294,7 @@ def risk_snapshot(
     cursor: Optional[int] = Query(default=None, ge=0),
     limit: int = Query(DEFAULT_CHUNK, ge=1, le=MAX_CHUNK),
     x_cron_secret: Optional[str] = Header(default=None),
-    market: MarketConfig = Depends(market_param),
+    market: MarketConfig = Depends(registered_market_param),
 ):
     """
     Measure one slice of the universe and upsert it.
@@ -537,7 +537,7 @@ def risk_snapshot(
 @router.post("/api/cron/universe")
 def universe_refresh(
     x_cron_secret: Optional[str] = Header(default=None),
-    market: MarketConfig = Depends(market_param),
+    market: MarketConfig = Depends(registered_market_param),
 ):
     """
     Rebuild a non-EG market's universe from its index symbolsets (all or

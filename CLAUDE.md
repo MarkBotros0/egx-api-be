@@ -106,8 +106,11 @@ Add a fact there, not as a literal.
 **US core (sub-project 2).**
 - **Universe and exchange.** `app/core/universe.py` owns the `market_universe`
   table (`market, symbol, name, sector, exchange, kind, indices[], updated_at`):
-  the union of the market's index symbolsets (SPX, NDX, DJI) plus every listing a
-  user searched for and added (`indices = {}`). Kinds are `stock`/`fund`/`dr`;
+  the union of the market's index symbolsets (SPX, NDX, DJI) plus every listing
+  the resolver ever placed (`indices = {}`) — remembered only so exchange lookups
+  stay cheap. Only index members and validated/added (`discovered_tickers`)
+  symbols are LISTED by `/api/tickers`; a symbol someone merely opened is
+  remembered for exchange lookup but never appears in every user's list. Kinds are `stock`/`fund`/`dr`;
   ADRs ("dr") count as stocks. API: `refresh_universe` (all-or-nothing, batched
   writes), `load_universe`, `lookup_listing` (exact scanner lookup on
   NASDAQ/NYSE/AMEX), `search_symbols` (name search), `resolve_exchange(db, market,
@@ -118,21 +121,37 @@ Add a fact there, not as a literal.
   S&P 500 is on NYSE; `tests/test_exchange_guard.py` enforces it. An unknown US
   symbol is `404 "Unknown symbol"` on the price routes and
   `422 "Unknown US symbol"` on portfolio/watchlist add (EG add stays lenient).
-- **Endpoints.** `GET /api/tickers/search?q=&market=` (name/symbol search through
-  `search_symbols`); `GET /api/tickers?market=US` rows carry `indices`
-  (list of index ids) and come from the universe, EG rows still from
+- **Endpoints.** `GET /api/tickers/search?q=&market=` (max 20 rows): US searches
+  through the scanner (`search_symbols`) and answers `502 "Search unavailable"`
+  when the scanner errors; EG filters the local ticker list by symbol/name (no
+  scanner call). `GET /api/tickers?market=US` rows carry `indices` (list of
+  index ids): the universe's index members plus `discovered_tickers` rows not
+  already listed (cached only when the universe loaded); EG rows still come from
   `data/egx_tickers.json` merged with the scanner.
 - **US crons** (cron-job.org, same secret headers as EG; `CRON_SECRET` /
   `PE_REFRESH_SECRET`):
   - `POST /api/cron/universe?market=US` **daily** — rebuilds the universe and
     also refreshes the US T-bill rate. (In `PUBLIC_ENDPOINTS`, `X-Cron-Secret`.)
   - `POST /api/cron/risk_snapshot?market=US&limit=30` on the EG cadence. US
-    fetches ~0.5s/symbol, so `limit=30` fits the 20s deadline (EG stays at 6).
+    fetches ~0.5s/symbol; the built-in deadline stops a call early if needed
+    (measured ~26 symbols in 13s). EG stays at 6.
     It measures the index members plus every US symbol held or watched.
   - `POST /api/pe/refresh?market=US` **nightly** — scans exactly the universe's
     `EXCHANGE:SYMBOL` tickers; status keys are suffixed (`pe_last_*:US`). It
     skips the EG-only macro and auth-prune steps.
   - Alerts run for EG only: the US risk_snapshot answers `alerts: {skipped: "market"}`.
+  - These three secret-guarded routes take `registered_market_param`: they accept
+    any market in `MARKETS` **regardless of `ENABLED_MARKETS`** (unknown codes
+    still 400), so a market's data is built before users can select it. Every
+    user-facing route keeps `market_param` and 400s on a market not enabled.
+- **US ROLLOUT ORDER.** (1) Deploy the backend with `ENABLED_MARKETS` still `EG`.
+  (2) `POST /api/cron/universe?market=US`. (3) `POST /api/pe/refresh?market=US`.
+  (4) `POST /api/cron/risk_snapshot?market=US&limit=30` repeatedly until every
+  universe symbol has a `risk_snapshot` row — check the table, not
+  `stale_remaining`: it counts every symbol not measured in THIS call, so it
+  does not reach 0 while the universe exceeds one call. (5) Add the
+  cron-job.org jobs above. (6) Ship the mobile build. (7) Set
+  `ENABLED_MARKETS=EG,US`.
 - **US risk-free rate:** `TVC:US03MY` (3-month T-bill), stored under settings key
   `risk_free_rate:US`, fallback 4.0 (`MarketConfig.risk_free_fallback_pct`). The
   sales grade for a US sale trades against it (there is no EGINTR history for US).

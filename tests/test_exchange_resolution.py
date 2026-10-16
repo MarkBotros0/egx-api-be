@@ -254,7 +254,6 @@ def test_news_asks_each_symbols_own_exchange(client, resolver, us, monkeypatch):
     monkeypatch.setattr(news_mod, "fetch_arabfinance", lambda: ([], None))
     r = client.get("/api/news", params={"market": "US"})
     assert r.status_code == 200, r.text
-    assert sorted(u.rsplit("symbol=", 1)[1] for u in urls) == [
-        "NASDAQ%3AZZZZQ",      # unresolved: the market's first exchange
-        "NYSE%3AKO",
-    ]
+    # ZZZZQ is unresolved: SKIPPED, never guessed onto the first exchange.
+    assert [u.rsplit("symbol=", 1)[1] for u in urls] == ["NYSE%3AKO"]
+    assert r.json()["status"] != "partial"

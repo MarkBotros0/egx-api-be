@@ -125,19 +125,35 @@ def enabled_codes() -> tuple[str, ...]:
 
 
 def get_market(code: Optional[str]) -> MarketConfig:
-    if code is not None and not isinstance(code, str):
-        raise HTTPException(status_code=400, detail=f"Unknown market: {code!r}")
-    c = (code or DEFAULT_CODE).strip().upper()
-    if c not in MARKETS:
-        raise HTTPException(status_code=400, detail=f"Unknown market: {code}")
-    if c not in enabled_codes():
-        raise HTTPException(status_code=400, detail=f"Market not enabled: {c}")
-    return MARKETS[c]
+    market = get_registered_market(code)
+    if market.code not in enabled_codes():
+        raise HTTPException(status_code=400, detail=f"Market not enabled: {market.code}")
+    return market
 
 
 def market_param(market: Optional[str] = Query(None)) -> MarketConfig:
     """FastAPI dependency: `?market=` -> MarketConfig. Absent means EG."""
     return get_market(market)
+
+
+def get_registered_market(code: Optional[str]) -> MarketConfig:
+    """Like get_market, but ignores ENABLED_MARKETS: any code in MARKETS."""
+    if code is not None and not isinstance(code, str):
+        raise HTTPException(status_code=400, detail=f"Unknown market: {code!r}")
+    c = (code or DEFAULT_CODE).strip().upper()
+    if c not in MARKETS:
+        raise HTTPException(status_code=400, detail=f"Unknown market: {code}")
+    return MARKETS[c]
+
+
+def registered_market_param(market: Optional[str] = Query(None)) -> MarketConfig:
+    """
+    FastAPI dependency for the secret-guarded crons ONLY (/api/cron/universe,
+    /api/cron/risk_snapshot, /api/pe/refresh): accepts any registered market
+    whether or not ENABLED_MARKETS lists it, so a market's data can be built
+    BEFORE it is enabled for users. Never use it on a user-facing route.
+    """
+    return get_registered_market(market)
 
 
 def is_market_open(market: MarketConfig, now: datetime) -> bool:

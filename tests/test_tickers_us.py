@@ -54,8 +54,23 @@ def test_us_list_has_indices(client, us):
     rows = client.get("/api/tickers?market=US").json()
     by = {r["symbol"]: r for r in rows}
     assert by["AAPL"]["indices"] == ["SPX", "NDX", "DJI"] and by["AAPL"]["index"] == "SPX"
-    assert by["VOO"]["index"] == "AMEX" and by["VOO"]["indices"] == []
     assert by["KO"]["exchange"] == "NYSE"
+    # VOO is only in the universe because the resolver placed it once (someone
+    # OPENED it): not an index member, not validated/added -> not listed.
+    assert "VOO" not in by
+
+
+def test_us_list_keeps_a_resolved_symbol_once_it_is_discovered(client, monkeypatch):
+    monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
+    monkeypatch.setattr(U, "load_universe", lambda db, m: UNIV)
+    db = FakeDB()
+    db.rows_for("discovered_tickers", [("VOO", "Vanguard", None, "AMEX")])
+    monkeypatch.setattr(T, "get_db", lambda: db)
+    T._tickers_cache.clear()
+    rows = client.get("/api/tickers?market=US").json()
+    assert [r["symbol"] for r in rows] == ["AAPL", "KO", "VOO"]
+    voo = rows[-1]
+    assert voo["index"] == "AMEX" and voo["indices"] == [] and voo["name"] == "Vanguard S&P 500 ETF"
 
 
 def test_us_index_filter_uses_membership(client, us):
@@ -151,4 +166,5 @@ def test_universe_outage_with_discovered_rows_is_not_cached(client, monkeypatch)
     assert "US" not in T._tickers_cache
     monkeypatch.setattr(U, "load_universe", lambda d, m: UNIV)
     syms = [r["symbol"] for r in client.get("/api/tickers?market=US").json()]
-    assert syms == ["AAPL", "KO", "VOO", "BRK.B"]
+    assert syms == ["AAPL", "KO", "BRK.B"]
+    assert "US" in T._tickers_cache

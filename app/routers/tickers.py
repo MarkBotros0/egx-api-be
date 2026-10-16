@@ -138,31 +138,37 @@ def _load_tickers(market: MarketConfig):
         _tickers_cache[market.code] = (result, now)
         return result
 
-    # Any other market: the scanner-backed universe (index members first), plus
-    # symbols users have validated that the universe does not list.
+    # Any other market: the index members, plus the symbols users validated
+    # or added (discovered_tickers). The universe table also remembers every
+    # listing the resolver ever placed (indices '{}') so exchange lookups stay
+    # cheap, but a symbol one user merely OPENED must not appear in everyone's
+    # list, so those rows are listed only when discovered_tickers has them.
     db = get_db()
     universe_rows = universe.load_universe(db, market)
+    try:
+        discovered = [(symbol, name, sector, exchange) for symbol, name, sector, exchange in
+                      db.execute(
+                          "SELECT symbol, name, sector, exchange FROM discovered_tickers "
+                          "WHERE market = %s",
+                          (market.code,),
+                      ).fetchall() if exchange]
+    except Exception:
+        discovered = []
+    discovered_syms = {d[0].upper() for d in discovered}
     result = [{
         "symbol": r["symbol"], "name": r["name"], "sector": r["sector"],
         "index": (r["indices"][0] if r["indices"] else r["exchange"]),
         "indices": r["indices"], "exchange": r["exchange"],
-    } for r in universe_rows]
-    try:
-        known = {t["symbol"].upper() for t in result}
-        rows = db.execute(
-            "SELECT symbol, name, sector, exchange FROM discovered_tickers "
-            "WHERE market = %s",
-            (market.code,),
-        ).fetchall()
-        for symbol, name, sector, exchange in rows:
-            if exchange and symbol.upper() not in known:
-                result.append({
-                    "symbol": symbol, "name": name,
-                    "sector": sector or "Unknown",
-                    "index": exchange, "indices": [], "exchange": exchange,
-                })
-    except Exception:
-        pass
+    } for r in universe_rows if r["indices"] or r["symbol"].upper() in discovered_syms]
+    known = {t["symbol"].upper() for t in result}
+    for symbol, name, sector, exchange in discovered:
+        if symbol.upper() not in known:
+            known.add(symbol.upper())
+            result.append({
+                "symbol": symbol, "name": name,
+                "sector": sector or "Unknown",
+                "index": exchange, "indices": [], "exchange": exchange,
+            })
 
     # An empty universe is a scanner outage, not an answer: do not pin a list
     # that holds only the discovered rows.

@@ -251,7 +251,9 @@ def test_pe_batch_keeps_the_last_duplicate_and_skips_empty_rows():
                           "loss_making": None}]
     db = FakeDB()
     out = P.refresh_pe_data(db, EG, rows=rows)
-    assert out["count"] == 101 and out["skipped_empty"] == 1
+    # 102 rows in: one empty (skipped) and one repeat of S0 (collapsed), so
+    # the count is the 100 rows actually written, not 101.
+    assert out["count"] == 100 and out["skipped_empty"] == 1
     [(sql, params)] = db.statements("INSERT INTO pe_data")
     assert "ON CONFLICT (market, symbol) DO UPDATE" in sql
     symbols = params[1::13]
@@ -277,3 +279,88 @@ def test_dividend_events_batch_keeps_first_duplicate_and_counts_inserts():
     assert "ON CONFLICT (market, symbol, ex_date) DO NOTHING" in sql
     assert params[3] == 1.0 and len(params) == 12
     assert n == 1
+
+
+# --- rollout order: the US crons run BEFORE US is enabled for users -----------
+
+@pytest.fixture
+def eg_only_client(monkeypatch):
+    from app.core import auth as auth_mod
+    from app.core.auth import CurrentUser
+    monkeypatch.setenv("ENABLED_MARKETS", "EG")
+    monkeypatch.setenv("CRON_SECRET", "s")
+    monkeypatch.setenv("PE_REFRESH_SECRET", "s")
+    me = CurrentUser(id="u1", email="sara@example.com", role="user")
+    monkeypatch.setattr(auth_mod, "_load_user", lambda uid: me)
+    monkeypatch.setattr(auth_mod, "AUTH_SECRET", "test-secret-for-us-crons-0123456789abcdef")
+    return TestClient(app), me
+
+
+def test_us_crons_run_while_us_is_not_enabled(eg_only_client, monkeypatch):
+    import pandas as pd
+    import app.vendor.egxpy as egxpy
+    from app.core import universe as U
+    from app.core.auth import create_access_token
+    from app.routers import pe as pe_mod
+
+    client, me = eg_only_client
+    monkeypatch.setattr(C, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(C, "refresh_universe", lambda db, m: {"success": True, "count": 3, "error": None})
+    monkeypatch.setattr(C, "refresh_us_risk_free", lambda db: 4.21)
+    monkeypatch.setattr(C, "_universe", lambda m: ["KO"])
+    monkeypatch.setattr(C, "_benchmark_close", lambda m: None)
+    monkeypatch.setattr(U, "resolve_exchange", lambda db, m, s: None)
+    monkeypatch.setattr(egxpy, "get_OHLCV_data", lambda *a: pd.DataFrame())
+    monkeypatch.setattr(pe_mod, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(pe_mod, "load_universe", lambda db, m: [{"symbol": "KO", "exchange": "NYSE"}])
+    monkeypatch.setattr(pe_mod, "refresh_pe_data", lambda db, market, tickers=None: {"success": True})
+    monkeypatch.setattr(pe_mod, "refresh_annual_fundamentals", lambda db, market, tickers=None: {"success": True})
+
+    r = client.post("/api/cron/universe?market=US", headers={"X-Cron-Secret": "s"})
+    assert r.status_code == 200 and r.json()["market"] == "US"
+    r = client.post("/api/cron/risk_snapshot?market=US&limit=30", headers={"X-Cron-Secret": "s"})
+    assert r.status_code == 200 and r.json()["failed"] == ["KO"]
+    r = client.post("/api/pe/refresh?market=US", headers={"X-Refresh-Secret": "s"})
+    assert r.status_code == 200
+
+    # ...while every user-facing route still refuses US.
+    auth = {"Authorization": f"Bearer {create_access_token(me.id)}"}
+    r = client.get("/api/tickers?market=US", headers=auth)
+    assert r.status_code == 400 and "not enabled" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("path,header", [
+    ("/api/cron/universe", "X-Cron-Secret"),
+    ("/api/cron/risk_snapshot", "X-Cron-Secret"),
+    ("/api/pe/refresh", "X-Refresh-Secret"),
+])
+def test_us_crons_still_refuse_an_unknown_market(eg_only_client, path, header):
+    client, _ = eg_only_client
+    r = client.post(f"{path}?market=XX", headers={header: "s"})
+    assert r.status_code == 400 and "Unknown market" in r.json()["detail"]
+
+
+def test_registered_market_param_ignores_enabled_markets(monkeypatch):
+    from fastapi import HTTPException
+    from app.core.markets import get_market, get_registered_market
+    monkeypatch.setenv("ENABLED_MARKETS", "EG")
+    assert get_registered_market("us") is US
+    assert get_registered_market(None) is EG
+    with pytest.raises(HTTPException) as e:
+        get_market("US")
+    assert e.value.status_code == 400
+    for bad in ("XX", 5, ["US"]):
+        with pytest.raises(HTTPException) as e:
+            get_registered_market(bad)
+        assert e.value.status_code == 400 and "Unknown market" in e.value.detail
+
+
+def test_registered_market_param_is_only_on_the_secret_crons():
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[1]
+    users = [p for p in (root / "app").rglob("*.py")
+             if "Depends(registered_market_param)" in p.read_text()]
+    assert sorted(p.relative_to(root).as_posix() for p in users) == [
+        "app/routers/cron.py", "app/routers/pe.py"]
+    assert (root / "app/routers/cron.py").read_text().count("Depends(registered_market_param)") == 2
+    assert (root / "app/routers/pe.py").read_text().count("Depends(registered_market_param)") == 1
