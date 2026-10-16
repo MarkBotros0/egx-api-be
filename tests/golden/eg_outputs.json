@@ -1,0 +1,3185 @@
+{
+ "calibration_route": {
+  "currency": "EGP",
+  "forecast": {
+   "bands": [
+    {
+     "claim": "Typical daily move (\u00b11\u03c3)",
+     "delivered_pct": 78.6,
+     "note": "Gaussian theory says 68%. EGX's centre is thinner.",
+     "promised_pct": 68
+    },
+    {
+     "claim": "Typical weekly move (\u00b11\u03c3)",
+     "delivered_pct": 75.5,
+     "note": null,
+     "promised_pct": 68
+    },
+    {
+     "claim": "Typical monthly move (\u00b11\u03c3)",
+     "delivered_pct": 71.8,
+     "note": null,
+     "promised_pct": 68
+    },
+    {
+     "claim": "3-month outcome range (90% band)",
+     "delivered_pct": 90.0,
+     "note": "Fitted to EGX's own distribution. The textbook Gaussian band delivered only 85.8%.",
+     "promised_pct": 90
+    }
+   ],
+   "fitted_at": "2026-09-02",
+   "n_observations": 34749,
+   "sharpness": {
+    "median_width_pct_of_spot": 88,
+    "note": "How WIDE the 90% band is, as a share of today's price. Coverage on its own proves nothing \u2014 a band from zero to infinity contains every outcome.",
+    "p25": 72,
+    "p75": 110
+   },
+   "universe": "EGX common stocks with >=460 daily bars, ISIN-coded instruments excluded",
+   "z_table": {
+    "50": 0.6,
+    "80": 1.333,
+    "90": 1.999,
+    "95": 2.791
+   }
+  },
+  "market": "EG",
+  "risk_grade": {
+   "claims": [
+    {
+     "claim": "Past volatility ranks future volatility",
+     "ic": 0.5631,
+     "t_non_overlapping": 24.0,
+     "verdict": "strong"
+    },
+    {
+     "claim": "Past volatility ranks future drawdown",
+     "ic": 0.4338,
+     "t_non_overlapping": 16.7,
+     "verdict": "strong"
+    }
+   ],
+   "fitted_at": "2026-09-02",
+   "n_observations": 16220
+  },
+  "what_failed": [
+   {
+    "claim": "The composite score ranks stocks by future return",
+    "measured": "IC \u2248 0, slightly negative (\u22120.029)",
+    "outcome": "Buy/Sell labels removed; they describe condition now."
+   },
+   {
+    "claim": "Market condition predicts the next three months",
+    "measured": "rho 0.162, Newey-West t 1.74 over 221 readings",
+    "outcome": "Was published as +0.318 until it was found to be one lucky phase of three. Now shown as context, not a forecast.",
+    "significant": false
+   },
+   {
+    "claim": "Cheap stocks (earnings yield) outperform",
+    "measured": "IC +0.042, t 3.45 \u2014 but t 2.00 once low volatility is controlled for",
+    "outcome": "Not shipped: real, but not independent of the risk grade already on screen."
+   },
+   {
+    "claim": "Profitable or slow-growing companies outperform",
+    "measured": "gross profitability t 1.12, asset growth t 0.66; both flip sign between halves of the sample",
+    "outcome": "Not shipped."
+   },
+   {
+    "claim": "Beating the T-bill rate (Risk-Adjusted) ranks stocks by future return",
+    "measured": "IC \u22120.006 at 21 days \u2014 the only horizon whose significance is trustworthy, since 63d and 126d windows overlap. Longer horizons drift positive (+0.012, +0.024) but cannot be read as evidence.",
+    "outcome": "The verdict was withheld for months because the backtest ran a flat 19% rate against a policy rate whose true median over the window was 9.40%. Dated rates lifted the withholding; the category still carries 13% of the default weight on no measured edge."
+   }
+  ]
+ },
+ "expected_move_long": {
+  "calibration": {
+   "band_width_pct_of_spot_median": 88,
+   "band_width_pct_of_spot_p25": 72,
+   "band_width_pct_of_spot_p75": 110,
+   "fit_horizon_days": 60,
+   "fitted_at": "2026-09-02",
+   "n_observations": 34749,
+   "sigma_window": 400,
+   "universe": "EGX common stocks with >=460 daily bars, ISIN-coded instruments excluded"
+  },
+  "daily_coverage_pct": 78.6,
+  "daily_pct": 1.97,
+  "method": "ewma_0.97",
+  "monthly_coverage_pct": 71.8,
+  "monthly_pct": 9.22,
+  "weekly_coverage_pct": 75.5,
+  "weekly_pct": 4.39
+ },
+ "expected_move_short": {
+  "calibration": {
+   "band_width_pct_of_spot_median": 88,
+   "band_width_pct_of_spot_p25": 72,
+   "band_width_pct_of_spot_p75": 110,
+   "fit_horizon_days": 60,
+   "fitted_at": "2026-09-02",
+   "n_observations": 34749,
+   "sigma_window": 400,
+   "universe": "EGX common stocks with >=460 daily bars, ISIN-coded instruments excluded"
+  },
+  "daily_coverage_pct": 79.0,
+  "daily_pct": 1.82,
+  "method": "trailing_sd",
+  "monthly_coverage_pct": 73.0,
+  "monthly_pct": 8.53,
+  "weekly_coverage_pct": 76.3,
+  "weekly_pct": 4.07
+ },
+ "graded": [
+  {
+   "band": "calm",
+   "band_label": "Calm",
+   "historical": {
+    "future_vol_ann_pct": 32.0,
+    "median_max_drawdown_pct": 20.0,
+    "p90_max_drawdown_pct": 40.7
+   },
+   "pct_rank": 0.0,
+   "quintile": 1,
+   "sigma_63_ann_pct": 10.0,
+   "symbol": "S0"
+  },
+  {
+   "band": "calm",
+   "band_label": "Calm",
+   "historical": {
+    "future_vol_ann_pct": 32.0,
+    "median_max_drawdown_pct": 20.0,
+    "p90_max_drawdown_pct": 40.7
+   },
+   "pct_rank": 11.1,
+   "quintile": 1,
+   "sigma_63_ann_pct": 15.0,
+   "symbol": "S1"
+  },
+  {
+   "band": "steady",
+   "band_label": "Steady",
+   "historical": {
+    "future_vol_ann_pct": 37.8,
+    "median_max_drawdown_pct": 24.8,
+    "p90_max_drawdown_pct": 46.3
+   },
+   "pct_rank": 22.2,
+   "quintile": 2,
+   "sigma_63_ann_pct": 20.0,
+   "symbol": "S2"
+  },
+  {
+   "band": "steady",
+   "band_label": "Steady",
+   "historical": {
+    "future_vol_ann_pct": 37.8,
+    "median_max_drawdown_pct": 24.8,
+    "p90_max_drawdown_pct": 46.3
+   },
+   "pct_rank": 33.3,
+   "quintile": 2,
+   "sigma_63_ann_pct": 25.0,
+   "symbol": "S3"
+  },
+  {
+   "band": "average",
+   "band_label": "Average",
+   "historical": {
+    "future_vol_ann_pct": 42.4,
+    "median_max_drawdown_pct": 27.6,
+    "p90_max_drawdown_pct": 49.3
+   },
+   "pct_rank": 44.4,
+   "quintile": 3,
+   "sigma_63_ann_pct": 30.0,
+   "symbol": "S4"
+  },
+  {
+   "band": "average",
+   "band_label": "Average",
+   "historical": {
+    "future_vol_ann_pct": 42.4,
+    "median_max_drawdown_pct": 27.6,
+    "p90_max_drawdown_pct": 49.3
+   },
+   "pct_rank": 55.6,
+   "quintile": 3,
+   "sigma_63_ann_pct": 35.0,
+   "symbol": "S5"
+  },
+  {
+   "band": "jumpy",
+   "band_label": "Jumpy",
+   "historical": {
+    "future_vol_ann_pct": 45.2,
+    "median_max_drawdown_pct": 29.9,
+    "p90_max_drawdown_pct": 53.0
+   },
+   "pct_rank": 66.7,
+   "quintile": 4,
+   "sigma_63_ann_pct": 40.0,
+   "symbol": "S6"
+  },
+  {
+   "band": "jumpy",
+   "band_label": "Jumpy",
+   "historical": {
+    "future_vol_ann_pct": 45.2,
+    "median_max_drawdown_pct": 29.9,
+    "p90_max_drawdown_pct": 53.0
+   },
+   "pct_rank": 77.8,
+   "quintile": 4,
+   "sigma_63_ann_pct": 45.0,
+   "symbol": "S7"
+  },
+  {
+   "band": "wild",
+   "band_label": "Wild",
+   "historical": {
+    "future_vol_ann_pct": 51.2,
+    "median_max_drawdown_pct": 34.2,
+    "p90_max_drawdown_pct": 59.4
+   },
+   "pct_rank": 88.9,
+   "quintile": 5,
+   "sigma_63_ann_pct": 50.0,
+   "symbol": "S8"
+  },
+  {
+   "band": "wild",
+   "band_label": "Wild",
+   "historical": {
+    "future_vol_ann_pct": 51.2,
+    "median_max_drawdown_pct": 34.2,
+    "p90_max_drawdown_pct": 59.4
+   },
+   "pct_rank": 100.0,
+   "quintile": 5,
+   "sigma_63_ann_pct": 55.0,
+   "symbol": "S9"
+  }
+ ],
+ "liquidity": [
+  [
+   null,
+   1000,
+   {
+    "avg_volume": 1000,
+    "classification": "thin",
+    "dead_sessions": 0,
+    "index_membership": "EGX100",
+    "thin": true,
+    "traded_share": null
+   }
+  ],
+  [
+   null,
+   10000,
+   {
+    "avg_volume": 10000,
+    "classification": "thin",
+    "dead_sessions": 0,
+    "index_membership": "EGX100",
+    "thin": true,
+    "traded_share": null
+   }
+  ],
+  [
+   null,
+   40000,
+   {
+    "avg_volume": 40000,
+    "classification": "low",
+    "dead_sessions": 0,
+    "index_membership": "EGX100",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   null,
+   150000,
+   {
+    "avg_volume": 150000,
+    "classification": "normal",
+    "dead_sessions": 0,
+    "index_membership": "EGX100",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   null,
+   600000,
+   {
+    "avg_volume": 600000,
+    "classification": "normal",
+    "dead_sessions": 0,
+    "index_membership": "EGX100",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "EGX30",
+   1000,
+   {
+    "avg_volume": 1000,
+    "classification": "thin",
+    "dead_sessions": 0,
+    "index_membership": "EGX30",
+    "thin": true,
+    "traded_share": null
+   }
+  ],
+  [
+   "EGX30",
+   10000,
+   {
+    "avg_volume": 10000,
+    "classification": "thin",
+    "dead_sessions": 0,
+    "index_membership": "EGX30",
+    "thin": true,
+    "traded_share": null
+   }
+  ],
+  [
+   "EGX30",
+   40000,
+   {
+    "avg_volume": 40000,
+    "classification": "thin",
+    "dead_sessions": 0,
+    "index_membership": "EGX30",
+    "thin": true,
+    "traded_share": null
+   }
+  ],
+  [
+   "EGX30",
+   150000,
+   {
+    "avg_volume": 150000,
+    "classification": "low",
+    "dead_sessions": 0,
+    "index_membership": "EGX30",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "EGX30",
+   600000,
+   {
+    "avg_volume": 600000,
+    "classification": "normal",
+    "dead_sessions": 0,
+    "index_membership": "EGX30",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "EGX70",
+   1000,
+   {
+    "avg_volume": 1000,
+    "classification": "thin",
+    "dead_sessions": 0,
+    "index_membership": "EGX70",
+    "thin": true,
+    "traded_share": null
+   }
+  ],
+  [
+   "EGX70",
+   10000,
+   {
+    "avg_volume": 10000,
+    "classification": "thin",
+    "dead_sessions": 0,
+    "index_membership": "EGX70",
+    "thin": true,
+    "traded_share": null
+   }
+  ],
+  [
+   "EGX70",
+   40000,
+   {
+    "avg_volume": 40000,
+    "classification": "thin",
+    "dead_sessions": 0,
+    "index_membership": "EGX70",
+    "thin": true,
+    "traded_share": null
+   }
+  ],
+  [
+   "EGX70",
+   150000,
+   {
+    "avg_volume": 150000,
+    "classification": "low",
+    "dead_sessions": 0,
+    "index_membership": "EGX70",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "EGX70",
+   600000,
+   {
+    "avg_volume": 600000,
+    "classification": "normal",
+    "dead_sessions": 0,
+    "index_membership": "EGX70",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "EGX100",
+   1000,
+   {
+    "avg_volume": 1000,
+    "classification": "thin",
+    "dead_sessions": 0,
+    "index_membership": "EGX100",
+    "thin": true,
+    "traded_share": null
+   }
+  ],
+  [
+   "EGX100",
+   10000,
+   {
+    "avg_volume": 10000,
+    "classification": "thin",
+    "dead_sessions": 0,
+    "index_membership": "EGX100",
+    "thin": true,
+    "traded_share": null
+   }
+  ],
+  [
+   "EGX100",
+   40000,
+   {
+    "avg_volume": 40000,
+    "classification": "low",
+    "dead_sessions": 0,
+    "index_membership": "EGX100",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "EGX100",
+   150000,
+   {
+    "avg_volume": 150000,
+    "classification": "normal",
+    "dead_sessions": 0,
+    "index_membership": "EGX100",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "EGX100",
+   600000,
+   {
+    "avg_volume": 600000,
+    "classification": "normal",
+    "dead_sessions": 0,
+    "index_membership": "EGX100",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "NILEX",
+   1000,
+   {
+    "avg_volume": 1000,
+    "classification": "thin",
+    "dead_sessions": 0,
+    "index_membership": "NILEX",
+    "thin": true,
+    "traded_share": null
+   }
+  ],
+  [
+   "NILEX",
+   10000,
+   {
+    "avg_volume": 10000,
+    "classification": "low",
+    "dead_sessions": 0,
+    "index_membership": "NILEX",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "NILEX",
+   40000,
+   {
+    "avg_volume": 40000,
+    "classification": "normal",
+    "dead_sessions": 0,
+    "index_membership": "NILEX",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "NILEX",
+   150000,
+   {
+    "avg_volume": 150000,
+    "classification": "normal",
+    "dead_sessions": 0,
+    "index_membership": "NILEX",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "NILEX",
+   600000,
+   {
+    "avg_volume": 600000,
+    "classification": "normal",
+    "dead_sessions": 0,
+    "index_membership": "NILEX",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "US",
+   1000,
+   {
+    "avg_volume": 1000,
+    "classification": "thin",
+    "dead_sessions": 0,
+    "index_membership": "US",
+    "thin": true,
+    "traded_share": null
+   }
+  ],
+  [
+   "US",
+   10000,
+   {
+    "avg_volume": 10000,
+    "classification": "low",
+    "dead_sessions": 0,
+    "index_membership": "US",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "US",
+   40000,
+   {
+    "avg_volume": 40000,
+    "classification": "normal",
+    "dead_sessions": 0,
+    "index_membership": "US",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "US",
+   150000,
+   {
+    "avg_volume": 150000,
+    "classification": "normal",
+    "dead_sessions": 0,
+    "index_membership": "US",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "US",
+   600000,
+   {
+    "avg_volume": 600000,
+    "classification": "normal",
+    "dead_sessions": 0,
+    "index_membership": "US",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "XYZ",
+   1000,
+   {
+    "avg_volume": 1000,
+    "classification": "thin",
+    "dead_sessions": 0,
+    "index_membership": "EGX100",
+    "thin": true,
+    "traded_share": null
+   }
+  ],
+  [
+   "XYZ",
+   10000,
+   {
+    "avg_volume": 10000,
+    "classification": "thin",
+    "dead_sessions": 0,
+    "index_membership": "EGX100",
+    "thin": true,
+    "traded_share": null
+   }
+  ],
+  [
+   "XYZ",
+   40000,
+   {
+    "avg_volume": 40000,
+    "classification": "low",
+    "dead_sessions": 0,
+    "index_membership": "EGX100",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "XYZ",
+   150000,
+   {
+    "avg_volume": 150000,
+    "classification": "normal",
+    "dead_sessions": 0,
+    "index_membership": "EGX100",
+    "thin": false,
+    "traded_share": null
+   }
+  ],
+  [
+   "XYZ",
+   600000,
+   {
+    "avg_volume": 600000,
+    "classification": "normal",
+    "dead_sessions": 0,
+    "index_membership": "EGX100",
+    "thin": false,
+    "traded_share": null
+   }
+  ]
+ ],
+ "outcome_band": {
+  "bands": [
+   {
+    "coverage_pct": 80,
+    "hi": [
+     102.6,
+     103.7,
+     104.55,
+     105.28,
+     105.92,
+     106.5,
+     107.04,
+     107.54,
+     108.02,
+     108.47,
+     108.9,
+     109.32,
+     109.71,
+     110.1,
+     110.47,
+     110.83,
+     111.18,
+     111.53,
+     111.86,
+     112.19,
+     112.51,
+     112.82,
+     113.12,
+     113.42,
+     113.72,
+     114.01,
+     114.29,
+     114.58,
+     114.85,
+     115.12,
+     115.39,
+     115.66,
+     115.92,
+     116.18,
+     116.43,
+     116.68,
+     116.93,
+     117.18,
+     117.42,
+     117.66,
+     117.9,
+     118.13,
+     118.37,
+     118.6,
+     118.83,
+     119.05,
+     119.28,
+     119.5,
+     119.72,
+     119.94,
+     120.16,
+     120.37,
+     120.59,
+     120.8,
+     121.01,
+     121.22,
+     121.43,
+     121.63,
+     121.84,
+     122.04
+    ],
+    "lo": [
+     97.46,
+     96.43,
+     95.64,
+     94.99,
+     94.41,
+     93.9,
+     93.42,
+     92.99,
+     92.58,
+     92.19,
+     91.83,
+     91.48,
+     91.15,
+     90.83,
+     90.52,
+     90.23,
+     89.94,
+     89.66,
+     89.4,
+     89.14,
+     88.88,
+     88.64,
+     88.4,
+     88.16,
+     87.94,
+     87.71,
+     87.49,
+     87.28,
+     87.07,
+     86.86,
+     86.66,
+     86.46,
+     86.27,
+     86.08,
+     85.89,
+     85.7,
+     85.52,
+     85.34,
+     85.16,
+     84.99,
+     84.82,
+     84.65,
+     84.48,
+     84.32,
+     84.16,
+     84.0,
+     83.84,
+     83.68,
+     83.53,
+     83.38,
+     83.22,
+     83.08,
+     82.93,
+     82.78,
+     82.64,
+     82.5,
+     82.35,
+     82.22,
+     82.08,
+     81.94
+    ],
+    "outside_pct": 20,
+    "z": 1.333
+   },
+   {
+    "coverage_pct": 90,
+    "hi": [
+     103.93,
+     105.6,
+     106.91,
+     108.02,
+     109.01,
+     109.91,
+     110.74,
+     111.52,
+     112.26,
+     112.97,
+     113.64,
+     114.29,
+     114.92,
+     115.52,
+     116.11,
+     116.68,
+     117.23,
+     117.77,
+     118.3,
+     118.82,
+     119.33,
+     119.83,
+     120.31,
+     120.79,
+     121.26,
+     121.73,
+     122.18,
+     122.64,
+     123.08,
+     123.52,
+     123.95,
+     124.37,
+     124.8,
+     125.21,
+     125.62,
+     126.03,
+     126.43,
+     126.83,
+     127.23,
+     127.62,
+     128.01,
+     128.39,
+     128.77,
+     129.15,
+     129.52,
+     129.89,
+     130.26,
+     130.62,
+     130.99,
+     131.35,
+     131.7,
+     132.06,
+     132.41,
+     132.76,
+     133.11,
+     133.45,
+     133.79,
+     134.13,
+     134.47,
+     134.81
+    ],
+    "lo": [
+     96.22,
+     94.69,
+     93.54,
+     92.58,
+     91.74,
+     90.99,
+     90.3,
+     89.67,
+     89.08,
+     88.52,
+     87.99,
+     87.5,
+     87.02,
+     86.56,
+     86.13,
+     85.71,
+     85.3,
+     84.91,
+     84.53,
+     84.16,
+     83.8,
+     83.45,
+     83.12,
+     82.79,
+     82.46,
+     82.15,
+     81.84,
+     81.54,
+     81.25,
+     80.96,
+     80.68,
+     80.4,
+     80.13,
+     79.86,
+     79.6,
+     79.35,
+     79.09,
+     78.84,
+     78.6,
+     78.36,
+     78.12,
+     77.89,
+     77.66,
+     77.43,
+     77.21,
+     76.99,
+     76.77,
+     76.56,
+     76.34,
+     76.13,
+     75.93,
+     75.72,
+     75.52,
+     75.32,
+     75.13,
+     74.93,
+     74.74,
+     74.55,
+     74.36,
+     74.18
+    ],
+    "outside_pct": 10,
+    "z": 1.999
+   }
+  ],
+  "calibration": {
+   "band_width_pct_of_spot_median": 88,
+   "band_width_pct_of_spot_p25": 72,
+   "band_width_pct_of_spot_p75": 110,
+   "fit_horizon_days": 60,
+   "fitted_at": "2026-09-02",
+   "n_observations": 34749,
+   "sigma_window": 400,
+   "universe": "EGX common stocks with >=460 daily bars, ISIN-coded instruments excluded"
+  },
+  "current_price": 100.0,
+  "days": 60,
+  "endpoint": {
+   "coverage_pct": 90,
+   "hi": 134.81,
+   "lo": 74.18
+  },
+  "method": "egx_calibrated_quantile"
+ },
+ "regime": {
+  "40.0": {
+   "association_n": 221,
+   "association_phase_rhos": [
+    0.309,
+    0.167,
+    -0.006
+   ],
+   "association_rho": 0.162,
+   "association_significant": false,
+   "association_t": 1.74,
+   "band": "weak",
+   "hist_median_3m_pct": -0.03,
+   "hist_positive_rate": 0.5,
+   "horizon_days": 63,
+   "label": "Broadly weak",
+   "mean_score": 40.0,
+   "n_symbols": 40,
+   "observations": 74,
+   "summary": "Most of the market is in poor technical condition. Historically the next three months were a coin flip averaging about nothing."
+  },
+  "45.4": {
+   "association_n": 221,
+   "association_phase_rhos": [
+    0.309,
+    0.167,
+    -0.006
+   ],
+   "association_rho": 0.162,
+   "association_significant": false,
+   "association_t": 1.74,
+   "band": "mixed",
+   "hist_median_3m_pct": 5.42,
+   "hist_positive_rate": 0.685,
+   "horizon_days": 63,
+   "label": "Mixed",
+   "mean_score": 45.4,
+   "n_symbols": 40,
+   "observations": 73,
+   "summary": "The market is in middling condition. Historically the next three months were positive about two times in three."
+  },
+  "48.0": {
+   "association_n": 221,
+   "association_phase_rhos": [
+    0.309,
+    0.167,
+    -0.006
+   ],
+   "association_rho": 0.162,
+   "association_significant": false,
+   "association_t": 1.74,
+   "band": "mixed",
+   "hist_median_3m_pct": 5.42,
+   "hist_positive_rate": 0.685,
+   "horizon_days": 63,
+   "label": "Mixed",
+   "mean_score": 48.0,
+   "n_symbols": 40,
+   "observations": 73,
+   "summary": "The market is in middling condition. Historically the next three months were positive about two times in three."
+  },
+  "51.9": {
+   "association_n": 221,
+   "association_phase_rhos": [
+    0.309,
+    0.167,
+    -0.006
+   ],
+   "association_rho": 0.162,
+   "association_significant": false,
+   "association_t": 1.74,
+   "band": "broad",
+   "hist_median_3m_pct": 6.72,
+   "hist_positive_rate": 0.689,
+   "horizon_days": 63,
+   "label": "Broadly healthy",
+   "mean_score": 51.9,
+   "n_symbols": 40,
+   "observations": 74,
+   "summary": "Most of the market is in good technical condition. Historically the next three months were positive about seven times in ten \u2014 though not meaningfully better than the Mixed band."
+  },
+  "58.0": {
+   "association_n": 221,
+   "association_phase_rhos": [
+    0.309,
+    0.167,
+    -0.006
+   ],
+   "association_rho": 0.162,
+   "association_significant": false,
+   "association_t": 1.74,
+   "band": "broad",
+   "hist_median_3m_pct": 6.72,
+   "hist_positive_rate": 0.689,
+   "horizon_days": 63,
+   "label": "Broadly healthy",
+   "mean_score": 58.0,
+   "n_symbols": 40,
+   "observations": 74,
+   "summary": "Most of the market is in good technical condition. Historically the next three months were positive about seven times in ten \u2014 though not meaningfully better than the Mixed band."
+  }
+ },
+ "regime_thin": {
+  "band": null,
+  "horizon_days": 63,
+  "label": "Not enough data",
+  "mean_score": 52.0,
+  "n_symbols": 3,
+  "summary": "Needs at least 15 scored stocks to average; got 3."
+ },
+ "risk_payload": {
+  "fitted_at": "2026-09-02",
+  "forward_days": 126,
+  "lookback_days": 63,
+  "n_dates": 221,
+  "n_observations": 16220,
+  "n_symbols": 202,
+  "vol_predicts_drawdown_ic": 0.4338,
+  "vol_predicts_drawdown_ic_nonoverlapping": 0.4707,
+  "vol_predicts_drawdown_t": 40.5,
+  "vol_predicts_drawdown_t_nonoverlapping": 16.7,
+  "vol_predicts_vol_ic": 0.5631,
+  "vol_predicts_vol_ic_nonoverlapping": 0.5791,
+  "vol_predicts_vol_t": 55.8,
+  "vol_predicts_vol_t_nonoverlapping": 24.0
+ },
+ "score_quality": [
+  [
+   null,
+   null,
+   true,
+   null,
+   []
+  ],
+  [
+   null,
+   null,
+   false,
+   null,
+   []
+  ],
+  [
+   null,
+   0.0,
+   true,
+   50.0,
+   []
+  ],
+  [
+   null,
+   0.0,
+   false,
+   50.0,
+   []
+  ],
+  [
+   null,
+   1.0,
+   true,
+   50.0,
+   [
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   null,
+   1.0,
+   false,
+   50.0,
+   [
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   null,
+   2.0,
+   true,
+   54.0,
+   [
+    "Pays about the EGX median dividend (DY 2.0%)"
+   ]
+  ],
+  [
+   null,
+   2.0,
+   false,
+   54.0,
+   [
+    "Dividend yield 2.0%"
+   ]
+  ],
+  [
+   null,
+   3.12,
+   true,
+   54.0,
+   [
+    "Pays about the EGX median dividend (DY 3.1%)"
+   ]
+  ],
+  [
+   null,
+   3.12,
+   false,
+   54.0,
+   [
+    "Dividend yield 3.1%"
+   ]
+  ],
+  [
+   null,
+   4.0,
+   true,
+   58.0,
+   [
+    "Above-median dividend (DY 4.0%) \u2014 real cash returned to shareholders, though still under the T-bill"
+   ]
+  ],
+  [
+   null,
+   4.0,
+   false,
+   58.0,
+   [
+    "Dividend yield 4.0%"
+   ]
+  ],
+  [
+   null,
+   8.0,
+   true,
+   54.0,
+   [
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   null,
+   8.0,
+   false,
+   54.0,
+   [
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   null,
+   15.0,
+   true,
+   42.0,
+   [
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   null,
+   15.0,
+   false,
+   42.0,
+   [
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   null,
+   42.55,
+   true,
+   42.0,
+   [
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   null,
+   42.55,
+   false,
+   42.0,
+   [
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   0.7,
+   null,
+   true,
+   53.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring"
+   ]
+  ],
+  [
+   0.7,
+   null,
+   false,
+   53.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring"
+   ]
+  ],
+  [
+   0.7,
+   0.0,
+   true,
+   53.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring"
+   ]
+  ],
+  [
+   0.7,
+   0.0,
+   false,
+   53.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring"
+   ]
+  ],
+  [
+   0.7,
+   1.0,
+   true,
+   53.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   0.7,
+   1.0,
+   false,
+   53.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   0.7,
+   2.0,
+   true,
+   57.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring",
+    "Pays about the EGX median dividend (DY 2.0%)"
+   ]
+  ],
+  [
+   0.7,
+   2.0,
+   false,
+   57.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring",
+    "Dividend yield 2.0%"
+   ]
+  ],
+  [
+   0.7,
+   3.12,
+   true,
+   57.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring",
+    "Pays about the EGX median dividend (DY 3.1%)"
+   ]
+  ],
+  [
+   0.7,
+   3.12,
+   false,
+   57.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring",
+    "Dividend yield 3.1%"
+   ]
+  ],
+  [
+   0.7,
+   4.0,
+   true,
+   61.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring",
+    "Above-median dividend (DY 4.0%) \u2014 real cash returned to shareholders, though still under the T-bill"
+   ]
+  ],
+  [
+   0.7,
+   4.0,
+   false,
+   61.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring",
+    "Dividend yield 4.0%"
+   ]
+  ],
+  [
+   0.7,
+   8.0,
+   true,
+   57.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   0.7,
+   8.0,
+   false,
+   57.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   0.7,
+   15.0,
+   true,
+   45.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   0.7,
+   15.0,
+   false,
+   45.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   0.7,
+   42.55,
+   true,
+   45.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   0.7,
+   42.55,
+   false,
+   45.0,
+   [
+    "P/E 0.7 \u2014 implausibly low; check the earnings are recurring",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   2.0,
+   null,
+   true,
+   53.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring"
+   ]
+  ],
+  [
+   2.0,
+   null,
+   false,
+   53.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring"
+   ]
+  ],
+  [
+   2.0,
+   0.0,
+   true,
+   53.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring"
+   ]
+  ],
+  [
+   2.0,
+   0.0,
+   false,
+   53.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring"
+   ]
+  ],
+  [
+   2.0,
+   1.0,
+   true,
+   53.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   2.0,
+   1.0,
+   false,
+   53.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   2.0,
+   2.0,
+   true,
+   57.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring",
+    "Pays about the EGX median dividend (DY 2.0%)"
+   ]
+  ],
+  [
+   2.0,
+   2.0,
+   false,
+   57.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring",
+    "Dividend yield 2.0%"
+   ]
+  ],
+  [
+   2.0,
+   3.12,
+   true,
+   57.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring",
+    "Pays about the EGX median dividend (DY 3.1%)"
+   ]
+  ],
+  [
+   2.0,
+   3.12,
+   false,
+   57.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring",
+    "Dividend yield 3.1%"
+   ]
+  ],
+  [
+   2.0,
+   4.0,
+   true,
+   61.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring",
+    "Above-median dividend (DY 4.0%) \u2014 real cash returned to shareholders, though still under the T-bill"
+   ]
+  ],
+  [
+   2.0,
+   4.0,
+   false,
+   61.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring",
+    "Dividend yield 4.0%"
+   ]
+  ],
+  [
+   2.0,
+   8.0,
+   true,
+   57.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   2.0,
+   8.0,
+   false,
+   57.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   2.0,
+   15.0,
+   true,
+   45.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   2.0,
+   15.0,
+   false,
+   45.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   2.0,
+   42.55,
+   true,
+   45.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   2.0,
+   42.55,
+   false,
+   45.0,
+   [
+    "P/E 2.0 \u2014 implausibly low; check the earnings are recurring",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   3.0,
+   null,
+   true,
+   62.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 3.0)"
+   ]
+  ],
+  [
+   3.0,
+   null,
+   false,
+   62.0,
+   [
+    "P/E 3.0"
+   ]
+  ],
+  [
+   3.0,
+   0.0,
+   true,
+   62.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 3.0)"
+   ]
+  ],
+  [
+   3.0,
+   0.0,
+   false,
+   62.0,
+   [
+    "P/E 3.0"
+   ]
+  ],
+  [
+   3.0,
+   1.0,
+   true,
+   62.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 3.0)",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   3.0,
+   1.0,
+   false,
+   62.0,
+   [
+    "P/E 3.0",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   3.0,
+   2.0,
+   true,
+   66.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 3.0)",
+    "Pays about the EGX median dividend (DY 2.0%)"
+   ]
+  ],
+  [
+   3.0,
+   2.0,
+   false,
+   66.0,
+   [
+    "P/E 3.0",
+    "Dividend yield 2.0%"
+   ]
+  ],
+  [
+   3.0,
+   3.12,
+   true,
+   66.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 3.0)",
+    "Pays about the EGX median dividend (DY 3.1%)"
+   ]
+  ],
+  [
+   3.0,
+   3.12,
+   false,
+   66.0,
+   [
+    "P/E 3.0",
+    "Dividend yield 3.1%"
+   ]
+  ],
+  [
+   3.0,
+   4.0,
+   true,
+   70.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 3.0)",
+    "Above-median dividend (DY 4.0%) \u2014 real cash returned to shareholders, though still under the T-bill"
+   ]
+  ],
+  [
+   3.0,
+   4.0,
+   false,
+   70.0,
+   [
+    "P/E 3.0",
+    "Dividend yield 4.0%"
+   ]
+  ],
+  [
+   3.0,
+   8.0,
+   true,
+   66.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 3.0)",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   3.0,
+   8.0,
+   false,
+   66.0,
+   [
+    "P/E 3.0",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   3.0,
+   15.0,
+   true,
+   54.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 3.0)",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   3.0,
+   15.0,
+   false,
+   54.0,
+   [
+    "P/E 3.0",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   3.0,
+   42.55,
+   true,
+   54.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 3.0)",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   3.0,
+   42.55,
+   false,
+   54.0,
+   [
+    "P/E 3.0",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   5.0,
+   null,
+   true,
+   62.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 5.0)"
+   ]
+  ],
+  [
+   5.0,
+   null,
+   false,
+   62.0,
+   [
+    "P/E 5.0"
+   ]
+  ],
+  [
+   5.0,
+   0.0,
+   true,
+   62.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 5.0)"
+   ]
+  ],
+  [
+   5.0,
+   0.0,
+   false,
+   62.0,
+   [
+    "P/E 5.0"
+   ]
+  ],
+  [
+   5.0,
+   1.0,
+   true,
+   62.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 5.0)",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   5.0,
+   1.0,
+   false,
+   62.0,
+   [
+    "P/E 5.0",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   5.0,
+   2.0,
+   true,
+   66.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 5.0)",
+    "Pays about the EGX median dividend (DY 2.0%)"
+   ]
+  ],
+  [
+   5.0,
+   2.0,
+   false,
+   66.0,
+   [
+    "P/E 5.0",
+    "Dividend yield 2.0%"
+   ]
+  ],
+  [
+   5.0,
+   3.12,
+   true,
+   66.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 5.0)",
+    "Pays about the EGX median dividend (DY 3.1%)"
+   ]
+  ],
+  [
+   5.0,
+   3.12,
+   false,
+   66.0,
+   [
+    "P/E 5.0",
+    "Dividend yield 3.1%"
+   ]
+  ],
+  [
+   5.0,
+   4.0,
+   true,
+   70.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 5.0)",
+    "Above-median dividend (DY 4.0%) \u2014 real cash returned to shareholders, though still under the T-bill"
+   ]
+  ],
+  [
+   5.0,
+   4.0,
+   false,
+   70.0,
+   [
+    "P/E 5.0",
+    "Dividend yield 4.0%"
+   ]
+  ],
+  [
+   5.0,
+   8.0,
+   true,
+   66.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 5.0)",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   5.0,
+   8.0,
+   false,
+   66.0,
+   [
+    "P/E 5.0",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   5.0,
+   15.0,
+   true,
+   54.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 5.0)",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   5.0,
+   15.0,
+   false,
+   54.0,
+   [
+    "P/E 5.0",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   5.0,
+   42.55,
+   true,
+   54.0,
+   [
+    "Cheap versus the EGX median of ~12 (P/E 5.0)",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   5.0,
+   42.55,
+   false,
+   54.0,
+   [
+    "P/E 5.0",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   8.0,
+   null,
+   true,
+   54.0,
+   [
+    "Around the EGX median (P/E 8.0)"
+   ]
+  ],
+  [
+   8.0,
+   null,
+   false,
+   54.0,
+   [
+    "P/E 8.0"
+   ]
+  ],
+  [
+   8.0,
+   0.0,
+   true,
+   54.0,
+   [
+    "Around the EGX median (P/E 8.0)"
+   ]
+  ],
+  [
+   8.0,
+   0.0,
+   false,
+   54.0,
+   [
+    "P/E 8.0"
+   ]
+  ],
+  [
+   8.0,
+   1.0,
+   true,
+   54.0,
+   [
+    "Around the EGX median (P/E 8.0)",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   8.0,
+   1.0,
+   false,
+   54.0,
+   [
+    "P/E 8.0",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   8.0,
+   2.0,
+   true,
+   58.0,
+   [
+    "Around the EGX median (P/E 8.0)",
+    "Pays about the EGX median dividend (DY 2.0%)"
+   ]
+  ],
+  [
+   8.0,
+   2.0,
+   false,
+   58.0,
+   [
+    "P/E 8.0",
+    "Dividend yield 2.0%"
+   ]
+  ],
+  [
+   8.0,
+   3.12,
+   true,
+   58.0,
+   [
+    "Around the EGX median (P/E 8.0)",
+    "Pays about the EGX median dividend (DY 3.1%)"
+   ]
+  ],
+  [
+   8.0,
+   3.12,
+   false,
+   58.0,
+   [
+    "P/E 8.0",
+    "Dividend yield 3.1%"
+   ]
+  ],
+  [
+   8.0,
+   4.0,
+   true,
+   62.0,
+   [
+    "Around the EGX median (P/E 8.0)",
+    "Above-median dividend (DY 4.0%) \u2014 real cash returned to shareholders, though still under the T-bill"
+   ]
+  ],
+  [
+   8.0,
+   4.0,
+   false,
+   62.0,
+   [
+    "P/E 8.0",
+    "Dividend yield 4.0%"
+   ]
+  ],
+  [
+   8.0,
+   8.0,
+   true,
+   58.0,
+   [
+    "Around the EGX median (P/E 8.0)",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   8.0,
+   8.0,
+   false,
+   58.0,
+   [
+    "P/E 8.0",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   8.0,
+   15.0,
+   true,
+   46.0,
+   [
+    "Around the EGX median (P/E 8.0)",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   8.0,
+   15.0,
+   false,
+   46.0,
+   [
+    "P/E 8.0",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   8.0,
+   42.55,
+   true,
+   46.0,
+   [
+    "Around the EGX median (P/E 8.0)",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   8.0,
+   42.55,
+   false,
+   46.0,
+   [
+    "P/E 8.0",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   12.4,
+   null,
+   true,
+   54.0,
+   [
+    "Around the EGX median (P/E 12.4)"
+   ]
+  ],
+  [
+   12.4,
+   null,
+   false,
+   54.0,
+   [
+    "P/E 12.4"
+   ]
+  ],
+  [
+   12.4,
+   0.0,
+   true,
+   54.0,
+   [
+    "Around the EGX median (P/E 12.4)"
+   ]
+  ],
+  [
+   12.4,
+   0.0,
+   false,
+   54.0,
+   [
+    "P/E 12.4"
+   ]
+  ],
+  [
+   12.4,
+   1.0,
+   true,
+   54.0,
+   [
+    "Around the EGX median (P/E 12.4)",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   12.4,
+   1.0,
+   false,
+   54.0,
+   [
+    "P/E 12.4",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   12.4,
+   2.0,
+   true,
+   58.0,
+   [
+    "Around the EGX median (P/E 12.4)",
+    "Pays about the EGX median dividend (DY 2.0%)"
+   ]
+  ],
+  [
+   12.4,
+   2.0,
+   false,
+   58.0,
+   [
+    "P/E 12.4",
+    "Dividend yield 2.0%"
+   ]
+  ],
+  [
+   12.4,
+   3.12,
+   true,
+   58.0,
+   [
+    "Around the EGX median (P/E 12.4)",
+    "Pays about the EGX median dividend (DY 3.1%)"
+   ]
+  ],
+  [
+   12.4,
+   3.12,
+   false,
+   58.0,
+   [
+    "P/E 12.4",
+    "Dividend yield 3.1%"
+   ]
+  ],
+  [
+   12.4,
+   4.0,
+   true,
+   62.0,
+   [
+    "Around the EGX median (P/E 12.4)",
+    "Above-median dividend (DY 4.0%) \u2014 real cash returned to shareholders, though still under the T-bill"
+   ]
+  ],
+  [
+   12.4,
+   4.0,
+   false,
+   62.0,
+   [
+    "P/E 12.4",
+    "Dividend yield 4.0%"
+   ]
+  ],
+  [
+   12.4,
+   8.0,
+   true,
+   58.0,
+   [
+    "Around the EGX median (P/E 12.4)",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   12.4,
+   8.0,
+   false,
+   58.0,
+   [
+    "P/E 12.4",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   12.4,
+   15.0,
+   true,
+   46.0,
+   [
+    "Around the EGX median (P/E 12.4)",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   12.4,
+   15.0,
+   false,
+   46.0,
+   [
+    "P/E 12.4",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   12.4,
+   42.55,
+   true,
+   46.0,
+   [
+    "Around the EGX median (P/E 12.4)",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   12.4,
+   42.55,
+   false,
+   46.0,
+   [
+    "P/E 12.4",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   15.0,
+   null,
+   true,
+   48.0,
+   [
+    "Above the EGX median (P/E 15.0)"
+   ]
+  ],
+  [
+   15.0,
+   null,
+   false,
+   48.0,
+   [
+    "P/E 15.0"
+   ]
+  ],
+  [
+   15.0,
+   0.0,
+   true,
+   48.0,
+   [
+    "Above the EGX median (P/E 15.0)"
+   ]
+  ],
+  [
+   15.0,
+   0.0,
+   false,
+   48.0,
+   [
+    "P/E 15.0"
+   ]
+  ],
+  [
+   15.0,
+   1.0,
+   true,
+   48.0,
+   [
+    "Above the EGX median (P/E 15.0)",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   15.0,
+   1.0,
+   false,
+   48.0,
+   [
+    "P/E 15.0",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   15.0,
+   2.0,
+   true,
+   52.0,
+   [
+    "Above the EGX median (P/E 15.0)",
+    "Pays about the EGX median dividend (DY 2.0%)"
+   ]
+  ],
+  [
+   15.0,
+   2.0,
+   false,
+   52.0,
+   [
+    "P/E 15.0",
+    "Dividend yield 2.0%"
+   ]
+  ],
+  [
+   15.0,
+   3.12,
+   true,
+   52.0,
+   [
+    "Above the EGX median (P/E 15.0)",
+    "Pays about the EGX median dividend (DY 3.1%)"
+   ]
+  ],
+  [
+   15.0,
+   3.12,
+   false,
+   52.0,
+   [
+    "P/E 15.0",
+    "Dividend yield 3.1%"
+   ]
+  ],
+  [
+   15.0,
+   4.0,
+   true,
+   56.0,
+   [
+    "Above the EGX median (P/E 15.0)",
+    "Above-median dividend (DY 4.0%) \u2014 real cash returned to shareholders, though still under the T-bill"
+   ]
+  ],
+  [
+   15.0,
+   4.0,
+   false,
+   56.0,
+   [
+    "P/E 15.0",
+    "Dividend yield 4.0%"
+   ]
+  ],
+  [
+   15.0,
+   8.0,
+   true,
+   52.0,
+   [
+    "Above the EGX median (P/E 15.0)",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   15.0,
+   8.0,
+   false,
+   52.0,
+   [
+    "P/E 15.0",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   15.0,
+   15.0,
+   true,
+   40.0,
+   [
+    "Above the EGX median (P/E 15.0)",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   15.0,
+   15.0,
+   false,
+   40.0,
+   [
+    "P/E 15.0",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   15.0,
+   42.55,
+   true,
+   40.0,
+   [
+    "Above the EGX median (P/E 15.0)",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   15.0,
+   42.55,
+   false,
+   40.0,
+   [
+    "P/E 15.0",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   25.0,
+   null,
+   true,
+   42.0,
+   [
+    "Expensive on earnings (P/E 25.0)"
+   ]
+  ],
+  [
+   25.0,
+   null,
+   false,
+   42.0,
+   [
+    "Expensive on earnings (P/E 25.0)"
+   ]
+  ],
+  [
+   25.0,
+   0.0,
+   true,
+   42.0,
+   [
+    "Expensive on earnings (P/E 25.0)"
+   ]
+  ],
+  [
+   25.0,
+   0.0,
+   false,
+   42.0,
+   [
+    "Expensive on earnings (P/E 25.0)"
+   ]
+  ],
+  [
+   25.0,
+   1.0,
+   true,
+   42.0,
+   [
+    "Expensive on earnings (P/E 25.0)",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   25.0,
+   1.0,
+   false,
+   42.0,
+   [
+    "Expensive on earnings (P/E 25.0)",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   25.0,
+   2.0,
+   true,
+   46.0,
+   [
+    "Expensive on earnings (P/E 25.0)",
+    "Pays about the EGX median dividend (DY 2.0%)"
+   ]
+  ],
+  [
+   25.0,
+   2.0,
+   false,
+   46.0,
+   [
+    "Expensive on earnings (P/E 25.0)",
+    "Dividend yield 2.0%"
+   ]
+  ],
+  [
+   25.0,
+   3.12,
+   true,
+   46.0,
+   [
+    "Expensive on earnings (P/E 25.0)",
+    "Pays about the EGX median dividend (DY 3.1%)"
+   ]
+  ],
+  [
+   25.0,
+   3.12,
+   false,
+   46.0,
+   [
+    "Expensive on earnings (P/E 25.0)",
+    "Dividend yield 3.1%"
+   ]
+  ],
+  [
+   25.0,
+   4.0,
+   true,
+   50.0,
+   [
+    "Expensive on earnings (P/E 25.0)",
+    "Above-median dividend (DY 4.0%) \u2014 real cash returned to shareholders, though still under the T-bill"
+   ]
+  ],
+  [
+   25.0,
+   4.0,
+   false,
+   50.0,
+   [
+    "Expensive on earnings (P/E 25.0)",
+    "Dividend yield 4.0%"
+   ]
+  ],
+  [
+   25.0,
+   8.0,
+   true,
+   46.0,
+   [
+    "Expensive on earnings (P/E 25.0)",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   25.0,
+   8.0,
+   false,
+   46.0,
+   [
+    "Expensive on earnings (P/E 25.0)",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   25.0,
+   15.0,
+   true,
+   34.0,
+   [
+    "Expensive on earnings (P/E 25.0)",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   25.0,
+   15.0,
+   false,
+   34.0,
+   [
+    "Expensive on earnings (P/E 25.0)",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   25.0,
+   42.55,
+   true,
+   34.0,
+   [
+    "Expensive on earnings (P/E 25.0)",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   25.0,
+   42.55,
+   false,
+   34.0,
+   [
+    "Expensive on earnings (P/E 25.0)",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   39.9,
+   null,
+   true,
+   42.0,
+   [
+    "Expensive on earnings (P/E 39.9)"
+   ]
+  ],
+  [
+   39.9,
+   null,
+   false,
+   42.0,
+   [
+    "Expensive on earnings (P/E 39.9)"
+   ]
+  ],
+  [
+   39.9,
+   0.0,
+   true,
+   42.0,
+   [
+    "Expensive on earnings (P/E 39.9)"
+   ]
+  ],
+  [
+   39.9,
+   0.0,
+   false,
+   42.0,
+   [
+    "Expensive on earnings (P/E 39.9)"
+   ]
+  ],
+  [
+   39.9,
+   1.0,
+   true,
+   42.0,
+   [
+    "Expensive on earnings (P/E 39.9)",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   39.9,
+   1.0,
+   false,
+   42.0,
+   [
+    "Expensive on earnings (P/E 39.9)",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   39.9,
+   2.0,
+   true,
+   46.0,
+   [
+    "Expensive on earnings (P/E 39.9)",
+    "Pays about the EGX median dividend (DY 2.0%)"
+   ]
+  ],
+  [
+   39.9,
+   2.0,
+   false,
+   46.0,
+   [
+    "Expensive on earnings (P/E 39.9)",
+    "Dividend yield 2.0%"
+   ]
+  ],
+  [
+   39.9,
+   3.12,
+   true,
+   46.0,
+   [
+    "Expensive on earnings (P/E 39.9)",
+    "Pays about the EGX median dividend (DY 3.1%)"
+   ]
+  ],
+  [
+   39.9,
+   3.12,
+   false,
+   46.0,
+   [
+    "Expensive on earnings (P/E 39.9)",
+    "Dividend yield 3.1%"
+   ]
+  ],
+  [
+   39.9,
+   4.0,
+   true,
+   50.0,
+   [
+    "Expensive on earnings (P/E 39.9)",
+    "Above-median dividend (DY 4.0%) \u2014 real cash returned to shareholders, though still under the T-bill"
+   ]
+  ],
+  [
+   39.9,
+   4.0,
+   false,
+   50.0,
+   [
+    "Expensive on earnings (P/E 39.9)",
+    "Dividend yield 4.0%"
+   ]
+  ],
+  [
+   39.9,
+   8.0,
+   true,
+   46.0,
+   [
+    "Expensive on earnings (P/E 39.9)",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   39.9,
+   8.0,
+   false,
+   46.0,
+   [
+    "Expensive on earnings (P/E 39.9)",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   39.9,
+   15.0,
+   true,
+   34.0,
+   [
+    "Expensive on earnings (P/E 39.9)",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   39.9,
+   15.0,
+   false,
+   34.0,
+   [
+    "Expensive on earnings (P/E 39.9)",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   39.9,
+   42.55,
+   true,
+   34.0,
+   [
+    "Expensive on earnings (P/E 39.9)",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   39.9,
+   42.55,
+   false,
+   34.0,
+   [
+    "Expensive on earnings (P/E 39.9)",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   40.0,
+   null,
+   true,
+   36.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify"
+   ]
+  ],
+  [
+   40.0,
+   null,
+   false,
+   36.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify"
+   ]
+  ],
+  [
+   40.0,
+   0.0,
+   true,
+   36.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify"
+   ]
+  ],
+  [
+   40.0,
+   0.0,
+   false,
+   36.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify"
+   ]
+  ],
+  [
+   40.0,
+   1.0,
+   true,
+   36.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   40.0,
+   1.0,
+   false,
+   36.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   40.0,
+   2.0,
+   true,
+   40.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify",
+    "Pays about the EGX median dividend (DY 2.0%)"
+   ]
+  ],
+  [
+   40.0,
+   2.0,
+   false,
+   40.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify",
+    "Dividend yield 2.0%"
+   ]
+  ],
+  [
+   40.0,
+   3.12,
+   true,
+   40.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify",
+    "Pays about the EGX median dividend (DY 3.1%)"
+   ]
+  ],
+  [
+   40.0,
+   3.12,
+   false,
+   40.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify",
+    "Dividend yield 3.1%"
+   ]
+  ],
+  [
+   40.0,
+   4.0,
+   true,
+   44.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify",
+    "Above-median dividend (DY 4.0%) \u2014 real cash returned to shareholders, though still under the T-bill"
+   ]
+  ],
+  [
+   40.0,
+   4.0,
+   false,
+   44.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify",
+    "Dividend yield 4.0%"
+   ]
+  ],
+  [
+   40.0,
+   8.0,
+   true,
+   40.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   40.0,
+   8.0,
+   false,
+   40.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   40.0,
+   15.0,
+   true,
+   28.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   40.0,
+   15.0,
+   false,
+   28.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   40.0,
+   42.55,
+   true,
+   28.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   40.0,
+   42.55,
+   false,
+   28.0,
+   [
+    "Very expensive (P/E 40.0) \u2014 needs confirmed growth to justify",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   120.0,
+   null,
+   true,
+   36.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify"
+   ]
+  ],
+  [
+   120.0,
+   null,
+   false,
+   36.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify"
+   ]
+  ],
+  [
+   120.0,
+   0.0,
+   true,
+   36.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify"
+   ]
+  ],
+  [
+   120.0,
+   0.0,
+   false,
+   36.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify"
+   ]
+  ],
+  [
+   120.0,
+   1.0,
+   true,
+   36.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   120.0,
+   1.0,
+   false,
+   36.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify",
+    "Token dividend (DY 1.0%)"
+   ]
+  ],
+  [
+   120.0,
+   2.0,
+   true,
+   40.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify",
+    "Pays about the EGX median dividend (DY 2.0%)"
+   ]
+  ],
+  [
+   120.0,
+   2.0,
+   false,
+   40.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify",
+    "Dividend yield 2.0%"
+   ]
+  ],
+  [
+   120.0,
+   3.12,
+   true,
+   40.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify",
+    "Pays about the EGX median dividend (DY 3.1%)"
+   ]
+  ],
+  [
+   120.0,
+   3.12,
+   false,
+   40.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify",
+    "Dividend yield 3.1%"
+   ]
+  ],
+  [
+   120.0,
+   4.0,
+   true,
+   44.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify",
+    "Above-median dividend (DY 4.0%) \u2014 real cash returned to shareholders, though still under the T-bill"
+   ]
+  ],
+  [
+   120.0,
+   4.0,
+   false,
+   44.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify",
+    "Dividend yield 4.0%"
+   ]
+  ],
+  [
+   120.0,
+   8.0,
+   true,
+   40.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   120.0,
+   8.0,
+   false,
+   40.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify",
+    "Very high dividend (DY 8.0%) \u2014 check it recurs"
+   ]
+  ],
+  [
+   120.0,
+   15.0,
+   true,
+   28.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   120.0,
+   15.0,
+   false,
+   28.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify",
+    "Extreme yield (DY 15.0%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   120.0,
+   42.55,
+   true,
+   28.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ],
+  [
+   120.0,
+   42.55,
+   false,
+   28.0,
+   [
+    "Very expensive (P/E 120.0) \u2014 needs confirmed growth to justify",
+    "Extreme yield (DY 42.5%) \u2014 typically a special dividend or a collapsed share price, not steady income"
+   ]
+  ]
+ ]
+}
