@@ -483,7 +483,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                     pe_ratio=pe_info_h.get("pe_ratio") if pe_info_h else None,
                     dividend_yield=pe_info_h.get("dividend_yield") if pe_info_h else None,
                     loss_making=pe_info_h.get("loss_making") if pe_info_h else None,
-                    index_membership=get_index_membership(symbol, market),
+                    index_membership=get_index_membership(symbol, market, db=db),
                     divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
                     benchmark_label=bench,
                     score_calibrated=market.score_calibrated,

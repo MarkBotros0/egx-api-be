@@ -61,20 +61,30 @@ def _load() -> dict:
     return _MEMBERSHIP
 
 
-def get_index_membership(symbol: str, market=EG) -> Optional[str]:
+def get_index_membership(symbol: str, market=EG, db=None) -> Optional[str]:
     """
-    Return "EGX30" | "EGX70" | "EGX100" | "NILEX" for an EG `symbol`, else None.
+    EG: "EGX30" | "EGX70" | "EGX100" | "NILEX" from the static file, else None.
+    None means "unknown tier", not "no index" — callers pass it straight through
+    to `liquidity_score`, which applies the market's default tier.
 
-    None means "unknown tier", not "no index" — callers should pass it straight
-    through to `liquidity_score`, which applies its EGX100 default.
-
-    Any other market returns its own code ("US"), never an EGX tier: a US
-    ticker that happens to share a symbol with an EGX listing must not borrow
-    that listing's liquidity floors. `liquidity_score` has a floor row per
-    market code.
+    Any other market: its index-member tier ("US large-cap") for a member of
+    one of its index symbolsets per `market_universe`, else its own code
+    ("US", the other-listed tier). Never an EGX tier — a US ticker that shares
+    a symbol with an EGX listing must not borrow that listing's floors. Without
+    `db`, or when the universe cannot be read, the answer is the market code:
+    the lenient other-listed floor, never an EG one and never an exception.
     """
     if market.code != EG.code:
-        return market.code
+        if db is None or not symbol:
+            return market.code
+        try:
+            from app.core import universe as universe_mod
+            rows = universe_mod.load_universe(db, market)
+        except Exception:
+            return market.code
+        wanted = symbol.upper()
+        member = any(r.get("symbol", "").upper() == wanted and r.get("indices") for r in rows)
+        return index_member_tier(market) if member else market.code
     if not symbol:
         return None
     return _load().get(symbol.upper())

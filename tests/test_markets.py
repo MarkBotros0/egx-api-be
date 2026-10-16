@@ -147,14 +147,14 @@ def test_indices_per_market():
 
 def test_short_name_and_calibration_flag():
     assert (EG.short_name, EG.score_calibrated) == ("EGX", True)
-    assert (US.short_name, US.score_calibrated) == ("US", False)
+    assert (US.short_name, US.score_calibrated) == ("US", True)
     assert US.risk_free_fallback_pct == 4.0
 
 
 def test_public_market_exposes_new_fields_only():
     pm = public_market(US, date(2026, 10, 15))
     assert pm["short_name"] == "US"
-    assert pm["score_calibrated"] is False
+    assert pm["score_calibrated"] is True
     assert pm["indices"] == [
         {"id": "SPX", "label": "S&P 500"},
         {"id": "NDX", "label": "NASDAQ-100"},

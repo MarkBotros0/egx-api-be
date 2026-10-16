@@ -387,7 +387,7 @@ def _handle_batch(symbols_str: str, interval: str, user_id: str = None,
                 f = pool.submit(_compute_batch_one, s, interval, weights, macro,
                                 egx30_close, risk_free_rate_pct, pe_ratio,
                                 dividend_yield, loss_making,
-                                get_index_membership(s, market), market, db)
+                                get_index_membership(s, market, db=db), market, db)
                 # Stragglers that finish AFTER we've returned still self-cache
                 # via this callback — a frontend retry a few seconds later hits
                 # a warm cache and fills in the '--' cards.
@@ -574,7 +574,7 @@ def get_analysis(
             pe_ratio=pe_info.get("pe_ratio") if pe_info else None,
             dividend_yield=pe_info.get("dividend_yield") if pe_info else None,
             loss_making=pe_info.get("loss_making") if pe_info else None,
-            index_membership=get_index_membership(symbol, market),
+            index_membership=get_index_membership(symbol, market, db=db),
             divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
             benchmark_label=market.benchmark_label,
             score_calibrated=market.score_calibrated,

@@ -401,7 +401,7 @@ def risk_snapshot(
                 pe_ratio=pe.get("pe_ratio"),
                 dividend_yield=pe.get("dividend_yield"),
                 loss_making=pe.get("loss_making"),
-                index_membership=get_index_membership(symbol, market),
+                index_membership=get_index_membership(symbol, market, db=db),
                 divergence_lookback=DIVERGENCE_LOOKBACK_FULL,
                 benchmark_label=market.benchmark_label,
                 score_calibrated=market.score_calibrated,

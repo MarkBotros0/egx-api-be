@@ -212,9 +212,11 @@ def test_us_portfolio_analysis_has_no_eg_wording(client, monkeypatch, fake_feed,
     assert {"stop_breached", "target_hit", "relative_strength_leader"} <= types
     assert "macro_egx30" not in types
     assert not types & {"pe_undervalued", "dividend_yield_solid"}
-    # The branches whose EG copy names the EGX actually fired, neutrally.
+    # The branches whose EG copy names the EGX actually fired, on US bands and
+    # US wording (US is calibrated since sub-project 3).
     reasons = _reasons(body["holdings"][0]["composite_breakdown"])
-    assert "P/E 6.2" in reasons and "Dividend yield 3.1%" in reasons
+    assert any(x.startswith("P/E 6.2") for x in reasons), reasons
+    assert any("(DY 3.1%)" in x for x in reasons), reasons
     assert any("UNDERPERFORMS" in x and "T-bill rate" in x for x in reasons), reasons
 
 

@@ -115,7 +115,7 @@ US = MarketConfig(
     indices=(IndexDef("SPX", "S&P 500", "SYML:SP;SPX"),
              IndexDef("NDX", "NASDAQ-100", "SYML:NASDAQ;NDX"),
              IndexDef("DJI", "Dow 30", "SYML:DJ;DJI")),
-    short_name="US", score_calibrated=False,
+    short_name="US", score_calibrated=True,
     adjective="US",
 )
 
