@@ -167,3 +167,9 @@ def test_adjective_is_a_market_fact_and_is_published():
     assert (EG.adjective, US.adjective) == ("Egyptian", "US")
     assert public_market(EG, date(2026, 10, 16))["adjective"] == "Egyptian"
     assert public_market(US, date(2026, 10, 16))["adjective"] == "US"
+
+
+def test_regime_shown_follows_the_bundle():
+    # EG's association is weak but right-signed; US's measured wrong-signed.
+    assert public_market(EG, date(2026, 10, 16))["regime_shown"] is True
+    assert public_market(US, date(2026, 10, 16))["regime_shown"] is False

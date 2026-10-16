@@ -56,7 +56,7 @@ class MarketConfig:
     publish_holidays: bool = True
     indices: tuple[IndexDef, ...] = ()
     short_name: str = ""
-    adjective: str = ""          # "Egyptian stocks", "US stocks" — copy only.
+    adjective: str = ""          # "Egyptian", "US" (as in "US stocks") — copy only.
     score_calibrated: bool = True
 
     @property
@@ -181,6 +181,14 @@ def market_holidays(market: MarketConfig, start: date, days: int = 365) -> list[
     ]
 
 
+def _regime_shown(market: MarketConfig) -> bool:
+    """Whether /api/market_regime can show a band for this market at all:
+    fitted (not provisional) and right-signed (RegimeCal.show)."""
+    from app.core.calibration import for_market  # the bundles never import markets
+    cal = for_market(market)
+    return (not cal.provisional) and cal.regime.show
+
+
 def public_market(market: MarketConfig, today: date) -> dict:
     """Display fields for clients. No internals (scanner region, floors)."""
     return {
@@ -197,6 +205,9 @@ def public_market(market: MarketConfig, today: date) -> dict:
         "short_name": market.short_name,
         "adjective": market.adjective,
         "score_calibrated": market.score_calibrated,
+        # Lets a client skip the Market Condition fetch (and its skeleton) on a
+        # market whose own measurement hides the card. See RegimeCal.show.
+        "regime_shown": _regime_shown(market),
         "indices": [{"id": i.id, "label": i.label} for i in market.indices],
         "holidays": market_holidays(market, today) if market.publish_holidays else [],
     }
