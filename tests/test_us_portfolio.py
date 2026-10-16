@@ -105,6 +105,7 @@ def fake_feed(monkeypatch):
 # get_pe_for_symbol's row: company_name, pe_ratio, dividend_yield, loss_making,
 # updated_at, dividend_ex_date_recent, dividend_amount_recent. A P/E under 8
 # and a 2-4% yield hit the bands whose EG copy names the EGX median.
+# On US bands: P/E 6.2 is under the 7.8 floor, 3.1% an above-median yield.
 KO_PE = ("Coca-Cola", 6.2, 3.1, False, "2026-10-14", None, None)
 
 BANNED = ("EGP", "EGX30", "EGX", "policy rate")
@@ -211,7 +212,10 @@ def test_us_portfolio_analysis_has_no_eg_wording(client, monkeypatch, fake_feed,
     types = {s["type"] for s in body["signals"]}
     assert {"stop_breached", "target_hit", "relative_strength_leader"} <= types
     assert "macro_egx30" not in types
-    assert not types & {"pe_undervalued", "dividend_yield_solid"}
+    # Valuation signals run on the US bundle's boundaries (P/E 6.2 is under
+    # the US floor of 7.8; a 3.1% yield is an above-median US payer).
+    assert {"pe_implausibly_low", "dividend_yield_solid"} <= types
+    assert "pe_undervalued" not in types
     # The branches whose EG copy names the EGX actually fired, on US bands and
     # US wording (US is calibrated since sub-project 3).
     reasons = _reasons(body["holdings"][0]["composite_breakdown"])

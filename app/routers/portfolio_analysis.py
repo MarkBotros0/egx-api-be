@@ -21,6 +21,7 @@ from app.core.db import get_db
 from app.core.dividends import fetch_dividend_totals
 from app.core.holdings import fetch_open_holdings
 from app.core.macro_fetch import fetch_macro_for, read_risk_free_rate
+from app.core.calibration import for_market
 from app.core.markets import EG, MarketConfig, market_param
 from app.core.composite import compute_composite, get_weights_from_db, DEFAULT_WEIGHTS
 from app.core.levels import compute_key_levels, compute_entry_exit
@@ -185,6 +186,80 @@ def build_position_signals(positions: list[dict], *, risk_free_rate_pct: float,
                 "learn_concept": "risk_adjusted_return"})
 
     return out
+
+
+def fundamental_signals(symbol: str, pe_info_h, market: MarketConfig,
+                        risk_free_rate_pct: float) -> list:
+    """P/E and dividend-yield signals for one holding (pure; see *Signals*)."""
+    signals: list = []
+    # P/E signals — only fired when the fundamentals feed has a row for the symbol.
+    # Loss-making comes from diluted EPS: the fundamentals feed reports
+    # a NULL P/E for loss-makers, never a negative one, so the old
+    # `pe < 0` branch could never fire.
+    if pe_info_h and pe_info_h.get("loss_making"):
+        signals.append({"type": "pe_loss_making", "severity": "warning", "symbol": symbol,
+            "message": f"{symbol} is loss-making over the last twelve months.",
+            "explanation": "The company isn't profitable right now, so earnings-based valuation doesn't apply — lean on trend, relative strength, and macro instead.",
+            "learn_concept": "pe_ratio"})
+
+    # Thresholds are score_quality's band boundaries for THIS market
+    # (for_market(market).fundamentals), so the signal and the score agree on
+    # where "implausibly low", "cheap" and "expensive" start, and the copy
+    # names that market's own median. EG: 3 / 8 / 25 and "the EGX median of
+    # ~12"; US: its fitted boundaries and "the US median". Pinned by
+    # tests/test_portfolio_fundamental_signals.py.
+    fund = for_market(market).fundamentals
+    pe_floor = fund.pe_bands[0][0]       # below: one-off earnings or a collapsed price
+    pe_cheap = fund.pe_bands[1][0]       # below: the top-scoring P/E band
+    pe_dear = fund.pe_bands[3][0]        # at/above: the penalised bands
+    dy_solid = fund.dy_bands[1][0]       # at/above: above-median payer
+    dy_extreme = fund.dy_bands[3][0]     # at/above: special dividend or collapsed price
+    median = f"the {fund.label} median of ~{fund.pe_median:.0f}"
+    where = "on the EGX" if fund.label == "EGX" else f"among {fund.label} stocks"
+
+    if pe_info_h and pe_info_h.get("pe_ratio") is not None:
+        pe = float(pe_info_h["pe_ratio"])
+        if pe < pe_floor:
+            signals.append({"type": "pe_implausibly_low", "severity": "warning", "symbol": symbol,
+                "message": f"{symbol} P/E is {pe:.1f} — implausibly low, not a bargain.",
+                "explanation": (f"A P/E under {pe_floor:g} {where} almost always means"
+                                if fund.label == "EGX" else
+                                f"A P/E under {pe_floor:g} is the bottom valuation band {where}, and usually means")
+                               + " the earnings were one-off, or the share price has already collapsed. Check the last results before treating this as cheap.",
+                "learn_concept": "pe_ratio"})
+        elif pe < pe_cheap:
+            signals.append({"type": "pe_undervalued", "severity": "opportunity", "symbol": symbol,
+                "message": f"{symbol} P/E is {pe:.1f} — cheap versus {median}.",
+                "explanation": "A low P/E can indicate value, but it can also mean the market expects earnings to fall. Always combine with trend and relative strength before acting.",
+                "learn_concept": "pe_ratio"})
+        elif pe >= pe_dear:
+            signals.append({"type": "pe_overvalued", "severity": "warning", "symbol": symbol,
+                "message": f"{symbol} P/E is {pe:.1f} — expensive versus {median}.",
+                "explanation": f"A high P/E means the market is paying a lot for each {market.currency} of current earnings. Only justified by strong, confirmed growth expectations.",
+                "learn_concept": "pe_ratio"})
+
+    # Dividend yield. Framed as evidence of cash generation, never as income.
+    # "Loses to the cash rate" is said only where the bundle measured it
+    # (dy_mid_under_risk_free): true on the EGX, not in the US.
+    if pe_info_h and pe_info_h.get("dividend_yield") is not None:
+        dy = float(pe_info_h["dividend_yield"])
+        if dy >= dy_extreme:
+            signals.append({"type": "dividend_yield_extreme", "severity": "warning", "symbol": symbol,
+                "message": f"{symbol} yields {dy:.1f}% — check before counting on it.",
+                "explanation": "A yield this high is usually a one-off special dividend, or it only looks high because the share price collapsed. Confirm the payout recurs before treating it as a reason to hold.",
+                "learn_concept": "dividend_yield"})
+        elif dy >= dy_solid:
+            if fund.dy_mid_under_risk_free:
+                rate = "policy rate" if fund.label == "EGX" else "T-bill rate"
+                why = (f"Read this as evidence the company generates real cash and returns it, not as income: "
+                       f"even this yield loses to the ~{risk_free_rate_pct:.0f}% {rate}. ")
+            else:
+                why = "Read this as evidence the company generates real cash and returns it. "
+            signals.append({"type": "dividend_yield_solid", "severity": "info", "symbol": symbol,
+                "message": f"{symbol} yields {dy:.1f}% — an above-median {fund.label} payer.",
+                "explanation": why + "It is a quality marker, not a reason to buy on its own.",
+                "learn_concept": "dividend_yield"})
+    return signals
 
 
 def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
@@ -907,55 +982,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                     "explanation": "Thin liquidity means wider bid/ask spreads and difficulty exiting the position quickly. A beginner should keep position sizes small here.",
                     "learn_concept": "liquidity"})
 
-            # P/E signals — only fired when the EGX P/E scrape has a row for the symbol.
-            # Loss-making comes from diluted EPS: the fundamentals feed reports
-            # a NULL P/E for loss-makers, never a negative one, so the old
-            # `pe < 0` branch could never fire.
-            if pe_info_h and pe_info_h.get("loss_making"):
-                signals.append({"type": "pe_loss_making", "severity": "warning", "symbol": symbol,
-                    "message": f"{symbol} is loss-making over the last twelve months.",
-                    "explanation": "The company isn't profitable right now, so earnings-based valuation doesn't apply — lean on trend, relative strength, and macro instead.",
-                    "learn_concept": "pe_ratio"})
-
-            # Bands match score_quality's, which are centred on the EGX median
-            # P/E of ~12 rather than a developed-market idea of cheap. That
-            # median says nothing about another market's P/E, so the bands and
-            # their "versus the EGX median" copy are EG-only.
-            if (market.code == EG.code and pe_info_h
-                    and pe_info_h.get("pe_ratio") is not None):
-                pe = float(pe_info_h["pe_ratio"])
-                if pe < 3:
-                    signals.append({"type": "pe_implausibly_low", "severity": "warning", "symbol": symbol,
-                        "message": f"{symbol} P/E is {pe:.1f} — implausibly low, not a bargain.",
-                        "explanation": "A P/E under 3 on the EGX almost always means the earnings were one-off, or the share price has already collapsed. Check the last results before treating this as cheap.",
-                        "learn_concept": "pe_ratio"})
-                elif pe < 8:
-                    signals.append({"type": "pe_undervalued", "severity": "opportunity", "symbol": symbol,
-                        "message": f"{symbol} P/E is {pe:.1f} — cheap versus the EGX median of ~12.",
-                        "explanation": "A low P/E can indicate value, but it can also mean the market expects earnings to fall. Always combine with trend and relative strength before acting.",
-                        "learn_concept": "pe_ratio"})
-                elif pe >= 25:
-                    signals.append({"type": "pe_overvalued", "severity": "warning", "symbol": symbol,
-                        "message": f"{symbol} P/E is {pe:.1f} — expensive versus the EGX median of ~12.",
-                        "explanation": "A high P/E means the market is paying a lot for each EGP of current earnings. Only justified by strong, confirmed growth expectations.",
-                        "learn_concept": "pe_ratio"})
-
-            # Dividend yield. Framed as evidence of cash generation, never as
-            # income — no EGX yield competes with the policy rate.
-            if pe_info_h and pe_info_h.get("dividend_yield") is not None:
-                dy = float(pe_info_h["dividend_yield"])
-                if dy >= 15:
-                    signals.append({"type": "dividend_yield_extreme", "severity": "warning", "symbol": symbol,
-                        "message": f"{symbol} yields {dy:.1f}% — check before counting on it.",
-                        "explanation": "A yield this high is usually a one-off special dividend, or it only looks high because the share price collapsed. Confirm the payout recurs before treating it as a reason to hold.",
-                        "learn_concept": "dividend_yield"})
-                elif dy >= 4 and market.code == EG.code:
-                    # EG-only: "above-median" and "loses to the policy rate"
-                    # are EGX facts, and neither holds for another market.
-                    signals.append({"type": "dividend_yield_solid", "severity": "info", "symbol": symbol,
-                        "message": f"{symbol} yields {dy:.1f}% — an above-median EGX payer.",
-                        "explanation": f"Read this as evidence the company generates real cash and returns it, not as income: even this yield loses to the ~{risk_free_rate_pct:.0f}% policy rate. It is a quality marker, not a reason to buy on its own.",
-                        "learn_concept": "dividend_yield"})
+            signals.extend(fundamental_signals(symbol, pe_info_h, market, risk_free_rate_pct))
 
         except Exception as e:
             # See above — the id keeps the Sell action reachable on error rows.
