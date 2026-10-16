@@ -106,6 +106,7 @@ BUNDLE = Calibration(
         # Deliberately non-monotonic: >=15% is a special dividend or a collapsed price.
         dy_bands=((2.0, 0), (4.0, 4), (8.0, 8), (15.0, 4), (math.inf, -8)),
         dy_mid_under_risk_free=True,
+        extreme_causes_measured=True,
     ),
     liquidity_tiers={
         "EGX30": (100_000, 500_000),

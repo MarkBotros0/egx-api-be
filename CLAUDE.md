@@ -267,6 +267,19 @@ Add a fact there, not as a literal.
   17.8 / 37.9 and 2.27 / 8.02, "the US median of ~24". "Loses to the cash rate"
   appears only when `dy_mid_under_risk_free`. EG text and thresholds are pinned
   literally in `tests/test_portfolio_fundamental_signals.py`.
+- **No overlap where a concept does not fit.** A concept built and measured
+  for one market is NOT shown on another — not even adapted. `pe_implausibly_low`
+  ("one-off earnings or a collapsed price") and `dividend_yield_extreme`
+  ("a special dividend or a collapsed price") were measured on EGX names
+  (MEGM) and gated by `FundamentalsCal.extreme_causes_measured` (EG only). On
+  US data (2026-10-16) the bottom P/E band (< 7.8) held Allstate, AT&T,
+  Honeywell, Comcast and the top yield band (≥ 8.02%) VICI, a REIT — so on US
+  neither signal exists, and a stock in those bands gets NO valuation signal
+  (it does not fall through to "cheap" or "above-median payer").
+  `score_quality`'s reason for those US bands states only the fact ("far below
+  the US median of ~24"). Concepts that fit both (relative to the market's own
+  median: cheap / expensive / above-median payer) stay on both. Never carry an
+  EG concept or empirical claim onto another market without measuring it there.
 - **Dividends.** Yahoo's code is a market fact (`MarketConfig.yahoo_suffix`,
   `yahoo_class_separator`): EG `COMI.CA`; US bare, class shares with a dash
   (`BRK.B` → `BRK-B`); rows are stored under our symbol and market.

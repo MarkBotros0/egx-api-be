@@ -79,7 +79,7 @@ def test_eg_thresholds_are_the_eg_bundle_boundaries():
 
 def test_us_pe_signals_use_the_us_boundaries():
     lo, cheap, dear = US_FUND.pe_bands[0][0], US_FUND.pe_bands[1][0], US_FUND.pe_bands[3][0]
-    assert _types({"pe_ratio": lo - 0.01}) == ["pe_implausibly_low"]
+    assert _types({"pe_ratio": lo - 0.01}) == []      # EG-only concept
     assert _types({"pe_ratio": lo}) == ["pe_undervalued"]
     assert _types({"pe_ratio": cheap - 0.01}) == ["pe_undervalued"]
     assert _types({"pe_ratio": cheap}) == []
@@ -95,7 +95,7 @@ def test_us_dividend_signals_use_the_us_boundaries():
     assert _types({"dividend_yield": solid - 0.01}) == []
     assert _types({"dividend_yield": solid}) == ["dividend_yield_solid"]
     assert _types({"dividend_yield": extreme - 0.01}) == ["dividend_yield_solid"]
-    assert _types({"dividend_yield": extreme}) == ["dividend_yield_extreme"]
+    assert _types({"dividend_yield": extreme}) == []    # EG-only concept
 
 
 def test_us_copy_names_the_us_median_and_its_currency():
@@ -133,3 +133,57 @@ def test_signal_copy_is_condition_not_an_instruction(info):
         for s in fundamental_signals("X", info, m, 4.2):
             text = f"{s['message']} {s['explanation']}".lower()
             assert not re.search(r"\b(sell|strong buy)\b", text), text
+
+
+# ---------------------------------------------------------------------------
+# Accuracy: the EG-measured causes are not asserted for US
+# ---------------------------------------------------------------------------
+
+# Real US names in the extreme bands on 2026-10-16 (pe_data, US): healthy large
+# caps, and a REIT whose high yield is structural.
+US_LOW_PE = [("ALL", 4.8), ("T", 7.77), ("HON", 7.78), ("CMCSA", 7.05)]
+
+
+@pytest.mark.parametrize("symbol, pe", US_LOW_PE)
+def test_eg_only_low_pe_concept_does_not_exist_on_us(symbol, pe):
+    """No overlap: an EG-measured concept is absent on US, not adapted, and the
+    stock does not fall through to 'cheap versus the US median'."""
+    assert fundamental_signals(symbol, {"pe_ratio": pe}, US, 4.2) == []
+
+
+def test_eg_only_extreme_yield_concept_does_not_exist_on_us():
+    assert fundamental_signals("VICI", {"dividend_yield": 8.02}, US, 4.2) == []
+    assert fundamental_signals("X", {"dividend_yield": 30.0}, US, 4.2) == []
+
+
+def test_us_keeps_the_concepts_that_fit_it():
+    types = lambda info: [s["type"] for s in fundamental_signals("X", info, US, 4.2)]
+    assert types({"pe_ratio": US_FUND.pe_bands[0][0]}) == ["pe_undervalued"]
+    assert types({"pe_ratio": US_FUND.pe_bands[3][0]}) == ["pe_overvalued"]
+    assert types({"dividend_yield": US_FUND.dy_bands[1][0]}) == ["dividend_yield_solid"]
+
+
+def test_only_eg_asserts_the_extreme_band_causes():
+    assert EG_FUND.extreme_causes_measured is True
+    assert US_FUND.extreme_causes_measured is False
+
+
+def test_us_score_reasons_make_no_unmeasured_cause_claim():
+    from app.core.composite import score_quality
+    _, low = score_quality(None, None, None, pe_ratio=4.8, fundamentals=US_FUND)
+    _, high = score_quality(None, None, None, dividend_yield=9.1, fundamentals=US_FUND)
+    text = " ".join(low + high)
+    for claim in ("implausibly low", "typically a special dividend", "collapsed", "EGX"):
+        assert claim not in text, (claim, text)
+    assert "P/E 4.8 — far below the US median of ~24" in low
+    assert "Very high yield (DY 9.1%) — far above the US median of ~2.0%" in high
+    assert "one-off" not in text and "recurs" not in text
+
+
+def test_eg_score_reasons_keep_their_measured_wording():
+    from app.core.composite import score_quality
+    _, low = score_quality(None, None, None, pe_ratio=0.7, fundamentals=EG_FUND)
+    _, high = score_quality(None, None, None, dividend_yield=42.55, fundamentals=EG_FUND)
+    assert "P/E 0.7 — implausibly low; check the earnings are recurring" in low
+    assert ("Extreme yield (DY 42.5%) — typically a special dividend or a "
+            "collapsed share price, not steady income") in high

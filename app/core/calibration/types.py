@@ -108,6 +108,13 @@ class FundamentalsCal:
     dy_median: float
     dy_bands: tuple
     dy_mid_under_risk_free: bool  # the +8 yield band's upper bound sits below the market's cash rate
+    # True only where the CAUSES behind the extreme bands were checked against
+    # the market's own names: bottom P/E band = one-off earnings or a collapsed
+    # price, top yield band = a special dividend or a collapsed price. Measured
+    # on the EGX (MEGM: P/E 0.7, 42.55% yield). False everywhere else — the US
+    # bottom P/E band is Allstate, AT&T, Honeywell; its top yield band a REIT —
+    # so copy states the distance from the median and the causes as possibilities.
+    extreme_causes_measured: bool = False
 
 
 @dataclass(frozen=True)

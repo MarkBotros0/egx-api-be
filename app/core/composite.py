@@ -641,8 +641,11 @@ def score_quality(multi_timeframe: Optional[dict],
 def _pe_reason(i: int, pe: float, fund: FundamentalsCal, calibrated: bool) -> str:
     median = f"the {fund.label} median"
     if i == 0:
-        # Not a bargain — earnings non-recurring or the price collapsed.
-        return f"P/E {pe:.1f} — implausibly low; check the earnings are recurring"
+        if fund.extreme_causes_measured:
+            # Not a bargain — earnings non-recurring or the price collapsed.
+            return f"P/E {pe:.1f} — implausibly low; check the earnings are recurring"
+        # EG's "implausibly low" is an EGX finding; elsewhere state the fact only.
+        return f"P/E {pe:.1f} — far below {median} of ~{fund.pe_median:.0f}"
     if i == 1:
         return (f"Cheap versus {median} of ~{fund.pe_median:.0f} (P/E {pe:.1f})"
                 if calibrated else f"P/E {pe:.1f}")
@@ -669,8 +672,12 @@ def _dy_reason(i: int, dy: float, fund: FundamentalsCal, calibrated: bool) -> st
                 f"to shareholders{tail}")
     if i == 3:
         return f"Very high dividend (DY {dy:.1f}%) — check it recurs"
-    return (f"Extreme yield (DY {dy:.1f}%) — typically a special dividend or a "
-            "collapsed share price, not steady income")
+    if fund.extreme_causes_measured:
+        return (f"Extreme yield (DY {dy:.1f}%) — typically a special dividend or a "
+                "collapsed share price, not steady income")
+    # EG's "special dividend or collapsed price" is an EGX finding; fact only.
+    return (f"Very high yield (DY {dy:.1f}%) — far above the {fund.label} median of "
+            f"~{fund.dy_median:.1f}%")
 
 
 def score_risk_adjusted(annualized_return_pct: Optional[float],

@@ -209,24 +209,27 @@ def fundamental_signals(symbol: str, pe_info_h, market: MarketConfig,
     # ~12"; US: its fitted boundaries and "the US median". Pinned by
     # tests/test_portfolio_fundamental_signals.py.
     fund = for_market(market).fundamentals
-    pe_floor = fund.pe_bands[0][0]       # below: one-off earnings or a collapsed price
+    pe_floor = fund.pe_bands[0][0]       # below: the bottom valuation band
     pe_cheap = fund.pe_bands[1][0]       # below: the top-scoring P/E band
     pe_dear = fund.pe_bands[3][0]        # at/above: the penalised bands
     dy_solid = fund.dy_bands[1][0]       # at/above: above-median payer
-    dy_extreme = fund.dy_bands[3][0]     # at/above: special dividend or collapsed price
+    dy_extreme = fund.dy_bands[3][0]     # at/above: the top yield band
     median = f"the {fund.label} median of ~{fund.pe_median:.0f}"
-    where = "on the EGX" if fund.label == "EGX" else f"among {fund.label} stocks"
+    # `pe_implausibly_low` and `dividend_yield_extreme` are EG concepts: their
+    # causes were measured on EGX names (FundamentalsCal.extreme_causes_measured).
+    # A market where they were not measured gets NEITHER signal — not an
+    # adapted version — and a stock in those bands gets no valuation signal at
+    # all (it must not fall through to "cheap" or "above-median payer").
+    eg_measured = fund.extreme_causes_measured
 
     if pe_info_h and pe_info_h.get("pe_ratio") is not None:
         pe = float(pe_info_h["pe_ratio"])
         if pe < pe_floor:
-            signals.append({"type": "pe_implausibly_low", "severity": "warning", "symbol": symbol,
-                "message": f"{symbol} P/E is {pe:.1f} — implausibly low, not a bargain.",
-                "explanation": (f"A P/E under {pe_floor:g} {where} almost always means"
-                                if fund.label == "EGX" else
-                                f"A P/E under {pe_floor:g} is the bottom valuation band {where}, and usually means")
-                               + " the earnings were one-off, or the share price has already collapsed. Check the last results before treating this as cheap.",
-                "learn_concept": "pe_ratio"})
+            if eg_measured:
+                signals.append({"type": "pe_implausibly_low", "severity": "warning", "symbol": symbol,
+                    "message": f"{symbol} P/E is {pe:.1f} — implausibly low, not a bargain.",
+                    "explanation": f"A P/E under {pe_floor:g} on the EGX almost always means the earnings were one-off, or the share price has already collapsed. Check the last results before treating this as cheap.",
+                    "learn_concept": "pe_ratio"})
         elif pe < pe_cheap:
             signals.append({"type": "pe_undervalued", "severity": "opportunity", "symbol": symbol,
                 "message": f"{symbol} P/E is {pe:.1f} — cheap versus {median}.",
@@ -244,10 +247,11 @@ def fundamental_signals(symbol: str, pe_info_h, market: MarketConfig,
     if pe_info_h and pe_info_h.get("dividend_yield") is not None:
         dy = float(pe_info_h["dividend_yield"])
         if dy >= dy_extreme:
-            signals.append({"type": "dividend_yield_extreme", "severity": "warning", "symbol": symbol,
-                "message": f"{symbol} yields {dy:.1f}% — check before counting on it.",
-                "explanation": "A yield this high is usually a one-off special dividend, or it only looks high because the share price collapsed. Confirm the payout recurs before treating it as a reason to hold.",
-                "learn_concept": "dividend_yield"})
+            if eg_measured:
+                signals.append({"type": "dividend_yield_extreme", "severity": "warning", "symbol": symbol,
+                    "message": f"{symbol} yields {dy:.1f}% — check before counting on it.",
+                    "explanation": "A yield this high is usually a one-off special dividend, or it only looks high because the share price collapsed. Confirm the payout recurs before treating it as a reason to hold.",
+                    "learn_concept": "dividend_yield"})
         elif dy >= dy_solid:
             if fund.dy_mid_under_risk_free:
                 rate = "policy rate" if fund.label == "EGX" else "T-bill rate"

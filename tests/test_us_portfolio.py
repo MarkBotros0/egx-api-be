@@ -216,10 +216,11 @@ def test_us_portfolio_analysis_has_no_eg_wording(client, monkeypatch, fake_feed,
     assert body["macro"]["benchmark"]["label"] == "S&P 500"
     assert body["macro"]["scoring"] is False
     assert all(not h.get("macro_adjustment") for h in body["holdings"])
-    # Valuation signals run on the US bundle's boundaries (P/E 6.2 is under
-    # the US floor of 7.8; a 3.1% yield is an above-median US payer).
-    assert {"pe_implausibly_low", "dividend_yield_solid"} <= types
-    assert "pe_undervalued" not in types
+    # Valuation signals run on the US bundle's boundaries. P/E 6.2 is under the
+    # US floor of 7.8, where EG's "implausibly low" concept does not exist on
+    # US — so no P/E signal at all; a 3.1% yield is an above-median US payer.
+    assert "dividend_yield_solid" in types
+    assert not types & {"pe_implausibly_low", "pe_undervalued", "dividend_yield_extreme"}
     # The branches whose EG copy names the EGX actually fired, on US bands and
     # US wording (US is calibrated since sub-project 3).
     reasons = _reasons(body["holdings"][0]["composite_breakdown"])
