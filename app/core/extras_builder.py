@@ -177,7 +177,7 @@ def build_composite_extras(
       benchmark_label:     The market's benchmark name, for the relative
                            strength reasons only (None reads as EGX30).
       score_calibrated:    MarketConfig.score_calibrated. Copy only: False
-                           drops the EGX-median and EGX dividend-drag wording
+                           drops the market-median and dividend-drag wording
                            from the reasons. Never changes a score.
       market_code:         the market's code. Selects the liquidity tiers and,
                            via extras["market"], the valuation bands
@@ -191,14 +191,16 @@ def build_composite_extras(
                            the class of divergence this module exists to
                            prevent. Only flip it if the portfolio endpoint
                            starts brushing the 30 s Vercel ceiling.
-      risk_free_rate_pct:  T-bill rate as a PERCENT (e.g. 25.0).
+      risk_free_rate_pct:  T-bill rate as a PERCENT (e.g. 19.0).
       pe_ratio:            Trailing P/E, or None when unknown.
       dividend_yield:      PERCENT (e.g. 3.12). 0.0 means "pays nothing" —
                            real data, distinct from None ("unknown").
       loss_making:         From diluted EPS < 0, or None when unknown.
-      index_membership:    "EGX30"/"EGX70"/"EGX100"/"NILEX" or None. Selects
-                           which volume floors the liquidity check uses; None
-                           falls back to EGX100 inside liquidity_score.
+      index_membership:    The liquidity tier: "EGX30"/"EGX70"/"EGX100"/"NILEX"
+                           for EG, "US large-cap"/"US" for US, or None. Selects
+                           which of the market bundle's volume floors apply;
+                           None or unknown falls back to the bundle's default
+                           tier (EG: EGX100; US: "US").
       divergence_lookback: Bars scanned for divergences.
 
     Returns:

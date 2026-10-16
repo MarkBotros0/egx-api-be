@@ -195,24 +195,32 @@ Add a fact there, not as a literal.
   then fits:
   - liquidity floors: turnover = p5 of 60-day mean dollar turnover, rounded
     down to 1/2/5×10^k; price 5 USD;
-  - tiers: "US large-cap" (any index member) at the percentiles EGX30's floors
-    sit at in EGX30's volume distribution (needs an EG cache:
-    `backtest --market EG --fetch-only`); "US" (other listed) = those floors ×
-    EG's NILEX/EGX30 ratio, because the panel has no non-member history —
-    scaled exactly, never re-rounded (`other_listed_tier`): re-rounding both
-    down collapsed 25k/40k onto 20k/20k on the first fit, and a collapsed tier
-    is now refused;
+  - tiers: member share floors at the percentiles EGX30's floors sit at in
+    EGX30's volume distribution (needs an EG cache:
+    `backtest --market EG --fetch-only`) — used ONLY to derive "US" (other
+    listed) = those floors × EG's NILEX/EGX30 ratio, because the panel has no
+    non-member history. Scaled exactly, never re-rounded (`other_listed_tier`):
+    re-rounding collapsed 25k/40k onto 20k/20k on the first fit, and a
+    collapsed tier is now refused. **"US large-cap" (any index member) has NO
+    share-count floor, (0, 0):** the fitted 500k/1M called 18 S&P members
+    "thin, hard to exit" — AZO at ~$1B/day — because a share count means
+    nothing across $5–$6,000 prices. Index inclusion already screens for
+    liquidity; the dead-session and calendar tests still apply to members;
   - valuation bands: each EG boundary's quantile in EG's current `pe_data`,
     read off the market's — so the median stock lands in the band EG's median
     does (the script refuses otherwise, and refuses on <50 rows);
-  - forecast, regime, risk exactly as for EG.
+  - forecast, regime, risk exactly as for EG, plus the composite-score IC
+    on the market's own panel (listed under "what failed" when |t| < 3: US
+    IC −0.010 at 21 days, t −0.87 — the same finding as EG).
   It refuses (exit 1, nothing written) when any section lacks data.
   **Survivorship:** the universe is today's members; the label says so and the
   Calibration screen shows it.
 - **The regime card is hidden when rho ≤ 0** (`RegimeCal.show`):
   `/api/market_regime` answers `{band: null, hidden: true}` — as it also does
   while a market's bundle is `provisional` (another market's fit standing in;
-  `/api/calibration` answers 400 then). A weak but
+  `/api/calibration` answers 400 then). `/api/markets` carries
+  `regime_shown` (false in both cases) so a client skips the fetch and its
+  skeleton. A weak but
   right-signed association ships as context, as EG's does. US averages SPX
   members from `market_universe`; an empty universe is `stale`, not a 500.
 - **Copy.** US reasons say "the US median", "a US large-cap name", "T-bill
@@ -232,7 +240,7 @@ Add a fact there, not as a literal.
 | P/E band uppers (EG points +3/+12/+4/−2/−8/−14) | 7.8, 17.8, 29.5, 37.9, 47.1; median 23.7 |
 | yield band uppers (EG points 0/+4/+8/+4/−8) | 1.27, 2.27, 4.65, 8.02; median 1.97 |
 | liquidity floors | turnover ≥ 100,000,000 USD/day, price > 5.0 USD |
-| liquidity tiers (thin / low, shares/day) | US large-cap: 500,000 / 1,000,000; US: 25,000 / 40,000 |
+| liquidity tiers (thin / low, shares/day) | US large-cap: no share floor (0 / 0); US: 25,000 / 40,000 |
 
 **Deploying the market migration.** Deploy the backend in ONE step, not as a
 rolling mix: once the new code has migrated the keys, an old instance's
@@ -2342,7 +2350,7 @@ container, putting every dashboard card behind a ticker-list fetch. Unknown
 symbols return `None`, which `liquidity_score` maps to the EGX100 floors (the
 behaviour every symbol had before membership was plumbed through).
 
-Per-tier floors live in the bundle (Calibration.liquidity_tiers); _INDEX_LIQ_FLOORS is gone. US symbols are "US large-cap" when market_universe lists them in an index, else "US" (also without a db or when the universe is unreadable).
+Per-tier floors live in the bundle (Calibration.liquidity_tiers); _INDEX_LIQ_FLOORS is gone. US symbols are "US large-cap" when market_universe lists them in an index, else "US" (also without a db or when the universe is unreadable). The lookup is `universe.index_members`: cached and READ-ONLY — it never refreshes the table, so the scoring path never reaches the scanner.
 
 #### `data/egx_tickers.json` is hand-maintained and is DRIFTING — verify before trusting it
 

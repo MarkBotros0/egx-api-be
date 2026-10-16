@@ -537,18 +537,20 @@ def score_quality(multi_timeframe: Optional[dict],
       - current_drawdown_pct: FRACTION, not a percent — negative, e.g. -0.15
                               for -15% below the 52-week high. All callers
                               build it via `(price / peak) - 1`.
-      - pe_ratio: trailing P/E. Bands are centred on the EGX MEDIAN (~12.4),
-                  not on a developed-market notion of "cheap" — see the band
-                  comment below. None → skipped.
+      - pe_ratio: trailing P/E. Bands are centred on the MARKET's median
+                  (EGX ~12.4, US ~24), not on a developed-market notion of
+                  "cheap" — see the band comment below. None → skipped.
       - dividend_yield: PERCENT (e.g. 3.12). 0.0 means "pays nothing", which is
                         not a defect; None means unknown. Both skip the band.
       - loss_making: from diluted EPS < 0. Separate from pe_ratio because the
                      feed reports null, never a negative P/E, for loss-makers.
       - calibrated: False for a market whose bands were never fitted
                     (MarketConfig.score_calibrated). The score is unchanged;
-                    reasons that compare against the EGX median are replaced
-                    by the bare figure, never relabelled as another median.
-      - fundamentals: the market's FundamentalsCal (boundaries + median label). None reads as EG. Points are the same on every market; only the boundaries move.
+                    reasons that compare against the market median are
+                    replaced by the bare figure.
+      - fundamentals: the market's FundamentalsCal (boundaries + median
+                      label). None reads as EG. Points are the same on every
+                      market; only the boundaries move.
     """
     if (multi_timeframe is None and trend_consistency is None
             and current_drawdown_pct is None and pe_ratio is None
