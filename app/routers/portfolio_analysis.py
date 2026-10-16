@@ -965,15 +965,33 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
             # Relative strength — leader or laggard vs the benchmark over 30 days
             if rs_h is not None and rs_h.get("alpha_pct") is not None:
                 alpha = rs_h["alpha_pct"]
-                if rs_h.get("leader"):
+                # "Leaders keep leading" is a momentum claim. Measured on US
+                # (2026-10-16 walk-forward, 513 symbols, 221 dates) the
+                # relative-strength category's IC is -0.017 at 21 days —
+                # wrong-signed, as on EG (-0.036). So off EG the signal is an
+                # `info` that states the 30-day fact and what testing found,
+                # never "keep leading" or "switch to a leader". EG keeps its
+                # copy pending a decision on EG output.
+                eg_copy = market.code == EG.code
+                if rs_h.get("leader") and eg_copy:
                     signals.append({"type": "relative_strength_leader", "severity": "opportunity", "symbol": symbol,
                         "message": f"{symbol} is outperforming {bench} by {alpha:+.1f}% over 30 days — a market leader.",
                         "explanation": "Stocks that lead the index tend to keep leading in the short-term. Institutional money is favouring this name.",
                         "learn_concept": "relative_strength"})
-                elif rs_h.get("laggard"):
+                elif rs_h.get("laggard") and eg_copy:
                     signals.append({"type": "relative_strength_laggard", "severity": "warning", "symbol": symbol,
                         "message": f"{symbol} is lagging {bench} by {abs(alpha):.1f}% over 30 days.",
                         "explanation": "Persistent laggards drag down a portfolio. Consider switching to a leader unless your thesis is long-term and patient.",
+                        "learn_concept": "relative_strength"})
+                elif rs_h.get("leader"):
+                    signals.append({"type": "relative_strength_leader", "severity": "info", "symbol": symbol,
+                        "message": f"{symbol} has beaten the {bench} by {alpha:+.1f}% over the last 30 days.",
+                        "explanation": f"A description of the past month only. Tested on {market.short_name} stocks, recent 30-day leaders did not go on to beat laggards, so this says nothing about what comes next.",
+                        "learn_concept": "relative_strength"})
+                elif rs_h.get("laggard"):
+                    signals.append({"type": "relative_strength_laggard", "severity": "info", "symbol": symbol,
+                        "message": f"{symbol} has trailed the {bench} by {abs(alpha):.1f}% over the last 30 days.",
+                        "explanation": f"A description of the past month only. Tested on {market.short_name} stocks, recent 30-day laggards did not go on to trail leaders, so this is not a reason to sell or switch.",
                         "learn_concept": "relative_strength"})
 
             # MFI extremes

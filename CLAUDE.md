@@ -299,6 +299,26 @@ Add a fact there, not as a literal.
   - `lib/markets.ts` `US_FALLBACK` / `fallbackMarket`: before `/api/markets`
     answers, a stored or deep-linked US market reads as US, never as EG; once
     the list is in, it is authoritative (US not enabled → EG).
+  - **Relative-strength signals on US are facts, not momentum claims.** A
+    US walk-forward (2026-10-16, 513 symbols, 221 dates, this branch's code)
+    measured the relative-strength category at IC **−0.017** at 21 days —
+    wrong-signed, like EG's −0.036. So on US `relative_strength_leader` /
+    `_laggard` are `info`, state the 30-day fact and that leaders did not go
+    on to beat laggards; no "leaders keep leading", no "switch to a leader".
+    EG still carries that copy (it contradicts EG's own measurement too) —
+    left for an explicit decision on EG output. Same run: composite IC
+    −0.0109 (t −0.90), matching the bundle's −0.010; trend −0.014,
+    risk-adjusted +0.001.
+  - **Fixed thresholds checked and kept** (measured how often each fires on
+    each market's own panel, 2013/14–2026, every ~6 months per symbol): the
+    risk-adjusted excess-return / volatility / ATR bands, relative-strength
+    alpha bands, drawdown bands and the dead-session / calendar tests all
+    fire at a sensible rate on both markets — they are factual levels
+    ("volatility above 60%"), not EG findings. Levels land differently because
+    EG moves ~1.5x as much (median annual volatility 42.8% vs 28.9%; ATR > 5%
+    of price 28.9% vs 8.7%; ≥ 30% below the 52-week high 31.3% vs 13.0%). The
+    liquidity tests flag 0.1% of US index-member observations (EG 30.9%), so
+    they mislabel no US large-cap.
 - **Dividends.** Yahoo's code is a market fact (`MarketConfig.yahoo_suffix`,
   `yahoo_class_separator`): EG `COMI.CA`; US bare, class shares with a dash
   (`BRK.B` → `BRK-B`); rows are stored under our symbol and market.

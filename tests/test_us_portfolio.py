@@ -211,6 +211,12 @@ def test_us_portfolio_analysis_has_no_eg_wording(client, monkeypatch, fake_feed,
     assert "S&P 500" in text
     types = {s["type"] for s in body["signals"]}
     assert {"stop_breached", "target_hit", "relative_strength_leader"} <= types
+    # Measured wrong-signed on US (IC -0.017): a fact about the past month, no
+    # "leaders keep leading" claim and not an opportunity.
+    [rs] = [x for x in body["signals"] if x["type"] == "relative_strength_leader"]
+    assert rs["severity"] == "info"
+    assert "keep leading" not in rs["explanation"] and "Institutional" not in rs["explanation"]
+    assert "did not go on to beat laggards" in rs["explanation"]
     assert "macro_egx30" not in types
     # The macro card is the display-only US reading; scores are unmodulated.
     assert body["macro"]["benchmark"]["label"] == "S&P 500"
