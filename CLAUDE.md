@@ -49,7 +49,9 @@ Add a fact there, not as a literal.
 
 - `?market=EG|US` on every market-data route, resolved by the `market_param`
   dependency. **Absent means EG**, so old clients are unaffected. Unknown or
-  not-enabled codes are 400. Watchlist, portfolio and dividend POST bodies take
+  not-enabled codes are 400, except on the cron/refresh routes (universe,
+  risk_snapshot, pe refresh), which accept any registered market so a market can
+  be filled before it is enabled. Watchlist, portfolio and dividend POST bodies take
   an optional `market` that beats the query one; a sale takes its holding's.
 - `ENABLED_MARKETS` (default `EG`) gates which codes the API accepts. US is fully
   wired (sub-project 2) but refused until the env var lists it (`EG,US`).
@@ -1657,8 +1659,10 @@ Header: X-Cron-Secret: <CRON_SECRET>
 
 One fixed URL on an interval and the universe converges. Nothing is stored,
 nothing can desynchronise, and a symbol that fails is retried on the very next
-call because it stays stale. Watch `stale_remaining`: it should fall to 0 within
-a pass and stay there. Passing `cursor` explicitly walks fixed slices instead —
+call because it stays stale. `stale_remaining` counts every universe symbol
+not measured by THIS call, so it only reaches 0 when one call covers the whole
+universe; to judge a pass, check that every symbol has a `risk_snapshot` row
+measured today. Passing `cursor` explicitly walks fixed slices instead —
 useful for a controlled manual sweep, and it stores no state either.
 
 Design rules, all load-bearing:
@@ -1761,7 +1765,7 @@ Simulated against the real `select_stalest` and the real universe (166 symbols,
 
 **Two hours at `?limit=6`** is the supported setting: 24 x 6 = 144 slots against 82
 healthy symbols, 1.8x headroom, so a cold start or a missed fire still completes
-the pass. Under-provision it and `stale_remaining` never reaches 0, and `/api/risk`
+the pass. Under-provision it and some symbols never get today's row, and `/api/risk`
 permanently ranks a partly-yesterday universe.
 
 `0-4` is Sun–Thu (0 = Sunday), matching the EGX week. Pin the job to

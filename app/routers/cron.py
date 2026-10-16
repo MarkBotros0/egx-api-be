@@ -102,7 +102,7 @@ MAX_CHUNK = 60
 # one symbol per call. Measured over 15 consecutive local calls, throughput fell
 # from a clean 6/6 to 4-5 with deadline_hit true on most of them — which would
 # have quietly cut the daily coverage headroom from 1.8x to 1.4x and left
-# `stale_remaining` never reaching 0.
+# symbols without a row for the day.
 #
 # 20s keeps the worst case (13s of work plus one 7s refusal) inside Vercel's
 # 30s with room for cold-start jitter and response serialization.
@@ -492,9 +492,9 @@ def risk_snapshot(
         alerts = {"skipped": "market"}
 
     # How much of the universe is still carrying a measurement from before this
-    # run started. This is the number to watch on the scheduler: it should fall
-    # to 0 within a pass and stay there. If it never reaches 0, some symbols are
-    # failing every time and `failed` names them.
+    # run started. It reaches 0 only when one call covers the whole universe; a
+    # chunked pass is judged by every symbol having a row measured today, and
+    # symbols that keep failing are named in `failed`.
     after, after_failures = _snapshot_state(db, market.code)   # one query, not one per symbol
     stale_remaining = sum(1 for s in universe if (after.get(s) or "") < now)
     # Symbols the feed keeps refusing. Expected to be large on this market:
