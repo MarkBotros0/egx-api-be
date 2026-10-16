@@ -24,7 +24,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.core.auth import get_current_user
 from app.core.db import get_db
 from app.core.markets import EG, MarketConfig, market_param
-from app.core.risk_grade import RISK_CALIBRATION, grade_universe
+from app.core.calibration import for_market
+from app.core.risk_grade import grade_universe
 
 router = APIRouter()
 
@@ -57,6 +58,7 @@ def get_risk(symbol: Optional[str] = Query(default=None),
     An untradeable symbol is still returned, with its raw sigma and a null
     band, rather than being given a rank it has not earned.
     """
+    cal = for_market(market)
     try:
         db = get_db()
         rows = _rows(db, market.code)
@@ -66,12 +68,12 @@ def get_risk(symbol: Optional[str] = Query(default=None),
     if not rows:
         return {"market": market.code, "currency": market.currency,
                 "data": [], "n_symbols": 0, "coverage": 0,
-                "calibration": RISK_CALIBRATION,
+                "calibration": cal.risk.payload(),
                 "note": "No snapshot yet — the scheduled risk_snapshot job has "
                         "not run."}
 
     tradeable = [r for r in rows if r.get("tradeable")]
-    graded = {r["symbol"]: r for r in grade_universe(tradeable)}
+    graded = {r["symbol"]: r for r in grade_universe(tradeable, cal.risk.quintiles)}
     for r in rows:
         if r["symbol"] not in graded:
             r["pct_rank"] = r["quintile"] = r["band"] = None
@@ -95,7 +97,7 @@ def get_risk(symbol: Optional[str] = Query(default=None),
         # floors are not calibrated yet. (Was `liquidity_floor_egp`; no web or
         # mobile code read it.)
         "liquidity_floor": market.liquid_min_turnover,
-        "calibration": RISK_CALIBRATION,
+        "calibration": cal.risk.payload(),
     }
 
     if symbol:

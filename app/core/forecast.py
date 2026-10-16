@@ -62,55 +62,11 @@ from typing import Optional
 
 import pandas as pd
 
-# ---------------------------------------------------------------------------
-# Fitted calibration. Regenerate with:  python -m scripts.calibrate
-# ---------------------------------------------------------------------------
+from app.core.calibration import Calibration
 
-CALIBRATION = {
-    "fitted_at": "2026-09-02",
-    "n_observations": 34749,
-    # ISIN-coded rows (EGS30AJ1C016, EGS48271C018-EGP, ...) are excluded because
-    # they are not common stocks. The exclusion matches on LENGTH, not on the
-    # "EGS" prefix — EGSA is a real four-character EGX ticker and a prefix rule
-    # silently drops it.
-    "universe": "EGX common stocks with >=460 daily bars, ISIN-coded "
-                "instruments excluded",
-    "sigma_window": 400,      # matches INTERNAL_BARS_MIN, the window every
-                              # scoring path actually fetches
-    "fit_horizon_days": 60,
-    # SHARPNESS. Coverage alone is gameable — a band from zero to infinity
-    # covers 100% of outcomes and tells you nothing — so the width is reported
-    # beside it. Measured: the 90% band spans a median 88% of spot over 60 days
-    # (p25 72%, p75 110%). That is a wide range, and saying so is the point.
-    "band_width_pct_of_spot_median": 88,
-    "band_width_pct_of_spot_p25": 72,
-    "band_width_pct_of_spot_p75": 110,
-}
-
-# EGX's own |z| at each coverage level for a 60-day move, where
-# z = (P_t/P_0 - 1) / (sigma_daily * sqrt(t)). Gaussian equivalents in the
-# comment show how far this market is from the textbook.
-EGX_Z_CONE_60D = {
-    50: 0.600,   # gaussian 0.6745
-    80: 1.333,   # gaussian 1.2816
-    90: 1.999,   # gaussian 1.6449
-    95: 2.791,   # gaussian 1.9600
-}
-
-# What the +/-1-sigma band this module draws ACTUALLY covers, per horizon.
-# These replace the flat "68%" the UI used to print.
-#
-# TWO TABLES, BECAUSE THERE ARE TWO ESTIMATORS AND A COVERAGE FIGURE BELONGS TO
-# THE ONE IT WAS FITTED ON. `expected_move` uses EWMA where it can and falls
-# back to a trailing window on short histories; quoting one table for both would
-# be the same class of error as the 68% it replaced.
-ONE_SIGMA_COVERAGE_PCT = {
-    # EWMA(0.97), fitted over 34,282 observations. The default path.
-    "ewma": {"daily": 78.6, "weekly": 75.5, "monthly": 71.8},
-    # 400-bar trailing sigma, fitted over 34,749 observations. Used when a
-    # symbol has too little history to seed the recursion.
-    "trailing": {"daily": 79.0, "weekly": 76.3, "monthly": 73.0},
-}
+# The fitted numbers (z-cone, coverage tables, provenance) live in the market's
+# calibration bundle — app/core/calibration/<market>.py — and are passed in as
+# `cal`. EG's were fitted 2026-09-02; see CLAUDE.md *Forecast calibration*.
 
 # Bands the outcome cone returns, inner first. Two is enough to read a shape on
 # a phone; five was noise.
@@ -123,9 +79,11 @@ MIN_OBSERVATIONS = 20
 _HORIZON_BARS = {"daily": 1, "weekly": 5, "monthly": 22}
 
 
-def expected_move(returns: pd.Series) -> Optional[dict]:
+def expected_move(returns: pd.Series, cal: Calibration) -> Optional[dict]:
     """
     The 1-sigma band at daily / weekly / monthly scale, with its REAL coverage.
+
+    `cal` is the bundle of the market this stock trades in; its coverage tables belong to the sigma they were fitted on.
 
     SIGMA COMES FROM EWMA(0.97), NOT A FLAT WINDOW — and that split is measured,
     not assumed. `scripts/vol_backtest.py` over the full cached universe scores
@@ -173,23 +131,23 @@ def expected_move(returns: pd.Series) -> Optional[dict]:
     if not math.isfinite(sigma_daily) or sigma_daily <= 0:
         return None
 
-    coverage = ONE_SIGMA_COVERAGE_PCT[
+    coverage = cal.forecast.one_sigma_coverage[
         "ewma" if method == "ewma_0.97" else "trailing"
     ]
-    out = {"method": method, "calibration": CALIBRATION}
+    out = {"method": method, "calibration": cal.forecast.payload()}
     for name, bars in _HORIZON_BARS.items():
         out[f"{name}_pct"] = round(sigma_daily * math.sqrt(bars) * 100.0, 2)
         out[f"{name}_coverage_pct"] = coverage[name]
     return out
 
 
-def outcome_band(returns: pd.Series, current_price: float,
+def outcome_band(returns: pd.Series, current_price: float, cal: Calibration,
                  days: int = 60) -> Optional[dict]:
     """
-    Calibrated range of where the price has historically ended up, in EGP.
+    Calibrated range of where the price has historically ended up, in the market's currency.
 
     Replaces `monte_carlo_forecast`. Same job, but the quantiles come from
-    EGX's measured return distribution instead of Gaussian draws, so the
+    the market's own measured return distribution instead of Gaussian draws, so the
     advertised coverage is the delivered coverage (90.0% measured against 90%
     nominal, versus 85.8% before).
 
@@ -214,7 +172,7 @@ def outcome_band(returns: pd.Series, current_price: float,
     # refitting this cone on EWMA measured 83.3% coverage against the trailing
     # window's 85.8% — worse. EWMA is an IGARCH: its multi-step forecast is flat
     # at today's level with no mean reversion, which is the wrong shape for a
-    # long band. EGX_Z_CONE_60D below was fitted on THIS sigma; changing the
+    # long band. the bundle's z_cone was fitted on THIS sigma; changing the
     # estimator without refitting the table would leave it describing a
     # different variable.
     sigma = float(rets.std())
@@ -223,7 +181,7 @@ def outcome_band(returns: pd.Series, current_price: float,
 
     bands = []
     for coverage in OUTCOME_BAND_COVERAGES:
-        z = EGX_Z_CONE_60D[coverage]
+        z = cal.forecast.z_cone[coverage]
         lo, hi = [], []
         for t in range(1, days + 1):
             spread = z * sigma * math.sqrt(t)
@@ -245,8 +203,8 @@ def outcome_band(returns: pd.Series, current_price: float,
     return {
         "days": days,
         "current_price": round(current_price, 2),
-        "method": "egx_calibrated_quantile",
-        "calibration": CALIBRATION,
+        "method": "calibrated_quantile",
+        "calibration": cal.forecast.payload(),
         "bands": bands,
         # The day-`days` values, i.e. the only ones the coverage claim covers.
         "endpoint": {

@@ -70,81 +70,33 @@ are not meaningfully different from each other — 68.5% against 68.9%.
 
 Note the base rate: the EGX rose substantially over this window in EGP terms,
 helped by repeated devaluations, so "weak" means flat rather than negative.
+
+The fitted values now live in app/core/calibration/<market>.py (RegimeCal).
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
-# Tercile cutoffs on the mean composite score, from 221 readings 2007-2026.
-REGIME_WEAK_MAX = 45.4
-REGIME_MIXED_MAX = 51.9
+from app.core.calibration import RegimeCal
 
 # Minimum stocks in the average before the reading means anything. The batch
 # scorer returns partial results when it hits its deadline, so coverage varies.
 MIN_SYMBOLS_FOR_REGIME = 15
 
 # Horizon the association was measured at. Do not relabel this: 21 and 126 days
-# were both tested and neither was significant — and on the honest statistic
-# neither is 63, so this is the least-weak horizon rather than a good one.
+# were both tested on EGX and neither was significant.
 REGIME_HORIZON_DAYS = 63
 
-# The association behind the bands, stated the way it survives scrutiny.
-# Regenerate with `python -m scripts.calibrate`; it prints all three
-# de-overlapped phases so a single lucky one cannot be quoted again.
-REGIME_ASSOCIATION_RHO = 0.162         # overlapping, all 221 readings
-REGIME_ASSOCIATION_T = 1.74            # Newey-West, lag 3 (the overlap depth)
-REGIME_ASSOCIATION_N = 221
-REGIME_ASSOCIATION_SIGNIFICANT = False  # 1.74 does not clear 1.96
-# What the three de-overlapped samplings actually give. Kept in the payload so
-# the UI can never present one of them as "the" number.
-REGIME_PHASE_RHOS = (0.309, 0.167, -0.006)
 
-_BANDS = {
-    "weak": {
-        "label": "Broadly weak",
-        "summary": (
-            "Most of the market is in poor technical condition. Historically "
-            "the next three months were a coin flip averaging about nothing."
-        ),
-        "hist_median_3m_pct": -0.03,
-        "hist_positive_rate": 0.50,
-        "observations": 74,
-    },
-    "mixed": {
-        "label": "Mixed",
-        "summary": (
-            "The market is in middling condition. Historically the next three "
-            "months were positive about two times in three."
-        ),
-        "hist_median_3m_pct": 5.42,
-        "hist_positive_rate": 0.685,
-        "observations": 73,
-    },
-    "broad": {
-        "label": "Broadly healthy",
-        "summary": (
-            "Most of the market is in good technical condition. Historically "
-            "the next three months were positive about seven times in ten — "
-            "though not meaningfully better than the Mixed band."
-        ),
-        "hist_median_3m_pct": 6.72,
-        "hist_positive_rate": 0.689,
-        "observations": 74,
-    },
-}
-
-
-def classify_regime(mean_score: Optional[float], n_symbols: int = 0) -> dict:
+def classify_regime(mean_score: Optional[float], n_symbols: int,
+                    regime: RegimeCal) -> dict:
     """
-    Turn the market-wide average composite into a condition reading.
-
-    Returns a dict carrying the band AND the historical record behind it, so
-    the UI never has to hardcode a claim — every number it shows comes from
-    here, where the measurement is documented.
+    Turn the market-wide average composite into a condition reading, using
+    the cutoffs and historical record of `regime` (the market's bundle).
 
     `band` is None when coverage is too thin to average meaningfully; callers
-    should render "not enough data" rather than a misleading middle reading.
+    render "not enough data" rather than a misleading middle reading.
     """
     if mean_score is None or n_symbols < MIN_SYMBOLS_FOR_REGIME:
         return {
@@ -159,31 +111,29 @@ def classify_regime(mean_score: Optional[float], n_symbols: int = 0) -> dict:
             "horizon_days": REGIME_HORIZON_DAYS,
         }
 
-    if mean_score < REGIME_WEAK_MAX:
+    if mean_score < regime.weak_max:
         key = "weak"
-    elif mean_score < REGIME_MIXED_MAX:
+    elif mean_score < regime.mixed_max:
         key = "mixed"
     else:
         key = "broad"
 
-    band = _BANDS[key]
+    band = regime.bands[key]
     return {
         "mean_score": round(mean_score, 1),
         "n_symbols": n_symbols,
         "band": key,
-        "label": band["label"],
-        "summary": band["summary"],
-        "hist_median_3m_pct": band["hist_median_3m_pct"],
-        "hist_positive_rate": band["hist_positive_rate"],
-        "observations": band["observations"],
+        "label": band.label,
+        "summary": band.summary,
+        "hist_median_3m_pct": band.median_3m_pct,
+        "hist_positive_rate": band.positive_rate,
+        "observations": band.observations,
         "horizon_days": REGIME_HORIZON_DAYS,
-        # Surfaced so the UI states the strength of the association rather than
-        # implying certainty. `association_significant` is False and the UI must
-        # honour it — this card is context, not a forecast. See the correction
-        # note in this module's docstring for why the old 0.318 was wrong.
-        "association_rho": REGIME_ASSOCIATION_RHO,
-        "association_t": REGIME_ASSOCIATION_T,
-        "association_n": REGIME_ASSOCIATION_N,
-        "association_significant": REGIME_ASSOCIATION_SIGNIFICANT,
-        "association_phase_rhos": list(REGIME_PHASE_RHOS),
+        # The strength of the association, stated so the UI never implies
+        # certainty. `association_significant` False must be honoured.
+        "association_rho": regime.rho,
+        "association_t": regime.t,
+        "association_n": regime.n,
+        "association_significant": regime.significant,
+        "association_phase_rhos": list(regime.phase_rhos),
     }

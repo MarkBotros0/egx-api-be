@@ -84,7 +84,7 @@ def get_dashboard(user: CurrentUser = Depends(get_current_user),
     # The per-stock risk band is a cross-sectional rank over the whole universe,
     # so it is stamped here in the orchestrator through the SAME grade_universe
     # GET /api/risk uses — a card's dot and its detail page cannot disagree.
-    attach_risk_bands(rows, cards)
+    attach_risk_bands(rows, cards, market.code)
 
     # Dividend fields joined from pe_data (one batch query) for the "Pays a
     # dividend" filter and the "Recently paid" sort. dividend_yield 0 means

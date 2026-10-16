@@ -25,6 +25,7 @@ from app.core.cache import get as cache_get, make_key, set as cache_set
 from app.core.markets import EG, MarketConfig, market_param
 from app.core.db import get_db
 from app.core.breadth import compute_breadth, describe as describe_breadth
+from app.core.calibration import for_market
 from app.core.regime import classify_regime
 from app.routers.analysis import read_cached_scores
 
@@ -80,7 +81,7 @@ def _last_stored_reading(market_code: str = EG.code) -> Optional[dict]:
         return None
     if not row:
         return None
-    reading = classify_regime(row[1], row[2])
+    reading = classify_regime(row[1], row[2], for_market(market_code).regime)
     reading["observed_at"] = row[0]
     return reading
 
@@ -130,7 +131,7 @@ def get_market_regime(interval: str = "Daily",
         scores = [float(v["score"]) for v in cached.values()]
         mean_score = sum(scores) / len(scores) if scores else None
 
-        reading = classify_regime(mean_score, len(scores))
+        reading = classify_regime(mean_score, len(scores), for_market(market).regime)
         reading.update(stamp)
         reading["universe_size"] = len(universe)
         reading["interval"] = interval

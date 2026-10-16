@@ -47,6 +47,7 @@ from app.core.card_snapshot import upsert_snapshot
 from app.core.pe_fetch import get_pe_for_symbol, get_pe_for_symbols
 from app.core.risk_grade import is_tradeable, measure
 from app.core.forecast import expected_move, outcome_band
+from app.core.calibration import for_market
 
 
 def _last_non_null(seq):
@@ -628,16 +629,16 @@ def get_analysis(
             beta = None
 
         # Outcome RANGES — not predictions, and deliberately drift-free so
-        # neither carries a direction. Both are calibrated against EGX's own
-        # measured return distribution rather than Gaussian theory; see
-        # core/forecast.py for what the old 68% / 90% claims actually delivered.
+        # neither carries a direction. Fitted on the stock's OWN market (its
+        # calibration bundle), never another market's distribution.
         forecast = None
         try:
             returns_full = daily_returns(close_full)
+            cal = for_market(market)
             forecast = {
-                "expected_move": expected_move(returns_full),
+                "expected_move": expected_move(returns_full, cal),
                 "outcome_band": outcome_band(
-                    returns_full, float(close_full.iloc[-1])
+                    returns_full, float(close_full.iloc[-1]), cal
                 ),
             }
         except Exception:

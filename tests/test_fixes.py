@@ -1452,13 +1452,15 @@ def test_regime_bands_match_the_measured_terciles():
     Cutoffs come from 221 readings, 2007-2026. If someone retunes them by feel
     the historical numbers shown beside them stop being true of the band.
     """
-    from app.core.regime import REGIME_MIXED_MAX, REGIME_WEAK_MAX, classify_regime
+    from app.core.calibration import for_market
+    from app.core.regime import classify_regime
 
-    assert classify_regime(40.0, 40)["band"] == "weak"
-    assert classify_regime(REGIME_WEAK_MAX, 40)["band"] == "mixed"
-    assert classify_regime(48.0, 40)["band"] == "mixed"
-    assert classify_regime(REGIME_MIXED_MAX, 40)["band"] == "broad"
-    assert classify_regime(58.0, 40)["band"] == "broad"
+    r = for_market("EG").regime
+    assert classify_regime(40.0, 40, r)["band"] == "weak"
+    assert classify_regime(r.weak_max, 40, r)["band"] == "mixed"
+    assert classify_regime(48.0, 40, r)["band"] == "mixed"
+    assert classify_regime(r.mixed_max, 40, r)["band"] == "broad"
+    assert classify_regime(58.0, 40, r)["band"] == "broad"
 
 
 def test_regime_refuses_to_classify_thin_coverage():
@@ -1466,13 +1468,14 @@ def test_regime_refuses_to_classify_thin_coverage():
     The batch scorer returns partial results on deadline. Averaging six stocks
     into a confident market reading is worse than saying nothing.
     """
+    from app.core.calibration import for_market
     from app.core.regime import MIN_SYMBOLS_FOR_REGIME, classify_regime
 
-    thin = classify_regime(52.0, MIN_SYMBOLS_FOR_REGIME - 1)
+    thin = classify_regime(52.0, MIN_SYMBOLS_FOR_REGIME - 1, for_market("EG").regime)
     assert thin["band"] is None
     assert "at least" in thin["summary"]
 
-    ok = classify_regime(52.0, MIN_SYMBOLS_FOR_REGIME)
+    ok = classify_regime(52.0, MIN_SYMBOLS_FOR_REGIME, for_market("EG").regime)
     assert ok["band"] == "broad"
 
 
@@ -1490,8 +1493,9 @@ def test_regime_carries_its_own_evidence():
 
 
 def classify_regime_or_skip():
+    from app.core.calibration import for_market
     from app.core.regime import classify_regime
-    return classify_regime(52.0, 40)
+    return classify_regime(52.0, 40, for_market("EG").regime)
 
 
 def test_weak_band_is_not_advertised_as_negative():
@@ -1499,9 +1503,10 @@ def test_weak_band_is_not_advertised_as_negative():
     The EGX rose a lot in EGP terms over the window, so the weak band means
     "flat", not "falling". Claiming a crash is as wrong as claiming a rally.
     """
+    from app.core.calibration import for_market
     from app.core.regime import classify_regime
 
-    weak = classify_regime(40.0, 40)
+    weak = classify_regime(40.0, 40, for_market("EG").regime)
     assert weak["hist_median_3m_pct"] > -1.0
     assert "coin flip" in weak["summary"]
 

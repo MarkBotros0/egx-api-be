@@ -61,36 +61,7 @@ import pandas as pd
 
 from app.core.markets import EG, MarketConfig
 
-# Fitted by scripts/calibrate.py on 2026-09-02. Regenerate whenever the cache
-# is refreshed; the script prints this table directly.
-RISK_CALIBRATION = {
-    "fitted_at": "2026-09-02",
-    "n_observations": 16220,
-    "n_symbols": 202,
-    "n_dates": 221,
-    "lookback_days": 63,
-    "forward_days": 126,
-    "vol_predicts_vol_ic": 0.5631,
-    "vol_predicts_vol_t": 55.8,
-    "vol_predicts_vol_ic_nonoverlapping": 0.5791,
-    "vol_predicts_vol_t_nonoverlapping": 24.0,
-    "vol_predicts_drawdown_ic": 0.4338,
-    "vol_predicts_drawdown_t": 40.5,
-    "vol_predicts_drawdown_ic_nonoverlapping": 0.4707,
-    "vol_predicts_drawdown_t_nonoverlapping": 16.7,
-}
-
-# What each volatility quintile went on to do over the next 126 trading days.
-# Medians, not means: EGX forward returns are heavily right-skewed and a mean
-# describes a distribution nobody experiences.
-RISK_QUINTILES = {
-    1: {"future_vol_ann_pct": 32.0, "median_max_drawdown_pct": 20.0, "p90_max_drawdown_pct": 40.7},
-    2: {"future_vol_ann_pct": 37.8, "median_max_drawdown_pct": 24.8, "p90_max_drawdown_pct": 46.3},
-    3: {"future_vol_ann_pct": 42.4, "median_max_drawdown_pct": 27.6, "p90_max_drawdown_pct": 49.3},
-    4: {"future_vol_ann_pct": 45.2, "median_max_drawdown_pct": 29.9, "p90_max_drawdown_pct": 53.0},
-    5: {"future_vol_ann_pct": 51.2, "median_max_drawdown_pct": 34.2, "p90_max_drawdown_pct": 59.4},
-}
-
+# The fitted record (ICs, quintile table) lives in app/core/calibration/<market>.py (RiskCal).
 RISK_BANDS = {
     1: {"key": "calm", "label": "Calm"},
     2: {"key": "steady", "label": "Steady"},
@@ -282,8 +253,10 @@ def measure(close: pd.Series, volume: pd.Series,
     }
 
 
-def grade_universe(rows: list) -> list:
+def grade_universe(rows: list, quintiles) -> list:
     """
+    `quintiles` is the market's `RiskCal.quintiles`: what each quintile historically went on to do.
+
     Turn stored per-symbol sigmas into percentiles and bands, ACROSS the
     universe, at read time.
 
@@ -321,7 +294,7 @@ def grade_universe(rows: list) -> list:
         r["band_label"] = RISK_BANDS[quintile]["label"]
         # What this quintile HISTORICALLY went on to do. Not a promise about
         # this stock — the wording on screen must stay in the past tense.
-        r["historical"] = dict(RISK_QUINTILES[quintile])
+        r["historical"] = dict(quintiles[quintile])
 
     for r in rows:
         r.setdefault("pct_rank", None)

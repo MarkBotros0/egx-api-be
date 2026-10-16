@@ -15,6 +15,9 @@ import pandas as pd
 import pytest
 
 from app.core import risk_grade as rg
+from app.core.calibration import for_market
+
+_Q = for_market("EG").risk.quintiles
 
 
 def _returns(n=400, sigma=0.02, seed=5):
@@ -114,7 +117,7 @@ def test_the_gate_reads_its_floors_from_the_market():
 
 def test_grading_is_monotonic_in_volatility():
     rows = [{"symbol": f"S{i}", "sigma_63_ann_pct": 10.0 + i} for i in range(50)]
-    graded = rg.grade_universe(rows)
+    graded = rg.grade_universe(rows, _Q)
     by_symbol = {r["symbol"]: r for r in graded}
     assert by_symbol["S0"]["quintile"] == 1, "the calmest name is not quintile 1"
     assert by_symbol["S49"]["quintile"] == 5, "the wildest name is not quintile 5"
@@ -129,13 +132,13 @@ def test_a_thin_universe_is_left_ungraded_rather_than_ranked():
     """
     graded = rg.grade_universe(
         [{"symbol": "A", "sigma_63_ann_pct": 20.0},
-         {"symbol": "B", "sigma_63_ann_pct": 40.0}])
+         {"symbol": "B", "sigma_63_ann_pct": 40.0}], _Q)
     assert all(r["band"] is None for r in graded)
 
 
 def test_every_quintile_carries_its_historical_record():
     rows = [{"symbol": f"S{i}", "sigma_63_ann_pct": float(i)} for i in range(50)]
-    for r in rg.grade_universe(rows):
+    for r in rg.grade_universe(rows, _Q):
         hist = r["historical"]
         assert set(hist) == {"future_vol_ann_pct", "median_max_drawdown_pct",
                              "p90_max_drawdown_pct"}
@@ -149,7 +152,7 @@ def test_the_historical_table_is_monotonic():
     """
     for field in ("future_vol_ann_pct", "median_max_drawdown_pct",
                   "p90_max_drawdown_pct"):
-        values = [rg.RISK_QUINTILES[q][field] for q in sorted(rg.RISK_QUINTILES)]
+        values = [_Q[q][field] for q in sorted(_Q)]
         assert values == sorted(values), f"{field} is not monotonic: {values}"
 
 
@@ -161,7 +164,7 @@ def test_risk_grade_makes_no_return_claim():
     how Buy/Sell labels come back.
     """
     banned = ("return", "outperform", "gain", "profit", "beat")
-    for quintile in rg.RISK_QUINTILES.values():
+    for quintile in _Q.values():
         for key in quintile:
             assert not any(b in key.lower() for b in banned), (
                 f"a return claim entered the risk quintile table via '{key}'"

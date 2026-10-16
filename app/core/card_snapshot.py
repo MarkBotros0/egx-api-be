@@ -177,7 +177,7 @@ def to_card(row: dict, weights: dict, macro: Optional[dict]) -> dict:
     return card
 
 
-def attach_risk_bands(rows: list, cards: list) -> None:
+def attach_risk_bands(rows: list, cards: list, market_code: str = EG.code) -> None:
     """
     Stamp each card with its cross-sectional risk band, in place.
 
@@ -198,11 +198,13 @@ def attach_risk_bands(rows: list, cards: list) -> None:
     not earned would be a fiction, the same refusal `/api/risk` makes for a stock
     nobody can enter or exit. The frontend shows no dot for a null band.
     """
+    from app.core.calibration import for_market
     from app.core.risk_grade import grade_universe
 
     graded = {
         r["symbol"]: r
-        for r in grade_universe([r for r in rows if r.get("tradeable")])
+        for r in grade_universe([r for r in rows if r.get("tradeable")],
+                                for_market(market_code).risk.quintiles)
     }
     for card in cards:
         g = graded.get(card["symbol"])

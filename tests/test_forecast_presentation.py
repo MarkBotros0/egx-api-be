@@ -35,12 +35,13 @@ import numpy as np
 import pandas as pd
 
 from app.core.forecast import (
-    EGX_Z_CONE_60D,
-    ONE_SIGMA_COVERAGE_PCT,
     OUTCOME_BAND_COVERAGES,
     expected_move,
     outcome_band,
 )
+from app.core.calibration import for_market
+
+_EG = for_market("EG")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _FE = os.path.join(_HERE, "..", "..", "egx-api-fe", "src", "app")
@@ -153,7 +154,7 @@ def test_expected_move_reports_measured_coverage_not_68():
     Gaussian theory says 68%. EGX delivers high-70s because price limits and
     flat illiquid sessions squash the centre of the distribution.
     """
-    em = expected_move(_flat_returns())
+    em = expected_move(_flat_returns(), _EG)
     assert em is not None
     for horizon in ("daily", "weekly", "monthly"):
         key = f"{horizon}_coverage_pct"
@@ -169,15 +170,15 @@ def test_coverage_belongs_to_the_estimator_it_was_fitted_on():
     table for both would be the same error as the 68% it replaced — a number
     describing a variable other than the one on screen.
     """
-    long_history = expected_move(_flat_returns(400))
-    short_history = expected_move(_flat_returns(30))
+    long_history = expected_move(_flat_returns(400), _EG)
+    short_history = expected_move(_flat_returns(30), _EG)
     assert long_history["method"] == "ewma_0.97"
     assert short_history["method"] == "trailing_sd"
 
     for horizon in ("daily", "weekly", "monthly"):
         key = f"{horizon}_coverage_pct"
-        assert long_history[key] == ONE_SIGMA_COVERAGE_PCT["ewma"][horizon]
-        assert short_history[key] == ONE_SIGMA_COVERAGE_PCT["trailing"][horizon]
+        assert long_history[key] == _EG.forecast.one_sigma_coverage["ewma"][horizon]
+        assert short_history[key] == _EG.forecast.one_sigma_coverage["trailing"][horizon]
     assert long_history["daily_coverage_pct"] != short_history["daily_coverage_pct"]
 
 
@@ -219,7 +220,7 @@ def test_outcome_band_is_deterministic():
     without the data moving is not a measurement.
     """
     rets = _flat_returns()
-    assert outcome_band(rets, 100.0) == outcome_band(rets, 100.0)
+    assert outcome_band(rets, 100.0, _EG) == outcome_band(rets, 100.0, _EG)
 
 
 def test_outcome_band_is_symmetric_and_carries_no_drift():
@@ -227,7 +228,7 @@ def test_outcome_band_is_symmetric_and_carries_no_drift():
     Drift-free by construction: lo and hi must be reciprocal around spot in log
     space. A drift term would recreate the directional median.
     """
-    band = outcome_band(_flat_returns(), 100.0)
+    band = outcome_band(_flat_returns(), 100.0, _EG)
     assert band is not None
     for level in band["bands"]:
         lo, hi = level["lo"][-1], level["hi"][-1]
@@ -248,7 +249,7 @@ def test_outcome_band_states_its_complement():
     forecast-communication literature; readers otherwise misjudge which event
     the number refers to.
     """
-    band = outcome_band(_flat_returns(), 100.0)
+    band = outcome_band(_flat_returns(), 100.0, _EG)
     assert band is not None
     for level in band["bands"]:
         assert level["outside_pct"] == 100 - level["coverage_pct"]
@@ -260,12 +261,12 @@ def test_egx_quantiles_are_not_gaussian():
     coverage, not the Gaussian 1.645 — using the textbook value delivered 85.8%.
     If someone "simplifies" this back to scipy's norm.ppf, this fails.
     """
-    assert EGX_Z_CONE_60D[90] > 1.85, (
+    assert _EG.forecast.z_cone[90] > 1.85, (
         "the 60-day 90% band has reverted to something near the Gaussian "
         "1.645, which measured only 85.8% coverage on EGX"
     )
     # And the bands the card draws must actually be fitted, not invented.
     for coverage in OUTCOME_BAND_COVERAGES:
-        assert coverage in EGX_Z_CONE_60D, (
+        assert coverage in _EG.forecast.z_cone, (
             f"band {coverage}% is rendered but has no fitted z"
         )
