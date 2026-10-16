@@ -77,9 +77,10 @@ def test_run_alerts_happy_path(monkeypatch):
     monkeypatch.setattr(cron, "run_detection", lambda *a, **k: 2)
     monkeypatch.setattr(cron, "prune_baselines", lambda *a, **k: None)
 
-    def deliver(db, now, deadline=None):
+    def deliver(db, now, deadline=None, market=None):
         seen["now"] = now
         seen["deadline"] = deadline
+        seen["market"] = market
         return {"sent": 1, "held": False}
 
     out = cron.run_alerts(object(), {"COMI": {}}, "2026-10-11T09:00:00+00:00",
@@ -87,6 +88,7 @@ def test_run_alerts_happy_path(monkeypatch):
     assert out == {"queued": 2, "sent": 1, "skipped": None, "error": None}
     assert isinstance(seen["now"], datetime) and seen["now"].tzinfo is not None
     assert seen["deadline"] is not None
+    assert seen["market"].code == "EG"
 
 
 def test_run_alerts_passes_a_send_deadline_of_26s_into_the_call(monkeypatch):
@@ -96,7 +98,7 @@ def test_run_alerts_passes_a_send_deadline_of_26s_into_the_call(monkeypatch):
     monkeypatch.setattr(cron, "prune_baselines", lambda *a, **k: None)
     monkeypatch.setattr(cron.time, "monotonic", lambda: 1000.0)
 
-    def deliver(db, now, deadline=None):
+    def deliver(db, now, deadline=None, market=None):
         seen["deadline"] = deadline
         return {"sent": 0, "held": False}
 

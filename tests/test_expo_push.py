@@ -52,7 +52,8 @@ def test_ok_ticket_marks_the_row_sent_and_message_is_shaped_for_expo():
     [msg] = sent
     assert msg["to"] == "ExponentPushToken[x]"
     assert msg["title"] == "COMI score up 12 points"
-    assert msg["data"] == {"type": "score_alert", "symbol": "COMI", "session": "2026-10-11"}
+    assert msg["data"] == {"type": "score_alert", "symbol": "COMI", "session": "2026-10-11",
+                           "market": "EG"}
     assert msg["channelId"] == "score-alerts"
     assert _ids(db, "status = 'sent'") == ["a"]
 
@@ -89,7 +90,7 @@ def test_stale_sessions_expire_before_sending():
     db = _db([], [])
     deliver_pending(db, DAY, sender=lambda m: [])
     [(sql, params)] = db.statements("SET status = 'expired'")
-    assert "session_date < %s" in sql and params == ("2026-10-11",)
+    assert "session_date < %s" in sql and params == ("EG", "2026-10-11")
 
 
 def test_messages_are_batched_at_one_hundred():
@@ -180,7 +181,8 @@ def test_rows_are_claimed_with_skip_locked_newest_session_first():
     assert sql.rstrip().endswith(
         "RETURNING id, user_id, symbol, session_date, direction, "
         "score_before, score_after, attempts")
-    assert params == (DAY.isoformat(),)
+    assert params == (DAY.isoformat(), "EG")
+    assert "AND market = %s" in sql
 
 
 def test_stale_sending_rows_are_reclaimed_before_expiry_and_the_claim():
@@ -194,7 +196,7 @@ def test_stale_sending_rows_are_reclaimed_before_expiry_and_the_claim():
     assert reclaim < expire < claim
     sql, params = db.log[reclaim]
     assert "claimed_at < %s" in sql
-    assert params == (3, "2026-10-11T08:58:00+00:00")
+    assert params == (3, "2026-10-11T08:58:00+00:00", "EG")
 
 
 def test_reclaim_counts_the_lost_attempt_and_fails_at_the_limit():

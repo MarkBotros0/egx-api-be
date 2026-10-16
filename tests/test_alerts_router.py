@@ -76,8 +76,10 @@ def test_preferences_reject_values_outside_the_choices(db, field, value):
 
 
 def test_alert_history_is_the_callers_sent_alerts(db):
-    db.responses.append(("FROM alert_log", [("COMI", "2026-10-11", "up", 58.0, 70.0, "t")]))
+    db.responses.append(("FROM alert_log", [("COMI", "2026-10-11", "up", 58.0, 70.0, "t", "EG"),
+                                            ("AAPL", "2026-10-11", "up", 50.0, 62.0, "t", "US")]))
     out = alerts_mod.list_alerts(ME)
     assert out["alerts"][0]["symbol"] == "COMI"
+    assert [a["market"] for a in out["alerts"]] == ["EG", "US"]
     sql, params = db.statements("FROM alert_log")[0]
     assert "status = 'sent'" in sql and params[0] == "u1"

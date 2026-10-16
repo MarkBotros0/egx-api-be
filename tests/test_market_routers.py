@@ -834,7 +834,7 @@ def cron_db(monkeypatch):
     monkeypatch.setattr(cron_mod, "get_db", lambda: db)
     monkeypatch.setattr(cron_mod, "read_risk_free_rate", lambda db, market: 19.0)
     monkeypatch.setattr(cron_mod, "run_alerts",
-                        lambda *a, **k: alerts.append(k.get("market_code")) or {})
+                        lambda *a, **k: alerts.append(k["market"].code) or {})
     db.alert_markets = alerts
     return db
 
@@ -870,11 +870,12 @@ def test_cron_universe_drops_isins_through_the_market():
 
 def test_alert_subscribers_follow_only_the_markets_own_lists():
     from app.core.alert_store import load_subscribers
-    db = FakeDB([("FROM alert_preferences", [("u1", "watchlist", 10, 10)]),
+    db = FakeDB([("s.key = 'market'", [("u1",)]),
+                 ("FROM alert_preferences", [("u1", "watchlist", 10, 10)]),
                  ("FROM watchlist", [("u1", "AAPL")])])
     out = load_subscribers(db, ["AAPL"], "US")
     assert [s.user_id for s in out["AAPL"]] == ["u1"]
-    [(sql, params)] = db.statements("FROM watchlist")
+    [(sql, params)] = [x for x in db.statements("FROM watchlist") if "symbol = ANY" in x[0]]
     halves = sql.split("UNION")
     assert len(halves) == 2 and all("market = %s" in h for h in halves)
     assert params[0] == "US" and params[3] == "US"
@@ -886,6 +887,7 @@ def test_alert_log_rows_carry_the_market():
     before = tuple([40.0] * len(CATEGORY_ORDER))
     after = {c: 70.0 for c in CATEGORY_ORDER}
     db = FakeDB([
+        ("s.key = 'market'", [("u1",)]),
         ("FROM alert_preferences", [("u1", "all", 10, 10)]),
         ("FROM score_baseline", [("AAPL", "2026-10-14") + before]),
         ("INSERT INTO alert_log", [("id1",)]),

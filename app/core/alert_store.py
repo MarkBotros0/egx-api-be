@@ -27,9 +27,15 @@ def prune_baselines(db, today: str) -> None:
 
 
 def load_subscribers(db, symbols: list, market_code: str = EG.code) -> dict:
-    """{symbol: [Subscriber]} for users who would hear about that symbol now.
-    Watchlist and holdings are matched in `market_code` only: the same ticker
-    on another market is a different stock."""
+    """
+    {symbol: [Subscriber]} for users who would hear about that symbol now.
+
+    A user's preferences apply to the markets they HOLD OR WATCH something in,
+    plus the market selected in the app (`user_settings.market`, absent = EG —
+    which is what keeps an EG user with no holdings on scope 'all' exactly as
+    before). Watchlist scope then matches holdings and watchlist in
+    `market_code` only: the same ticker on another market is a different stock.
+    """
     if not symbols:
         return {}
     prefs = db.execute(
@@ -38,6 +44,20 @@ def load_subscribers(db, symbols: list, market_code: str = EG.code) -> dict:
         "WHERE p.enabled AND u.is_active "
         "AND EXISTS (SELECT 1 FROM push_devices d WHERE d.user_id = p.user_id)"
     ).fetchall()
+    if not prefs:
+        return {}
+
+    users = [r[0] for r in prefs]
+    in_market = {r[0] for r in db.execute(
+        "SELECT user_id FROM watchlist WHERE market = %s AND user_id = ANY(%s) "
+        "UNION SELECT user_id FROM portfolio WHERE market = %s AND user_id = ANY(%s) "
+        "AND quantity > 0 "
+        "UNION SELECT u.id FROM users u LEFT JOIN user_settings s "
+        "ON s.user_id = u.id AND s.key = 'market' "
+        "WHERE u.id = ANY(%s) AND COALESCE(s.value, %s) = %s",
+        (market_code, users, market_code, users, users, EG.code, market_code),
+    ).fetchall()}
+    prefs = [r for r in prefs if r[0] in in_market]
     if not prefs:
         return {}
 
@@ -95,10 +115,12 @@ def run_detection(db, scored: dict, macro: Optional[dict], now: str,
             (session, market_code, symbols + [SUMMARY_SYMBOL]),
         ).fetchall()
         already = {(r[0], r[1], r[2]) for r in logged}
+        # The cap is per user per market session: an EG day and a US day are
+        # different sessions even when they share a calendar date.
         counts = db.execute(
-            "SELECT user_id, COUNT(*) FROM alert_log WHERE session_date = %s "
+            "SELECT user_id, COUNT(*) FROM alert_log WHERE session_date = %s AND market = %s "
             "AND status IN ('pending', 'sent') AND direction <> 'summary' GROUP BY user_id",
-            (session,),
+            (session, market_code),
         ).fetchall()
         sent_today = {r[0]: r[1] for r in counts}
         summary_sent = {u for (u, s, d) in already if d == "summary"}

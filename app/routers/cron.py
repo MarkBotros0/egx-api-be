@@ -137,9 +137,10 @@ ALERTS_SEND_DEADLINE_SECONDS = 26.0
 def run_alerts(db, scored: dict, now_iso: str, elapsed: float,
                deliver=deliver_pending,
                deadline: Optional[float] = None,
-               market_code: str = EG.code) -> dict:
+               market: MarketConfig = EG) -> dict:
     """`deadline` is a time.monotonic() value; by default 26s after `elapsed` began.
-    `scored` symbols all belong to `market_code`."""
+    `scored` symbols all belong to `market`; detection, quiet hours, expiry and
+    delivery are all that market's (see deliver_pending)."""
     out = {"queued": 0, "sent": 0, "skipped": None, "error": None}
     if elapsed > ALERTS_START_LIMIT_SECONDS:
         out["skipped"] = "deadline"
@@ -147,11 +148,15 @@ def run_alerts(db, scored: dict, now_iso: str, elapsed: float,
     if deadline is None:
         deadline = time.monotonic() - elapsed + ALERTS_SEND_DEADLINE_SECONDS
     try:
-        macro = read_cached_macro(db) if scored else None
+        # Both ends of a move are blended with the regime the market's SCORES
+        # use: EG's cached macro; None for a market without score modulation
+        # (US — its calibration ran without it), exactly as fetch_macro_for.
+        macro = read_cached_macro(db) if scored and market.code == EG.code else None
         out["queued"] = run_detection(db, scored, macro, now_iso,
-                                      market_code=market_code)
+                                      market_code=market.code)
         prune_baselines(db, now_iso[:10])
-        delivered = deliver(db, datetime.fromisoformat(now_iso), deadline=deadline)
+        delivered = deliver(db, datetime.fromisoformat(now_iso), deadline=deadline,
+                            market=market)
         out["sent"] = delivered.get("sent", 0)
         if delivered.get("held"):
             out["skipped"] = "quiet-hours"
@@ -482,15 +487,12 @@ def risk_snapshot(
         _upsert(symbol, stats, is_tradeable(close, volume, market), ok=True, card=card)
         written += 1
 
-    # Score alerts are EG-only for now: their copy, quiet hours and session
-    # dates are Cairo-calibrated.
-    if market.code == EG.code:
-        alerts = run_alerts(db, scored_for_alerts, now,
-                            time.monotonic() - started,
-                            deadline=call_started + ALERTS_SEND_DEADLINE_SECONDS,
-                            market_code=market.code)
-    else:
-        alerts = {"skipped": "market"}
+    # Score alerts run per market: this call's symbols, that market's quiet
+    # hours (its own timezone), session dates, baselines and queue.
+    alerts = run_alerts(db, scored_for_alerts, now,
+                        time.monotonic() - started,
+                        deadline=call_started + ALERTS_SEND_DEADLINE_SECONDS,
+                        market=market)
 
     # How much of the universe is still carrying a measurement from before this
     # run started. It reaches 0 only when one call covers the whole universe; a

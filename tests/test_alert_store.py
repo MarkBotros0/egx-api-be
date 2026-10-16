@@ -97,9 +97,16 @@ def test_prune_deletes_baselines_older_than_retention():
 BAL = PRESETS["balanced"]
 
 
-def _subs_db(prefs, watch=(), extra=()):
-    """prefs rows: (user_id, scope, rise, fall)."""
+# The "which users have this market" query (holds / watches / selected it).
+IN_MARKET = "s.key = 'market'"
+
+
+def _subs_db(prefs, watch=(), extra=(), in_market=None):
+    """prefs rows: (user_id, scope, rise, fall). `in_market`: users whose
+    preferences apply to the market (default: all of them, the EG default)."""
+    users = [p[0] for p in prefs] if in_market is None else list(in_market)
     return FakeDB([
+        (IN_MARKET, [(u,) for u in users]),
         ("FROM alert_preferences", list(prefs)),
         ("FROM watchlist", list(watch)),
         ("FROM settings", []),
@@ -197,6 +204,7 @@ class _SessionDB(FakeDB):
 def test_run_detection_scopes_dedup_to_each_symbols_own_session():
     db = _SessionDB(
         [
+            (IN_MARKET, [("u1",)]),
             ("FROM alert_preferences", [("u1", "all", 10, 10)]),
             ("FROM settings", []),
             ("FROM user_settings", []),
@@ -218,6 +226,7 @@ def test_run_detection_scopes_dedup_to_each_symbols_own_session():
 def test_run_detection_applies_the_daily_cap_with_a_summary():
     db = _SessionDB(
         [
+            (IN_MARKET, [("u1",)]),
             ("FROM alert_preferences", [("u1", "all", 10, 10)]),
             ("FROM settings", []),
             ("FROM user_settings", []),

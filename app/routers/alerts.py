@@ -114,10 +114,12 @@ def put_preferences(body: PreferencesIn, user: CurrentUser = Depends(get_current
 def list_alerts(user: CurrentUser = Depends(get_current_user)):
     since = (datetime.now(timezone.utc) - timedelta(days=30)).date().isoformat()
     rows = get_db().execute(
-        "SELECT symbol, session_date, direction, score_before, score_after, sent_at "
+        "SELECT symbol, session_date, direction, score_before, score_after, sent_at, market "
         "FROM alert_log WHERE user_id = %s AND status = 'sent' AND session_date >= %s "
         "ORDER BY sent_at DESC LIMIT 200",
         (user.id, since),
     ).fetchall()
-    keys = ("symbol", "session_date", "direction", "score_before", "score_after", "sent_at")
+    # `market` says which market's stock (and session) each alert is about.
+    keys = ("symbol", "session_date", "direction", "score_before", "score_after", "sent_at",
+            "market")
     return {"alerts": [dict(zip(keys, r)) for r in rows]}

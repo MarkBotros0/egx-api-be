@@ -78,13 +78,14 @@ def test_eg_snapshot_universe_unchanged():
     assert "COMI" in syms
 
 
-def test_alerts_run_only_for_eg():
+def test_alerts_run_for_every_market():
     import inspect
     src = inspect.getsource(C.risk_snapshot)
-    assert 'market.code == EG.code' in src and '{"skipped": "market"}' in src
+    assert '{"skipped": "market"}' not in src
+    assert "market=market" in src
 
 
-def test_us_snapshot_skips_alerts(client, monkeypatch):
+def test_us_snapshot_runs_alerts_for_us(client, monkeypatch):
     import pandas as pd
     import app.vendor.egxpy as egxpy
     from app.core import universe as U
@@ -95,12 +96,13 @@ def test_us_snapshot_skips_alerts(client, monkeypatch):
     monkeypatch.setattr(U, "resolve_exchange", lambda db, m, s: None)   # unresolved -> failed
     monkeypatch.setattr(egxpy, "get_OHLCV_data", lambda *a: pd.DataFrame())
     called = []
-    monkeypatch.setattr(C, "run_alerts", lambda *a, **k: called.append(1) or {})
+    monkeypatch.setattr(C, "run_alerts",
+                        lambda *a, **k: called.append(k["market"].code) or {"queued": 0})
     r = client.post("/api/cron/risk_snapshot?market=US", headers={"X-Cron-Secret": "s"})
     assert r.status_code == 200
     body = r.json()
-    assert body["alerts"] == {"skipped": "market"} and body["failed"] == ["KO"]
-    assert called == []
+    assert body["alerts"] == {"queued": 0} and body["failed"] == ["KO"]
+    assert called == ["US"]
 
 
 # --- US T-bill rate -----------------------------------------------------------

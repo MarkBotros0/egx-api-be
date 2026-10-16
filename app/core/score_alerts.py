@@ -23,7 +23,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from app.core.composite import CATEGORY_ORDER, blend_categories, classify_signal
-from app.core.markets import EG
+from app.core.markets import EG, MarketConfig
 from app.core.constants import (
     ALERT_DAILY_CAP,
     ALERT_QUIET_END_HOUR,
@@ -102,11 +102,16 @@ def apply_daily_cap(signals: list[Signal], sent_today: dict[str, int], summary_s
     return out
 
 
-def alert_copy(signal: Signal) -> tuple[str, str]:
-    """(title, body). Facts only: the move, the scores, the band."""
+def alert_copy(signal: Signal, market: MarketConfig = EG) -> tuple[str, str]:
+    """(title, body). Facts only: the move, the scores, the band. EG's summary
+    is unchanged; another market's names that market, so a user following both
+    can tell the two days apart."""
     if signal.direction == "summary":
-        return ("More stocks moved today",
-                "Open Borsa Compass to see your scores.")
+        if market.code == EG.code:
+            return ("More stocks moved today",
+                    "Open Borsa Compass to see your scores.")
+        return (f"More {market.short_name} stocks moved today",
+                f"Open Borsa Compass to see your {market.short_name} scores.")
     before = round(signal.before)
     after = round(signal.after)
     points = abs(after - before)
@@ -116,6 +121,7 @@ def alert_copy(signal: Signal) -> tuple[str, str]:
     return title, body
 
 
-def in_quiet_hours(now_utc: datetime) -> bool:
-    hour = now_utc.astimezone(ZoneInfo(EG.timezone)).hour
+def in_quiet_hours(now_utc: datetime, market: MarketConfig = EG) -> bool:
+    """22:00-08:00 in the MARKET's own timezone (Cairo for EG, New York for US)."""
+    hour = now_utc.astimezone(ZoneInfo(market.timezone)).hour
     return hour >= ALERT_QUIET_START_HOUR or hour < ALERT_QUIET_END_HOUR
