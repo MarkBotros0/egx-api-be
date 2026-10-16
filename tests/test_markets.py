@@ -161,3 +161,9 @@ def test_public_market_exposes_new_fields_only():
         {"id": "DJI", "label": "Dow 30"},
     ]
     assert "symbolset" not in str(pm)
+
+
+def test_adjective_is_a_market_fact_and_is_published():
+    assert (EG.adjective, US.adjective) == ("Egyptian", "US")
+    assert public_market(EG, date(2026, 10, 16))["adjective"] == "Egyptian"
+    assert public_market(US, date(2026, 10, 16))["adjective"] == "US"

@@ -56,6 +56,7 @@ class MarketConfig:
     publish_holidays: bool = True
     indices: tuple[IndexDef, ...] = ()
     short_name: str = ""
+    adjective: str = ""          # "Egyptian stocks", "US stocks" — copy only.
     score_calibrated: bool = True
 
     @property
@@ -95,6 +96,7 @@ EG = MarketConfig(
     indices=(IndexDef("EGX30", "EGX30"), IndexDef("EGX70", "EGX70"),
              IndexDef("EGX100", "EGX100"), IndexDef("NILEX", "NILEX")),
     short_name="EGX",
+    adjective="Egyptian",
 )
 
 US = MarketConfig(
@@ -111,6 +113,7 @@ US = MarketConfig(
              IndexDef("NDX", "NASDAQ-100", "SYML:NASDAQ;NDX"),
              IndexDef("DJI", "Dow 30", "SYML:DJ;DJI")),
     short_name="US", score_calibrated=False,
+    adjective="US",
 )
 
 MARKETS: dict[str, MarketConfig] = {"EG": EG, "US": US}
@@ -189,6 +192,7 @@ def public_market(market: MarketConfig, today: date) -> dict:
         "close": market.close.strftime("%H:%M"),
         "benchmark_label": market.benchmark_label,
         "short_name": market.short_name,
+        "adjective": market.adjective,
         "score_calibrated": market.score_calibrated,
         "indices": [{"id": i.id, "label": i.label} for i in market.indices],
         "holidays": market_holidays(market, today) if market.publish_holidays else [],
