@@ -88,6 +88,39 @@ def read_cached_macro(db):
         return None
 
 
+def _index_reading(close) -> dict:
+    """
+    Level, daily change and the 20-session trend of an index close series.
+    The EGX30 card's maths (moved verbatim from _fetch_egx30), shared with the
+    display-only reading another market's macro card shows.
+    """
+    current = float(close.iloc[-1])
+    prev = float(close.iloc[-2]) if len(close) > 1 else None
+    change_pct = ((current - prev) / prev * 100) if prev else None
+
+    # Monthly trend (compare to 20 trading days ago)
+    month_ago = float(close.iloc[-min(20, len(close))]) if len(close) >= 5 else None
+    monthly_change = ((current - month_ago) / month_ago * 100) if month_ago else None
+
+    direction = None
+    if monthly_change is not None:
+        if monthly_change > MACRO_TREND_UP_PCT:
+            direction = "up"
+        elif monthly_change < MACRO_TREND_DOWN_PCT:
+            direction = "down"
+        else:
+            direction = "stable"
+
+    return {
+        "value": round(current, 2),
+        "change_pct": round(change_pct, 2) if change_pct else None,
+        "monthly_change_pct": round(monthly_change, 2) if monthly_change else None,
+        "direction": direction,
+        "trend": "bullish" if (monthly_change and monthly_change > MACRO_TREND_UP_PCT) else
+                 "bearish" if (monthly_change and monthly_change < MACRO_TREND_DOWN_PCT) else "sideways",
+    }
+
+
 def _fetch_egx30():
     """Fetch EGX30 index data via egxpy."""
     try:
@@ -96,31 +129,7 @@ def _fetch_egx30():
         if df is None or df.empty:
             return {"value": None, "change_pct": None, "direction": None}
         df.columns = [c.lower() for c in df.columns]
-        current = float(df["close"].iloc[-1])
-        prev = float(df["close"].iloc[-2]) if len(df) > 1 else None
-        change_pct = ((current - prev) / prev * 100) if prev else None
-
-        # Monthly trend (compare to 20 trading days ago)
-        month_ago = float(df["close"].iloc[-min(20, len(df))]) if len(df) >= 5 else None
-        monthly_change = ((current - month_ago) / month_ago * 100) if month_ago else None
-
-        direction = None
-        if monthly_change is not None:
-            if monthly_change > MACRO_TREND_UP_PCT:
-                direction = "up"
-            elif monthly_change < MACRO_TREND_DOWN_PCT:
-                direction = "down"
-            else:
-                direction = "stable"
-
-        return {
-            "value": round(current, 2),
-            "change_pct": round(change_pct, 2) if change_pct else None,
-            "monthly_change_pct": round(monthly_change, 2) if monthly_change else None,
-            "direction": direction,
-            "trend": "bullish" if (monthly_change and monthly_change > MACRO_TREND_UP_PCT) else
-                     "bearish" if (monthly_change and monthly_change < MACRO_TREND_DOWN_PCT) else "sideways",
-        }
+        return _index_reading(df["close"])
     except Exception:
         return {"value": None, "change_pct": None, "direction": None}
 
@@ -154,11 +163,65 @@ def fetch_macro_for(db, market):
     Only EG has one today: `fetch_macro` is the EGX30 trend, USD/EGP and the
     CBE rate, and modulating a US score by the EGX30 regime would be wrong.
     Other markets get None, which skips modulation exactly as a macro outage
-    does (macro is sub-project 4).
+    does. US stays None on purpose: its calibration backtest ran without
+    modulation. Its macro CARD comes from `fetch_macro_display`, which never
+    reaches scoring.
     """
     if market.code != EG.code:
         return None
     return fetch_macro(db)
+
+
+def fetch_macro_display(db, market) -> Optional[dict]:
+    """
+    A DISPLAY-ONLY macro reading for a market whose scores take no macro
+    modulation (US): its benchmark's level and 20-session trend, and its
+    risk-free rate. None for EG, whose card is `fetch_macro`.
+
+    It never feeds scoring. The US calibration backtest ran WITHOUT macro
+    modulation, so modulating US scores would detach them from their
+    calibration — `fetch_macro_for` stays None for US, and this function is
+    deliberately separate from it. Nothing is written to `macro_data` (that
+    table is the EG regime the alert cron reads); the reading is held in the
+    in-memory cache for MACRO_CACHE_TTL_SECONDS. The benchmark comes through
+    `get_benchmark_close` at the scoring window, so it usually hits the cache
+    the analysis paths already warmed. Never raises.
+    """
+    if market.code == EG.code:
+        return None
+    from app.core import cache
+    from app.core.benchmark import get_benchmark_close
+    from app.core.constants import INTERNAL_BARS_MIN
+
+    key = cache.make_key(market.code, "macro_display")
+    hit = cache.get(key)
+    if hit is not None:
+        return hit
+    empty = {"value": None, "change_pct": None, "direction": None}
+    try:
+        close = get_benchmark_close(market, "Daily", INTERNAL_BARS_MIN)
+        index = _index_reading(close) if close is not None and len(close) else dict(empty)
+    except Exception:
+        index = dict(empty)
+    try:
+        rate = read_risk_free_rate(db, market)
+    except Exception:
+        rate = market.risk_free_fallback_pct
+    out = {
+        "market": market.code,
+        "currency": market.currency,
+        "egx30": None,
+        "usd_egp": None,
+        "benchmark": {**index, "label": market.benchmark_label},
+        "interest_rate": {"value": round(float(rate), 2) if rate is not None else None,
+                          "direction": "stable",
+                          "label": market.risk_free_label},
+        # Says so on the wire: this reading does not move any score.
+        "scoring": False,
+    }
+    if index.get("value") is not None:
+        cache.set(key, out, ttl=MACRO_CACHE_TTL_SECONDS)
+    return out
 
 
 def read_risk_free_rate(db, market=EG) -> float:

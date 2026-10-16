@@ -212,6 +212,10 @@ def test_us_portfolio_analysis_has_no_eg_wording(client, monkeypatch, fake_feed,
     types = {s["type"] for s in body["signals"]}
     assert {"stop_breached", "target_hit", "relative_strength_leader"} <= types
     assert "macro_egx30" not in types
+    # The macro card is the display-only US reading; scores are unmodulated.
+    assert body["macro"]["benchmark"]["label"] == "S&P 500"
+    assert body["macro"]["scoring"] is False
+    assert all(not h.get("macro_adjustment") for h in body["holdings"])
     # Valuation signals run on the US bundle's boundaries (P/E 6.2 is under
     # the US floor of 7.8; a 3.1% yield is an above-median US payer).
     assert {"pe_implausibly_low", "dividend_yield_solid"} <= types

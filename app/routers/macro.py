@@ -1,12 +1,14 @@
 """
-GET /api/macro — Fetch Egyptian macro indicators (EGX30, USD/EGP, CBE rate).
+GET /api/macro — EG: Egyptian macro indicators (EGX30, USD/EGP, CBE rate).
+Other markets: a DISPLAY-ONLY reading (benchmark level and trend, risk-free
+rate) from `fetch_macro_display`, which never feeds score modulation.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
 from app.core.constants import DEFAULT_RISK_FREE_RATE_PCT
 from app.core.currency import EGX30_TWENTY_YEAR
 from app.core.db import get_db
-from app.core.macro_fetch import fetch_macro
+from app.core.macro_fetch import fetch_macro, fetch_macro_display
 from app.core.markets import MarketConfig, market_param
 
 router = APIRouter()
@@ -14,10 +16,14 @@ router = APIRouter()
 
 @router.get("/api/macro")
 def get_macro(market: MarketConfig = Depends(market_param)):
-    # Egyptian macro only in this sub-project; a US reading is sub-project 3.
     if market.code != "EG":
-        return {"market": market.code, "currency": market.currency,
-                "egx30": None, "usd_egp": None, "interest_rate": None}
+        try:
+            data = fetch_macro_display(get_db(), market)
+        except Exception:
+            data = None
+        return data or {"market": market.code, "currency": market.currency,
+                        "egx30": None, "usd_egp": None, "interest_rate": None,
+                        "benchmark": None, "scoring": False}
     try:
         db = get_db()
         data = fetch_macro(db)

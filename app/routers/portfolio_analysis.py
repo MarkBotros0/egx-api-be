@@ -20,7 +20,7 @@ from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db
 from app.core.dividends import fetch_dividend_totals
 from app.core.holdings import fetch_open_holdings
-from app.core.macro_fetch import fetch_macro_for, read_risk_free_rate
+from app.core.macro_fetch import fetch_macro_display, fetch_macro_for, read_risk_free_rate
 from app.core.calibration import for_market
 from app.core.markets import EG, MarketConfig, market_param
 from app.core.composite import compute_composite, get_weights_from_db, DEFAULT_WEIGHTS
@@ -338,12 +338,20 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
         weights = dict(DEFAULT_WEIGHTS)
 
     # Macro fetched once up-front — feeds both per-holding composite modulation
-    # and, for EG, the portfolio-level macro_egx30 signal below.
+    # and, for EG, the portfolio-level macro_egx30 signal below. A market with
+    # no scoring macro (US) gets a DISPLAY-ONLY reading for the response's
+    # `macro` card instead; it never reaches compute_composite.
     macro_data = None
     try:
         macro_data = fetch_macro_for(get_db(), market)
     except Exception:
         macro_data = None
+    macro_display = None
+    if market.code != EG.code:
+        try:
+            macro_display = fetch_macro_display(get_db(), market)
+        except Exception:
+            macro_display = None
 
     composite_scores_collected = []
 
@@ -1287,7 +1295,7 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
         },
         "correlation_matrix": correlation_data,
         "monte_carlo": monte_carlo_data,
-        "macro": macro_data,
+        "macro": macro_data if market.code == EG.code else macro_display,
         "signals": signals,
         "disclaimer": "This is educational analysis for learning purposes only, not financial advice.",
     }

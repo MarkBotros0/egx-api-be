@@ -772,12 +772,28 @@ def test_macro_refuses_unknown_market(client, macro_seen):
     assert client.get("/api/macro", params={"market": "XX"}).status_code == 400
 
 
-def test_macro_is_eg_only_for_now(client, macro_seen, monkeypatch):
+def test_macro_us_is_the_display_reading_never_the_egyptian_one(client, macro_seen, monkeypatch):
+    from app.routers import macro as macro_mod
     monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
+    monkeypatch.setattr(macro_mod, "fetch_macro_display", lambda db, m: {
+        "market": m.code, "currency": m.currency, "egx30": None, "usd_egp": None,
+        "benchmark": {"value": 6600.0, "label": m.benchmark_label},
+        "interest_rate": {"value": 4.2, "direction": "stable", "label": m.risk_free_label},
+        "scoring": False})
     r = client.get("/api/macro", params={"market": "US"})
-    assert r.json() == {"market": "US", "currency": "USD",
-                        "egx30": None, "usd_egp": None, "interest_rate": None}
+    body = r.json()
+    assert body["benchmark"]["label"] == "S&P 500" and body["scoring"] is False
+    assert body["interest_rate"]["label"] == "3-month T-bill"
     assert macro_seen == [], "Egyptian macro was fetched for a US request"
+
+
+def test_macro_us_degrades_to_nulls(client, macro_seen, monkeypatch):
+    from app.routers import macro as macro_mod
+    monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
+    monkeypatch.setattr(macro_mod, "fetch_macro_display", lambda db, m: None)
+    r = client.get("/api/macro", params={"market": "US"})
+    assert r.status_code == 200
+    assert r.json()["benchmark"] is None and r.json()["interest_rate"] is None
 
 
 def test_calibration_defaults_to_eg(client):
@@ -1091,7 +1107,8 @@ def test_portfolio_analysis_us_uses_us_exchange_benchmark_and_pe(client, pa_env,
     r = client.get("/api/portfolio_analysis", params={"market": "US"})
     assert r.status_code == 200, r.text
     assert r.json()["market"] == "US" and r.json()["currency"] == "USD"
-    assert pa_env.benchmarks == ["US"]
+    # Scoring, then the display-only macro card (same cache key in production).
+    assert pa_env.benchmarks == ["US", "US"]
     assert pa_env.feed == [("AAPL", "NASDAQ")]
     [(_, params)] = pa_env.statements("FROM pe_data")
     assert "US" in params
