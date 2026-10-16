@@ -664,6 +664,30 @@ def test_dividend_history_us_has_no_yahoo_suffix(client, div_db, fake_urlopen, m
     assert params[:2] == ("US", "AAPL")
 
 
+def test_dividend_history_us_class_share_asks_yahoo_with_a_dash(
+        client, div_db, fake_urlopen, monkeypatch):
+    """TradingView spells BRK.B with a dot, Yahoo with a dash; stored as ours."""
+    monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
+    fake_urlopen.answers.append(("BRK-B", {"chart": {"result": [{"events": {"dividends": {
+        "1": {"amount": 0.1, "date": 1_700_000_000}}}}]}}))
+    r = client.get("/api/dividend_history", params={"symbol": "BRK.B", "market": "US"})
+    assert r.status_code == 200, r.text
+    [url] = fake_urlopen
+    assert "/v8/finance/chart/BRK-B?" in url
+    [(sql, params)] = div_db.statements("INSERT INTO dividend_events")
+    assert params[:2] == ("US", "BRK.B")
+
+
+def test_dividend_calendar_us_reads_the_us_store(client, div_db, monkeypatch):
+    monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
+    r = client.get("/api/dividend_calendar", params={"market": "US"})
+    assert r.status_code == 200, r.text
+    assert r.json()["market"] == "US" and r.json()["currency"] == "USD"
+    for needle in ("FROM dividend_events", "FROM pe_data"):
+        stmts = div_db.statements(needle)
+        assert stmts and all("market = %s" in s and p[0] == "US" for s, p in stmts), needle
+
+
 def test_dividend_routes_refuse_unknown_market(client, div_db, fake_urlopen):
     for path, params in (("/api/dividend_history", {"symbol": "COMI"}),
                          ("/api/dividend_calendar", {})):

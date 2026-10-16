@@ -35,10 +35,6 @@ from typing import Optional
 from app.core.constants import DIVIDEND_HISTORY_TIMEOUT_SECONDS
 from app.core.markets import EG, MarketConfig
 
-# Yahoo's per-market symbol suffix: `.CA` is its code for the Egyptian
-# Exchange; US listings are quoted bare.
-YAHOO_SUFFIX = {"EG": ".CA", "US": ""}
-
 # events=div gives dividends; a wide window so we get the whole history.
 _URL = (
     "https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
@@ -56,8 +52,16 @@ _HEADERS = {
 
 
 def yahoo_symbol(symbol: str, market: MarketConfig = EG) -> str:
-    """Ticker -> Yahoo code: 'COMI' on EG -> 'COMI.CA', 'AAPL' on US -> 'AAPL'."""
-    return f"{(symbol or '').strip().upper()}{YAHOO_SUFFIX[market.code]}"
+    """
+    Ticker -> Yahoo code, per market (`MarketConfig.yahoo_suffix` /
+    `yahoo_class_separator`): 'COMI' on EG -> 'COMI.CA'; 'AAPL' on US ->
+    'AAPL', 'BRK.B' -> 'BRK-B' (TradingView spells a class share with a dot,
+    Yahoo with a dash). Rows are still STORED under our own symbol and market.
+    """
+    sym = (symbol or "").strip().upper()
+    if market.yahoo_class_separator:
+        sym = sym.replace(".", market.yahoo_class_separator)
+    return f"{sym}{market.yahoo_suffix}"
 
 
 def parse_dividends(payload) -> list[dict]:

@@ -51,6 +51,23 @@ def test_yahoo_symbol_appends_the_ca_suffix():
     assert yahoo_symbol(" SWDY ") == "SWDY.CA"
 
 
+def test_yahoo_symbol_is_per_market():
+    from app.core.markets import EG, US
+    assert yahoo_symbol("COMI", EG) == "COMI.CA"
+    assert yahoo_symbol("AAPL", US) == "AAPL"
+    assert yahoo_symbol("brk.b", US) == "BRK-B"
+    assert yahoo_symbol("BF.B", US) == "BF-B"
+    assert EG.yahoo_suffix == ".CA" and EG.yahoo_class_separator is None
+
+
+def test_backfill_walks_the_us_index_members(monkeypatch):
+    import scripts.backfill_dividends as B
+    from app.core.markets import EG, US
+    monkeypatch.setattr(B, "index_members", lambda db, m: frozenset({"KO", "AAPL"}) if m is US else None)
+    assert B._universe(US, object()) == ["AAPL", "KO"]
+    assert "COMI" in B._universe(EG)
+
+
 def test_parse_returns_dated_amounts_newest_first():
     out = parse_dividends(_PAYLOAD)
     assert [d["ex_date"] for d in out] == ["2026-04-07", "2025-04-24", "2024-04-04"]
