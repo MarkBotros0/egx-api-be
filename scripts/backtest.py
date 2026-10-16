@@ -41,6 +41,8 @@ present. With no database the run falls back to flat and re-withholds; see
 
 Run:  python -m scripts.backtest            (from egx-api-be)
       python -m scripts.backtest --quick    (small universe, for a smoke test)
+      python -m scripts.backtest --market US
+      python -m scripts.backtest --market EG --fetch-only
 """
 
 from __future__ import annotations
@@ -73,9 +75,10 @@ from app.core.constants import (  # noqa: E402
 from app.core.extras_builder import build_composite_extras  # noqa: E402
 from app.core.returns import annualized_cash_rate_pct  # noqa: E402
 from app.core.index_membership import get_index_membership  # noqa: E402
+from app.core.index_membership import index_member_tier  # noqa: E402
+from scripts.market_cache import CacheSpec, spec_for, write_universe_rows  # noqa: E402
 from app.core.indicators import compute_all  # noqa: E402
 
-BENCHMARK = "EGX30"
 BARS_TO_FETCH = 5000          # ~20 years; the practical server-side ceiling
 MIN_HISTORY_BARS = 250        # a year of prior data before a stock is scorable
 REBALANCE_EVERY = 21          # trading days between scoring dates (~monthly)
@@ -95,7 +98,26 @@ HORIZONS = (21, 63, 126)      # forward-return windows, in trading days
 RISK_FREE_RATE = float(DEFAULT_RISK_FREE_RATE_PCT)
 
 
-CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+# The market this run serves. Read from the environment at import so worker
+# processes started with "spawn" (Windows) see the same market as the parent;
+# `configure` sets both the env and these globals.
+SPEC: CacheSpec = spec_for(os.environ.get("BACKTEST_MARKET", "EG"),
+                           os.environ.get("BACKTEST_CACHE_DIR") or None)
+CACHE_DIR = SPEC.cache_dir
+BENCHMARK = SPEC.benchmark_symbol
+
+
+def configure(code: str, cache_dir: str | None = None) -> CacheSpec:
+    """Point this module at one market's cache, benchmark and risk-free series."""
+    global SPEC, CACHE_DIR, BENCHMARK
+    SPEC = spec_for(code, cache_dir)
+    CACHE_DIR, BENCHMARK = SPEC.cache_dir, SPEC.benchmark_symbol
+    os.environ["BACKTEST_MARKET"] = SPEC.code
+    if cache_dir:
+        os.environ["BACKTEST_CACHE_DIR"] = cache_dir
+    else:
+        os.environ.pop("BACKTEST_CACHE_DIR", None)
+    return SPEC
 
 
 def confounded_categories(rate_steps) -> set:
@@ -196,7 +218,7 @@ def load_rate_steps() -> list:
     try:
         from app.core.db import get_db
         from app.core.macro_series import get_risk_free_steps
-        steps = get_risk_free_steps(get_db())
+        steps = get_risk_free_steps(get_db(), SPEC.risk_free_series)
     except Exception:
         return []
     if steps:
@@ -403,9 +425,20 @@ def cache_failure_report(failures: dict, total: int) -> str | None:
     )
 
 
-def _fetch_worker(symbols: list) -> None:
+def exchange_for(symbol: str, exchanges: dict | None) -> str | None:
+    """Where `symbol` trades. EG is always EGX; a US symbol must come from the
+    universe — a wrong exchange waits ~5.5s and returns nothing."""
+    if symbol == BENCHMARK:
+        return SPEC.benchmark_exchange
+    if SPEC.code == "EG":
+        return "EGX"
+    return (exchanges or {}).get(symbol)
+
+
+def _fetch_worker(pairs: list) -> None:
     """
-    Child-process body: fetch a BATCH, writing each symbol as it completes.
+    Child-process body: fetch a BATCH of (symbol, exchange), writing each
+    symbol as it completes.
 
     Batched because Windows spawns a fresh interpreter per process, and
     re-importing pandas/numpy/app.core cost more than the fetch itself —
@@ -415,12 +448,12 @@ def _fetch_worker(symbols: list) -> None:
     """
     from app.vendor.egxpy import get_OHLCV_data
 
-    for symbol in symbols:
+    for symbol, exchange in pairs:
         path = _cache_path(symbol)
         if os.path.exists(path):
             continue
         try:
-            df = get_OHLCV_data(symbol, "EGX", "Daily", BARS_TO_FETCH)
+            df = get_OHLCV_data(symbol, exchange, "Daily", BARS_TO_FETCH)
         except Exception:
             df = None
 
@@ -435,7 +468,7 @@ def _fetch_worker(symbols: list) -> None:
         time.sleep(FETCH_PAUSE_SECONDS)
 
 
-def fetch_batch(symbols: list) -> int:
+def fetch_batch(symbols: list, exchanges: dict | None = None) -> int:
     """
     Fetch a batch in one child process, killing it if it STOPS MAKING PROGRESS.
 
@@ -454,8 +487,9 @@ def fetch_batch(symbols: list) -> int:
     if not todo:
         return len(symbols)
 
+    pairs = [(s, ex) for s in todo if (ex := exchange_for(s, exchanges))]
     write_cache_stamp()
-    proc = mp.Process(target=_fetch_worker, args=(todo,), daemon=True)
+    proc = mp.Process(target=_fetch_worker, args=(pairs,), daemon=True)
     proc.start()
 
     done = last_change = 0
@@ -512,6 +546,53 @@ def universe() -> list:
     return sorted(s for s in syms if s and s != BENCHMARK)
 
 
+def universe_rows_for(spec: CacheSpec, universe_file: str | None = None) -> list:
+    """
+    The run's universe as [{symbol, exchange, indices}].
+
+    EG: the ticker file plus the scanner, exactly as before (exchange EGX).
+    US: today's SPX ∪ NDX ∪ DJI members — from `universe_file` (a JSON list of
+    those rows, the offline alternative) or the DB's `market_universe`. Written
+    to <cache>/universe.json so calibrate.py can find the regime members.
+    """
+    if spec.code == "EG":
+        return [{"symbol": s, "exchange": "EGX", "indices": []} for s in universe()]
+    if universe_file:
+        with open(universe_file, encoding="utf-8") as f:
+            raw = json.load(f)
+    else:
+        from app.core.db import get_db
+        from app.core.markets import MARKETS
+        from app.core.universe import load_universe
+        raw = load_universe(get_db(), MARKETS[spec.code])
+    rows = [{"symbol": r["symbol"].strip().upper(),
+             "exchange": (r.get("exchange") or "").upper(),
+             "indices": list(r.get("indices") or [])} for r in raw]
+    rows = sorted((r for r in rows if r["indices"] and r["exchange"]),
+                  key=lambda r: r["symbol"])
+    write_universe_rows(spec, rows)
+    return rows
+
+
+def market_macro(bench_close: pd.Series) -> dict | None:
+    """
+    The macro regime the LIVE app would apply on this market: EG reproduces
+    `fetch_macro` from the benchmark (see macro_at); every other market gets
+    None, because `fetch_macro_for` returns None outside EG and the backtest
+    must score the way the app does. (composite reads macro["egx30"], so EG's
+    key stays as it is.)
+    """
+    return macro_at(bench_close) if SPEC.code == "EG" else None
+
+
+def tier_for(row: dict) -> str | None:
+    if SPEC.code == "EG":
+        return get_index_membership(row["symbol"])
+    from app.core.markets import MARKETS
+    market = MARKETS[SPEC.code]
+    return index_member_tier(market) if row.get("indices") else market.code
+
+
 # ---------------------------------------------------------------------------
 # Historical macro regime
 # ---------------------------------------------------------------------------
@@ -560,7 +641,7 @@ def rebalance_calendar(bench_close: pd.Series) -> list:
 
 
 def score_symbol(symbol: str, bench_close: pd.Series, dates: list,
-                 rate_steps: list | None = None) -> list:
+                 rates: dict | None = None, tier: str | None = None) -> list:
     """
     Every (date, score, category scores, forward returns) row for one symbol,
     evaluated on the shared rebalance calendar.
@@ -571,7 +652,7 @@ def score_symbol(symbol: str, bench_close: pd.Series, dates: list,
     if df is None or len(df) < MIN_HISTORY_BARS + max(HORIZONS):
         return []
 
-    tier = get_index_membership(symbol)
+    tier = tier if tier is not None else get_index_membership(symbol)
     close = df["close"]
     out = []
 
@@ -598,18 +679,19 @@ def score_symbol(symbol: str, bench_close: pd.Series, dates: list,
                 include_multi_timeframe=True,
                 # The rate that actually prevailed over THIS date's
                 # trailing year, not one flat number for twenty years.
-                risk_free_rate_pct=rate_for_date(rate_steps, as_of),
+                risk_free_rate_pct=(rates or {}).get(as_of, RISK_FREE_RATE),
                 # Fundamentals are a today-only snapshot — passing them here
                 # would be look-ahead. This is what fundamentals_history will
                 # eventually make possible.
                 pe_ratio=None, dividend_yield=None, loss_making=None,
                 index_membership=tier,
+                market_code=SPEC.code,
             )
             result = compute_composite(
                 indicators,
                 extras=built["extras"],
                 weights=DEFAULT_WEIGHTS,          # pinned, not read from the DB
-                macro=macro_at(bench),
+                macro=market_macro(bench),
             )
         except Exception:
             continue
@@ -727,12 +809,19 @@ def sanity_checks(panel: pd.DataFrame) -> dict:
 # Driver
 # ---------------------------------------------------------------------------
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
+    ap.add_argument("--market", default="EG", choices=["EG", "US"])
+    ap.add_argument("--universe-file", default=None,
+                    help="US only: JSON list of {symbol, exchange, indices} instead of the DB universe")
+    ap.add_argument("--cache-dir", default=None, help="override the market's cache dir (tests)")
+    ap.add_argument("--fetch-only", action="store_true", help="warm the cache and stop")
     ap.add_argument("--quick", action="store_true", help="small universe smoke test")
     ap.add_argument("--workers", type=int, default=6)
-    ap.add_argument("--out", default=os.path.join(CACHE_DIR, "panel.pkl"))
-    args = ap.parse_args()
+    ap.add_argument("--out", default=None)
+    args = ap.parse_args(argv)
+    spec = configure(args.market, args.cache_dir)
+    out_path = args.out or os.path.join(CACHE_DIR, "panel.pkl")
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     stamp_warning = cache_stamp_warning()
@@ -753,12 +842,18 @@ def main():
         print(f"policy rate: NO dated history — running flat at "
               f"{RISK_FREE_RATE}%; WITHHOLDING {sorted(confounded)}")
 
-    syms = universe()
+    rows = universe_rows_for(spec, args.universe_file)
+    if not rows:
+        print(f"FATAL: empty {spec.code} universe")
+        return 1
     if args.quick:
-        syms = syms[:25]
+        rows = rows[:25]
+    syms = [r["symbol"] for r in rows]
+    exchanges = {r["symbol"]: r["exchange"] for r in rows}
+    tiers = {r["symbol"]: tier_for(r) for r in rows}
     print(f"universe: {len(syms)} symbols")
 
-    print(f"fetching benchmark {BENCHMARK} ...")
+    print(f"fetching benchmark {spec.benchmark_exchange}:{BENCHMARK} ...")
     bench_df = load_history(BENCHMARK)
     if bench_df is None:
         print("FATAL: no benchmark data — relative strength and beta need it")
@@ -774,7 +869,7 @@ def main():
     BATCH = 20
     for i in range(0, len(missing), BATCH):
         chunk = missing[i:i + BATCH]
-        fetch_batch(chunk)
+        fetch_batch(chunk, exchanges)
         n = i + len(chunk)
         rate = (time.time() - t0) / max(n, 1)
         print(f"  {n}/{len(missing)}  ({time.time()-t0:.0f}s, {rate:.1f}s/sym, "
@@ -783,8 +878,12 @@ def main():
     still_missing = [s for s in syms if not os.path.exists(_cache_path(s))]
     print(f"  fetch done in {time.time()-t0:.0f}s; "
           f"{len(still_missing)} stalled and were not cached (re-run to retry)")
+    if args.fetch_only:
+        print("fetch-only: cache warmed, not scoring")
+        return 0
 
     dates = rebalance_calendar(bench_close)
+    rates = {d: rate_for_date(rate_steps, d) for d in dates}
     print(f"scoring across {args.workers} workers "
           f"on {len(dates)} shared rebalance dates "
           f"({dates[0].date()} .. {dates[-1].date()}) ...")
@@ -795,7 +894,7 @@ def main():
     # is rather than what one symbol scored.
     unreadable: dict = {}
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        futs = {pool.submit(score_symbol, s, bench_close, dates, rate_steps): s
+        futs = {pool.submit(score_symbol, s, bench_close, dates, rates, tiers.get(s)): s
                 for s in syms}
         for n, fut in enumerate(as_completed(futs), 1):
             try:
@@ -817,13 +916,13 @@ def main():
         return 1
 
     panel = pd.DataFrame(rows)
-    panel.to_pickle(args.out)
+    panel.to_pickle(out_path)
     print(f"\npanel: {len(panel):,} symbol-dates, "
           f"{panel['symbol'].nunique()} symbols, {panel['date'].nunique()} dates")
     print(f"span: {panel['date'].min().date()} .. {panel['date'].max().date()}")
-    write_run_meta(args.out, rate_steps)
-    print(f"saved -> {args.out}")
-    print(f"stamped -> {run_meta_path(args.out)}")
+    write_run_meta(out_path, rate_steps)
+    print(f"saved -> {out_path}")
+    print(f"stamped -> {run_meta_path(out_path)}")
 
     if report:
         # Last thing printed, and a non-zero exit, so an incomplete panel is not

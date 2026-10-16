@@ -94,3 +94,12 @@ def symbols_in_index(tier: str) -> list[str]:
         return []
     want = tier.upper()
     return sorted(s for s, t in _load().items() if t == want)
+
+
+def index_member_tier(market) -> str:
+    """
+    Liquidity tier for a member of one of `market`'s index symbolsets. For US
+    that is any SPX / NDX / DJI member — all large caps — hence "US large-cap".
+    Other listings of that market use the market code ("US") as their tier.
+    """
+    return f"{market.short_name} large-cap"
