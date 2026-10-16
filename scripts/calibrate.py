@@ -520,66 +520,25 @@ def fit_turnover_floor(frames: dict) -> float:
     return round_down_nice(float(np.percentile(values, TURNOVER_FLOOR_PCTILE)))
 
 
-def volume_samples(frames: dict, symbols) -> np.ndarray:
-    """20-day mean share volume, sampled every 21 bars over the trailing year."""
-    out = []
-    for s in symbols:
-        df = frames.get(s)
-        if df is None or len(df) < 40:
-            continue
-        avg = df["volume"].astype(float).iloc[-252:].rolling(20).mean()
-        out.extend(v for v in avg.iloc[19::21] if math.isfinite(v))
-    return np.asarray(out, dtype=float)
-
-
-def other_listed_tier(thin: int, low: int, eg_tiers) -> tuple:
+def fit_liquidity_tiers(market) -> tuple:
     """
-    The other-listed floors: the index-member floors scaled by EG's
-    NILEX/EGX30 ratios. Scaled EXACTLY, not rounded again — the inputs are
-    already round, and re-rounding both down collapsed thin and low onto one
-    number on the first US fit (500k/1M -> 20k/20k), which made "low"
-    unreachable. A collapsed tier is refused rather than written.
-    """
-    thin_ref, low_ref = eg_tiers["EGX30"]
-    n_thin, n_low = eg_tiers["NILEX"]
-    other = (int(thin * n_thin / thin_ref), int(low * n_low / low_ref))
-    if not 0 < other[0] < other[1]:
-        raise CalibrationRefused(f"other-listed liquidity tier collapsed: {other}")
-    return other
+    NO share-count liquidity floor on a non-EG market, for index members and
+    other listings alike: (0, 0) for both tiers.
 
-
-def fit_liquidity_tiers(eg_frames: dict, frames: dict, members, market) -> tuple:
+    History, because it is the reason. The first US fits mapped the US to EG:
+    member floors at the percentiles EGX30's floors sit at in EGX30 volume, and
+    other listings = those floors x EG's NILEX/EGX30 ratio (25k / 40k
+    shares/day), because the panel has no non-member history. Members' floors
+    were dropped first — 500k / 1M shares/day called AZO (~$1B/day) "thin" — a
+    share count means nothing across $5-$6,000 prices. The other-listed tier
+    was the same EG-derived concept, never measured on US data, so it is gone
+    too (2026-10-16). `liquidity_score`'s dead-session and calendar tests,
+    which read the stock's own trading, still catch a listing that stops.
     """
-    Share-volume floors at the same percentiles of the index members'
-    distribution that EG's EGX30 floors sit at in the EGX30's, scaled by EG's
-    NILEX/EGX30 ratio for OTHER listings (the panel has no non-member history).
-
-    Index members themselves get NO share-count floor, (0, 0). On the first US
-    fit the member floors came out at 500k / 1M shares/day and labelled 18
-    S&P members "thin, hard to exit" — AZO among them at ~$1B/day — because a
-    share count means nothing across prices from $5 to $6,000. Index inclusion
-    already screens for liquidity, and `liquidity_score`'s dead-session and
-    calendar tests still catch a member that genuinely stops trading.
-    """
-    eg = for_market(EG).liquidity_tiers
-    ref = volume_samples(eg_frames, symbols_in_index("EGX30"))
-    tgt = volume_samples(frames, members)
-    if len(ref) < 30 or len(tgt) < 30:
-        raise CalibrationRefused(
-            f"liquidity tiers: {len(ref)} EG / {len(tgt)} {market.code} volume samples "
-            f"(run `python -m scripts.backtest --market EG --fetch-only` for the EG reference)")
-    thin_ref, low_ref = eg["EGX30"]
-    p_thin, p_low = float((ref < thin_ref).mean()), float((ref < low_ref).mean())
-    thin = int(round_down_nice(float(np.quantile(tgt, max(p_thin, 1e-6)))))
-    low = int(round_down_nice(float(np.quantile(tgt, p_low))))
-    if low <= thin:
-        raise CalibrationRefused(f"liquidity tiers collapsed: thin {thin} >= low {low}")
-    tiers = {index_member_tier(market): (0, 0),
-             market.code: other_listed_tier(thin, low, eg)}
-    report = {"p_thin": round(p_thin, 3), "p_low": round(p_low, 3),
-              "member_share_floors": (thin, low),
-              "thin_share": round(float((tgt < thin).mean()), 3),
-              "n_ref": int(len(ref)), "n_target": int(len(tgt))}
+    tiers = {index_member_tier(market): (0, 0), market.code: (0, 0)}
+    report = {"share_floors": "none",
+              "why": "share counts are not comparable across prices, and the "
+                     "EG-derived floors were never measured on this market"}
     return tiers, report
 
 
@@ -699,7 +658,7 @@ def build_bundle(market, spec: CacheSpec, *, eg_spec: CacheSpec, eg_pe, eg_dy, p
     members = sorted({r["symbol"].upper() for r in read_universe_rows(spec) if r.get("indices")})
     floor = fit_turnover_floor({s: frames[s] for s in members if s in frames})
     price_floor = PRICE_FLOOR[market.code]
-    tiers, tier_report = fit_liquidity_tiers(load_frames(eg_spec, EG), frames, members, market)
+    tiers, tier_report = fit_liquidity_tiers(market)
     fund = fit_fundamentals(eg_pe, eg_dy, pe, dy, market)
     fc_t = forecast_calibration(spec, market, "trailing")
     fc_e = forecast_calibration(spec, market, "ewma")

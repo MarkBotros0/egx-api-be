@@ -37,6 +37,7 @@ from app.core.constants import (
     TRADING_DAYS_PER_YEAR,
 )
 from app.core.calibration import for_market
+from app.core.markets import get_registered_market
 from app.core.indicators import (
     annualized_return,
     daily_returns,
@@ -51,8 +52,9 @@ from app.core.indicators import (
     volume_price_confirmation,
 )
 
-# Weekly resampling anchor. EGX trades Sun-Thu, so Thursday is the week's
-# closing session.
+# Weekly resampling anchor for EG (EGX trades Sun-Thu, so Thursday closes the
+# week). Every market's own anchor is MarketConfig.week_end_rule — a US week
+# ends on Friday; cutting it on Thursday put Friday into the next week.
 WEEKLY_RESAMPLE_RULE = "W-THU"
 
 # Bars needed on each side of a 20-bar comparison window.
@@ -111,7 +113,8 @@ def _compute_bb_squeeze(indicators: dict) -> bool:
         return False
 
 
-def _higher_timeframe(close: pd.Series, base_interval: str) -> Optional[pd.Series]:
+def _higher_timeframe(close: pd.Series, base_interval: str,
+                      week_rule: str = WEEKLY_RESAMPLE_RULE) -> Optional[pd.Series]:
     """
     Resample `close` to the next timeframe UP from `base_interval`.
 
@@ -128,6 +131,8 @@ def _higher_timeframe(close: pd.Series, base_interval: str) -> Optional[pd.Serie
     rule = _HIGHER_TIMEFRAME_RULE.get(base_interval)
     if rule is None:
         return None
+    if base_interval == "Daily":
+        rule = week_rule
     try:
         s = close.copy()
         if not isinstance(s.index, pd.DatetimeIndex):
@@ -262,7 +267,8 @@ def build_composite_extras(
     multi_timeframe = None
     if include_multi_timeframe:
         try:
-            wk = weekly_close if weekly_close is not None else _higher_timeframe(close, interval)
+            wk = weekly_close if weekly_close is not None else _higher_timeframe(
+                close, interval, get_registered_market(market_code).week_end_rule)
             if wk is not None:
                 multi_timeframe = multi_timeframe_alignment(close, wk)
         except Exception:

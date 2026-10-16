@@ -187,3 +187,17 @@ def test_eg_score_reasons_keep_their_measured_wording():
     assert "P/E 0.7 — implausibly low; check the earnings are recurring" in low
     assert ("Extreme yield (DY 42.5%) — typically a special dividend or a "
             "collapsed share price, not steady income") in high
+
+
+def test_us_extreme_bands_add_no_points_eg_keeps_its_shape():
+    """The extreme bands' points encode EG-measured causes: 0 on US, unchanged on EG."""
+    from app.core.composite import score_quality
+    # a neutral drawdown (-10%) so the category has a score to compare
+    base, _ = score_quality(None, None, -10.0, fundamentals=US_FUND)
+    assert score_quality(None, None, -10.0, pe_ratio=4.8, fundamentals=US_FUND)[0] == base
+    assert score_quality(None, None, -10.0, dividend_yield=9.1, fundamentals=US_FUND)[0] == base
+    # Bands that fit both markets still score on US.
+    assert score_quality(None, None, -10.0, pe_ratio=10.0, fundamentals=US_FUND)[0] == base + 12
+    eg_base, _ = score_quality(None, None, -10.0, fundamentals=EG_FUND)
+    assert score_quality(None, None, -10.0, pe_ratio=0.7, fundamentals=EG_FUND)[0] == eg_base + 3
+    assert score_quality(None, None, -10.0, dividend_yield=42.55, fundamentals=EG_FUND)[0] == eg_base - 8

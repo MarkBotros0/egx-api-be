@@ -73,6 +73,10 @@ class MarketConfig:
     news_index: Optional[str] = None
     # Display name of the risk-free rate on the macro card.
     risk_free_label: str = ""
+    # pandas rule that cuts daily bars into weeks at the market's LAST trading
+    # day: EGX trades Sun-Thu (W-THU), US Mon-Fri (W-FRI). Feeds the Daily
+    # view's weekly trend (multi-timeframe alignment).
+    week_end_rule: str = "W-FRI"
 
     @property
     def primary_exchange(self) -> str:
@@ -105,6 +109,7 @@ EG = MarketConfig(
     risk_free_fallback_pct=19,
     risk_free_series="EGINTR",
     yahoo_suffix=".CA", news_index="EGX30", risk_free_label="CBE interest rate",
+    week_end_rule="W-THU",
     liquid_min_turnover=1_000_000, liquid_min_price=0.5,
     isin_prefix="EG",
     # Unverified: the `holidays` library ESTIMATES Islamic dates, and the old

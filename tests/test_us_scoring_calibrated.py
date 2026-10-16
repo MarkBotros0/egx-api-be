@@ -45,19 +45,22 @@ def test_us_membership_degrades_to_other_listed(monkeypatch):
     assert get_index_membership("AAPL", US, db=object()) == "US"     # unreadable universe
 
 
-def test_us_large_caps_are_never_thin_by_share_count_but_others_are():
-    """A share count means nothing across $5-$6,000 prices: the first fit
-    called AZO (~$1B/day on ~300k shares) thin. Members get no share floor."""
+def test_no_us_stock_is_thin_by_share_count_but_dead_sessions_still_count():
+    """A share count means nothing across $5-$6,000 prices (the first fit
+    called AZO thin), and the other-listed floor was an EG ratio never measured
+    on US — so no US stock is thin by share count. A listing that stops
+    trading is still caught by the dead-session test, on its own data."""
     from app.core.composite import score_volume
     from app.core.indicators import liquidity_score
-    member = liquidity_score(pd.Series([300_000.0] * 30), "US large-cap", cal=US_CAL)
-    assert member["index_membership"] == "US large-cap" and member["classification"] == "normal"
-    thin_below, _ = US_CAL.liquidity_tiers["US"]
-    other = liquidity_score(pd.Series([float(thin_below) / 2] * 30), "US", cal=US_CAL)
-    assert other["classification"] == "thin"
+    for tier in ("US large-cap", "US"):
+        assert US_CAL.liquidity_tiers[tier] == (0, 0)
+        low_volume = liquidity_score(pd.Series([50.0] * 30), tier, cal=US_CAL)
+        assert low_volume["classification"] == "normal", tier
+    dead = liquidity_score(pd.Series([5_000.0] * 20 + [0.0] * 10), "US", cal=US_CAL)
+    assert dead["classification"] == "thin"
     # One real volume input: liquidity alone never carries the category.
-    _, reasons = score_volume(True, True, None, None, liquidity=other)
-    assert any("a US name" in r for r in reasons)
+    _, reasons = score_volume(True, True, None, None, liquidity=dead)
+    assert any("No trading on" in r for r in reasons)
 
 
 def test_us_is_calibrated():

@@ -199,7 +199,10 @@ def fundamental_signals(symbol: str, pe_info_h, market: MarketConfig,
     if pe_info_h and pe_info_h.get("loss_making"):
         signals.append({"type": "pe_loss_making", "severity": "warning", "symbol": symbol,
             "message": f"{symbol} is loss-making over the last twelve months.",
-            "explanation": "The company isn't profitable right now, so earnings-based valuation doesn't apply — lean on trend, relative strength, and macro instead.",
+            # "macro" only where macro feeds the score (EG); US has none.
+            "explanation": ("The company isn't profitable right now, so earnings-based valuation doesn't apply — lean on trend, relative strength, and macro instead."
+                            if market.code == EG.code else
+                            "The company isn't profitable right now, so earnings-based valuation doesn't apply — lean on trend and relative strength instead."),
             "learn_concept": "pe_ratio"})
 
     # Thresholds are score_quality's band boundaries for THIS market
@@ -714,12 +717,19 @@ def _analyze(holdings, user_id: str = None, market: MarketConfig = EG):
                 if c_score >= SCORE_BUY_MAX:
                     signals.append({"type": "very_strong_composite", "severity": "info", "symbol": symbol,
                         "message": f"{symbol} scores {c_score:.0f} — nearly every category is aligned positively.",
-                        "explanation": "The composite blends 8 categories into one number describing the stock's present technical condition. A score ≥80 means most of them agree. It is a description, not a forecast: testing over 2007-2026 found no evidence that high scores precede better returns than low ones.",
+                        "explanation": "The composite blends 8 categories into one number describing the stock's present technical condition. A score ≥80 means most of them agree. It is a description, not a forecast: "
+                                       + ("testing over 2007-2026 found no evidence that high scores precede better returns than low ones."
+                                          if market.code == EG.code else
+                                          f"testing on {market.short_name} stocks found no evidence that high scores precede better returns than low ones."),
                         "learn_concept": "composite_score"})
                 elif c_score < SCORE_STRONG_SELL_MAX:
                     signals.append({"type": "very_weak_composite", "severity": "info", "symbol": symbol,
                         "message": f"{symbol} scores {c_score:.0f} — nearly every category is negative.",
-                        "explanation": "Below 20, almost every category is reading poorly. Note this is NOT an exit signal: over 2007-2026 the lowest-scoring stocks bounced about as often as the highest-scoring ones, so treat it as a description of current weakness rather than a reason to sell.",
+                        # "The lowest-scoring bounced as often" is an EGX decile
+                        # finding; another market states only its measured IC.
+                        "explanation": ("Below 20, almost every category is reading poorly. Note this is NOT an exit signal: over 2007-2026 the lowest-scoring stocks bounced about as often as the highest-scoring ones, so treat it as a description of current weakness rather than a reason to sell."
+                                        if market.code == EG.code else
+                                        f"Below 20, almost every category is reading poorly. This is NOT an exit signal: testing on {market.short_name} stocks found no evidence that scores rank future returns, so treat it as a description of current weakness rather than a reason to sell."),
                         "learn_concept": "composite_score"})
                 elif c_signal == "Strong":
                     signals.append({"type": "strong_composite", "severity": "info", "symbol": symbol,

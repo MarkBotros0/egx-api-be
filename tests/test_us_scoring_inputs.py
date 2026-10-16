@@ -44,13 +44,14 @@ def test_membership_never_borrows_eg_tiers():
     assert get_index_membership("COMI", US) == "US"
 
 
-def test_us_liquidity_uses_its_own_floor():
+def test_us_liquidity_uses_its_own_tiers_and_they_have_no_share_floor():
+    """US reads its own bundle's tiers — which carry no share-count floor (the
+    old other-listed floor was an EG ratio, never measured on US)."""
     from app.core.calibration import for_market
     cal = for_market("US")
-    thin_below, low_below = cal.liquidity_tiers["US"]
-    vol = pd.Series([float((thin_below + low_below) // 2)] * 30)
-    out = liquidity_score(vol, index_membership="US", cal=cal)
-    assert out["index_membership"] == "US" and out["classification"] == "low"
+    assert cal.liquidity_tiers["US"] == (0, 0)
+    out = liquidity_score(pd.Series([10.0] * 30), index_membership="US", cal=cal)
+    assert out["index_membership"] == "US" and out["classification"] == "normal"
 
 
 def test_us_tier_copy_grammar():

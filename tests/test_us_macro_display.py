@@ -66,8 +66,10 @@ def test_us_display_reads_the_benchmark_and_the_tbill(us_bench):
     b = got["benchmark"]
     assert b["label"] == "S&P 500"
     assert b["value"] == 5290.0
-    assert b["direction"] in {"up", "down", "stable"}
-    assert got["interest_rate"] == {"value": 4.21, "direction": "stable", "label": "3-month T-bill"}
+    # The ±2% up/down/stable buckets are EGX30's: not sent for US.
+    assert b["direction"] is None and "trend" not in b
+    assert b["monthly_change_pct"] is not None
+    assert got["interest_rate"] == {"value": 4.21, "direction": None, "label": "3-month T-bill"}
     # Same scoring window as the analysis paths, so it shares their cache.
     from app.core.constants import INTERNAL_BARS_MIN
     assert us_bench == [("US", "Daily", INTERNAL_BARS_MIN)]

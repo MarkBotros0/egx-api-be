@@ -621,9 +621,14 @@ def score_quality(multi_timeframe: Optional[dict],
     # of cheap: the median stock lands in the same band on every market, so
     # merely HAVING P/E data is never worth points. Boundaries are per market
     # (app/core/calibration/<market>.py); the points are EG's everywhere.
+    # The two EXTREME bands carry EG-measured causes (one-off earnings or a
+    # collapsed price; a special dividend or a collapsed price). A market where
+    # those were not measured (extreme_causes_measured False — US) scores them
+    # 0: the concept is absent there, not adapted. The reason states the fact.
     if pe_ratio is not None:
         i = band_index(fund.pe_bands, pe_ratio)
-        score += fund.pe_bands[i][1]
+        if i > 0 or fund.extreme_causes_measured:
+            score += fund.pe_bands[i][1]
         reasons.append(_pe_reason(i, pe_ratio, fund, calibrated))
 
     # Dividend yield. Deliberately NON-monotonic: a very high yield is almost
@@ -632,7 +637,8 @@ def score_quality(multi_timeframe: Optional[dict],
     # 0.0 means "pays nothing" — normal for a growth company, scored as unknown.
     if dividend_yield is not None and dividend_yield > 0:
         i = band_index(fund.dy_bands, dividend_yield)
-        score += fund.dy_bands[i][1]
+        if i < len(fund.dy_bands) - 1 or fund.extreme_causes_measured:
+            score += fund.dy_bands[i][1]
         reasons.append(_dy_reason(i, dividend_yield, fund, calibrated))
 
     return _clamp(score), reasons

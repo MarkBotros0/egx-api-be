@@ -203,6 +203,11 @@ def fetch_macro_display(db, market) -> Optional[dict]:
         index = _index_reading(close) if close is not None and len(close) else dict(empty)
     except Exception:
         index = dict(empty)
+    # The up/down/stable and bullish/bearish labels come from ±2% buckets
+    # chosen for the EGX30 (MACRO_TREND_*_PCT). Not measured for this market,
+    # so they are not sent: the card shows the measured change, no verdict.
+    index["direction"] = None
+    index.pop("trend", None)
     try:
         rate = read_risk_free_rate(db, market)
     except Exception:
@@ -213,8 +218,9 @@ def fetch_macro_display(db, market) -> Optional[dict]:
         "egx30": None,
         "usd_egp": None,
         "benchmark": {**index, "label": market.benchmark_label},
+        # No direction: nothing computed one for this rate.
         "interest_rate": {"value": round(float(rate), 2) if rate is not None else None,
-                          "direction": "stable",
+                          "direction": None,
                           "label": market.risk_free_label},
         # Says so on the wire: this reading does not move any score.
         "scoring": False,

@@ -137,7 +137,7 @@ BUNDLE = Calibration(
     ),
     liquidity_tiers={
         'US large-cap': (0, 0,),
-        'US': (25000, 40000,),
+        'US': (0, 0,),
     },
     liquidity_default_tier='US',
     liquid_min_turnover=100000000.0,

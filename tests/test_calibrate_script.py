@@ -69,10 +69,10 @@ def test_build_bundle_on_a_fixture_cache(caches):
     assert sorted(bundle.risk.quintiles) == [1, 2, 3, 4, 5]
     assert bundle.regime.universe_indexes == ("SPX",) and bundle.regime.universe_label == "S&P 500"
     assert set(bundle.liquidity_tiers) == {"US large-cap", "US"}
-    # Index members carry no share-count floor; other listings a real one.
+    # No share-count floor on US at all: the old other-listed floor was the
+    # EG NILEX/EGX30 ratio, never measured on US.
     assert bundle.liquidity_tiers["US large-cap"] == (0, 0)
-    thin, low = bundle.liquidity_tiers["US"]
-    assert 0 < thin < low
+    assert bundle.liquidity_tiers["US"] == (0, 0)
     assert bundle.liquidity_default_tier == "US"
     assert bundle.liquid_min_price == 5.0
     m = bundle.liquid_min_turnover / 10 ** math.floor(math.log10(bundle.liquid_min_turnover))
@@ -85,7 +85,7 @@ def test_build_bundle_on_a_fixture_cache(caches):
     assert (bundle.breadth_measured, bundle.dividend_drag_measured) == (False, False)
     # Random fixture scores rank nothing, so the composite test is listed as failed.
     assert [x["claim"] for x in bundle.measured_failures] == ["The composite score ranks stocks by future return"]
-    assert "thin_share" in report["liquidity"]
+    assert report["liquidity"]["share_floors"] == "none"
 
 
 def test_render_round_trips(tmp_path, caches):
@@ -156,15 +156,6 @@ def test_main_refuses_without_fundamentals_and_writes_nothing(caches, tmp_path, 
 def test_write_refuses_eg():
     import scripts.calibrate as cal
     assert cal.main(["--market", "EG", "--write"]) == 2
-
-
-def test_the_other_listed_tier_never_collapses():
-    """First US fit: 500k/1M re-rounded to 20k/20k, so "low" was unreachable."""
-    from scripts.calibrate import CalibrationRefused, other_listed_tier
-    eg = for_market("EG").liquidity_tiers
-    assert other_listed_tier(500_000, 1_000_000, eg) == (25_000, 40_000)
-    with pytest.raises(CalibrationRefused):
-        other_listed_tier(500_000, 500_000, eg)
 
 
 def test_a_score_that_did_rank_returns_is_not_listed_as_a_failure(tmp_path):
