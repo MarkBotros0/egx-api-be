@@ -151,3 +151,12 @@ def test_main_refuses_without_fundamentals_and_writes_nothing(caches, tmp_path, 
 def test_write_refuses_eg():
     import scripts.calibrate as cal
     assert cal.main(["--market", "EG", "--write"]) == 2
+
+
+def test_the_other_listed_tier_never_collapses():
+    """First US fit: 500k/1M re-rounded to 20k/20k, so "low" was unreachable."""
+    from scripts.calibrate import CalibrationRefused, other_listed_tier
+    eg = for_market("EG").liquidity_tiers
+    assert other_listed_tier(500_000, 1_000_000, eg) == (25_000, 40_000)
+    with pytest.raises(CalibrationRefused):
+        other_listed_tier(500_000, 500_000, eg)

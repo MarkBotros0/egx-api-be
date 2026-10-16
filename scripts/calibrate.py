@@ -532,6 +532,22 @@ def volume_samples(frames: dict, symbols) -> np.ndarray:
     return np.asarray(out, dtype=float)
 
 
+def other_listed_tier(thin: int, low: int, eg_tiers) -> tuple:
+    """
+    The other-listed floors: the index-member floors scaled by EG's
+    NILEX/EGX30 ratios. Scaled EXACTLY, not rounded again — the inputs are
+    already round, and re-rounding both down collapsed thin and low onto one
+    number on the first US fit (500k/1M -> 20k/20k), which made "low"
+    unreachable. A collapsed tier is refused rather than written.
+    """
+    thin_ref, low_ref = eg_tiers["EGX30"]
+    n_thin, n_low = eg_tiers["NILEX"]
+    other = (int(thin * n_thin / thin_ref), int(low * n_low / low_ref))
+    if not 0 < other[0] < other[1]:
+        raise CalibrationRefused(f"other-listed liquidity tier collapsed: {other}")
+    return other
+
+
 def fit_liquidity_tiers(eg_frames: dict, frames: dict, members, market) -> tuple:
     """
     Index members get the share-volume floors at the same percentiles of THEIR
@@ -553,10 +569,8 @@ def fit_liquidity_tiers(eg_frames: dict, frames: dict, members, market) -> tuple
     low = int(round_down_nice(float(np.quantile(tgt, p_low))))
     if low <= thin:
         raise CalibrationRefused(f"liquidity tiers collapsed: thin {thin} >= low {low}")
-    n_thin, n_low = eg["NILEX"]
-    other = (int(round_down_nice(thin * n_thin / thin_ref)),
-             int(round_down_nice(low * n_low / low_ref)))
-    tiers = {index_member_tier(market): (thin, low), market.code: other}
+    tiers = {index_member_tier(market): (thin, low),
+             market.code: other_listed_tier(thin, low, eg)}
     report = {"p_thin": round(p_thin, 3), "p_low": round(p_low, 3),
               "thin_share": round(float((tgt < thin).mean()), 3),
               "n_ref": int(len(ref)), "n_target": int(len(tgt))}
