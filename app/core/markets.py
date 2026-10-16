@@ -108,7 +108,10 @@ US = MarketConfig(
     benchmark_symbol="SPX", benchmark_exchange="SP", benchmark_label="S&P 500",
     # 3-month T-bill fallback; live value from TVC:US03MY.
     risk_free_fallback_pct=4.0,
-    liquid_min_turnover=None, liquid_min_price=None,
+    # Fitted by scripts/calibrate.py --market US (app/core/calibration/us.py):
+    # p5 of 60-day mean dollar turnover across SPX/NDX/DJI members, rounded
+    # down; 5 USD is the usual penny-stock line.
+    liquid_min_turnover=100_000_000, liquid_min_price=5.0,
     indices=(IndexDef("SPX", "S&P 500", "SYML:SP;SPX"),
              IndexDef("NDX", "NASDAQ-100", "SYML:NASDAQ;NDX"),
              IndexDef("DJI", "Dow 30", "SYML:DJ;DJI")),

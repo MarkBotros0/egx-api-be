@@ -117,14 +117,22 @@ def test_every_registered_market_has_a_bundle():
         assert for_market(code).market == code
 
 
-def test_provisional_us_bundle_reproduces_todays_us_behaviour():
-    eg, us = for_market("EG"), for_market("US")
-    assert us.provisional is True
-    assert us.forecast == eg.forecast and us.risk == eg.risk
-    assert dict(us.liquidity_tiers) == {"US": (5_000, 20_000)}
+def test_us_bundle_is_fitted_on_us_data():
+    us = for_market("US")
+    assert us.provisional is False
+    assert us.forecast.universe_label.startswith("current S&P 500 / NASDAQ-100 / Dow 30 members")
+    assert set(us.liquidity_tiers) == {"US large-cap", "US"}
     assert us.liquidity_default_tier == "US"
-    assert (us.liquid_min_turnover, us.liquid_min_price) == (None, None)
-    assert us.measured_failures == ()
+    assert us.fundamentals.label == "US"
+    assert us.regime.universe_indexes == ("SPX",)
+    assert (us.breadth_measured, us.dividend_drag_measured, us.measured_failures) == (False, False, ())
+
+
+def test_registry_floors_agree_with_the_bundle():
+    for code, market in MARKETS.items():
+        cal = for_market(code)
+        assert (market.liquid_min_turnover, market.liquid_min_price) == \
+            (cal.liquid_min_turnover, cal.liquid_min_price), code
 
 
 def test_every_bundle_keeps_the_eg_band_shape_and_points():

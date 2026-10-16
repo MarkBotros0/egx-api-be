@@ -101,14 +101,14 @@ def test_thin_turnover_fails_the_gate_even_when_it_trades_daily():
 
 
 def test_the_gate_reads_its_floors_from_the_market():
-    """Floors are per-market facts in the registry, and a market with no
-    calibrated floors yet (US until sub-project 3) admits nothing."""
+    """Floors are per-market facts in the registry; US's were fitted on US data."""
     from app.core.markets import EG, US
     close = _prices()
     volume = pd.Series([500_000] * len(close))
     assert rg.is_tradeable(close, volume, EG) is True
-    assert US.liquid_min_turnover is None
-    assert rg.is_tradeable(close, volume, US) is False
+    assert US.liquid_min_turnover is not None and US.liquid_min_price == 5.0
+    thin = pd.Series([1.0] * len(close))               # far below any US floor
+    assert rg.is_tradeable(close, thin, US) is False
 
 
 # ---------------------------------------------------------------------------
