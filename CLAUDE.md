@@ -100,11 +100,11 @@ Add a fact there, not as a literal.
   hidden while the preference loads and when fewer than two markets are
   enabled. A deep link `stock/[symbol]?market=XX` reads that market's data
   without switching the app (no watch star on another market's stock).
-- Still EGX-only (later sub-projects): macro (EGX30/USDEGP; `fetch_macro_for`
-  returns nothing for US), breadth's evidence numbers, score alerts (US alerts
-  are sub-project 4), Arab Finance news, Learn content, the portfolio P/E and
-  dividend signals, the web changer. Analysis calibration is PER MARKET since
-  sub-project 3 — see *US calibration*. Spec: `docs/superpowers/specs/2026-10-15-multi-market-foundation-design.md`;
+- Still EGX-only: macro SCORE MODULATION (EGX30 regime; `fetch_macro_for`
+  returns None for US on purpose — US shows a display-only macro card, see
+  *US gaps*), breadth's evidence numbers, Arab Finance news, Learn content, the
+  web changer. Analysis calibration is PER MARKET since sub-project 3 — see
+  *US calibration*; the US gaps closed by `feat/us-gaps` are listed in *US gaps*. Spec: `docs/superpowers/specs/2026-10-15-multi-market-foundation-design.md`;
   calibration: `docs/superpowers/specs/2026-10-16-us-calibration-design.md`.
 
 **US core (sub-project 2).**
@@ -143,7 +143,11 @@ Add a fact there, not as a literal.
   - `POST /api/pe/refresh?market=US` **nightly** — scans exactly the universe's
     `EXCHANGE:SYMBOL` tickers; status keys are suffixed (`pe_last_*:US`). It
     skips the EG-only macro and auth-prune steps.
-  - Alerts run for EG only: the US risk_snapshot answers `alerts: {skipped: "market"}`.
+  - Score alerts run per market (see *US gaps* and *Score alerts*). For US
+    intraday alerts the US risk_snapshot job must run **every minute
+    09:30–16:30 America/New_York, Mon–Fri** — a SEPARATE cron-job.org job
+    from EG's, pinned to America/New_York (it replaces the US job "on the EG
+    cadence" above: the 16:00–16:30 minutes cover the post-close pass).
   - These three secret-guarded routes take `registered_market_param`: they accept
     any market in `MARKETS` **regardless of `ENABLED_MARKETS`** (unknown codes
     still 400), so a market's data is built before users can select it. Every
@@ -159,13 +163,18 @@ Add a fact there, not as a literal.
   Then, for sub-project 3: (8) after deploying the calibration, re-run
   `POST /api/cron/risk_snapshot?market=US&limit=30` until every universe symbol
   has TODAY's row — the new floors change the tradeable set. (9) Once, against
-  Neon: `python -m scripts.backfill_macro --series US03MY` (it only feeds the
-  backtest; the live app uses the single current rate). The US regime reading
+  Neon: `python -m scripts.backfill_macro --series US03MY` (feeds the backtest
+  AND the US sales grade; the daily universe cron keeps it current — done
+  2026-10-16 on the Neon DB in `egx-api-be/.env`: 5,000 bars 2006-11-03 →
+  2026-10-16, last 4.209). The US regime reading
   needs no cron: it averages cached composite scores (≥15 symbols) and appears
   once the US dashboard has been loaded.
 - **US risk-free rate:** `TVC:US03MY` (3-month T-bill), stored under settings key
-  `risk_free_rate:US`, fallback 4.0 (`MarketConfig.risk_free_fallback_pct`). The
-  sales grade for a US sale trades against it (there is no EGINTR history for US).
+  `risk_free_rate:US`, fallback 4.0 (`MarketConfig.risk_free_fallback_pct`).
+  `refresh_us_risk_free` (daily universe cron) also upserts its bars into
+  `macro_series` US03MY, so the dated history keeps growing. A US sale is
+  graded against that DATED history (see *US gaps*), the scalar only when the
+  history does not reach the sale.
 - `scripts/smoke_us.py` is a manual live check of the US data path (hits real
   TradingView, never run it from pytest).
 
@@ -241,6 +250,46 @@ Add a fact there, not as a literal.
 | yield band uppers (EG points 0/+4/+8/+4/−8) | 1.27, 2.27, 4.65, 8.02; median 1.97 |
 | liquidity floors | turnover ≥ 100,000,000 USD/day, price > 5.0 USD |
 | liquidity tiers (thin / low, shares/day) | US large-cap: no share floor (0 / 0); US: 25,000 / 40,000 |
+
+**US gaps (`feat/us-gaps`, 2026-10-16).** What used to be EG-only and now is per market:
+- **Sales grade.** `MarketConfig.risk_free_series` (EG `EGINTR`, US `US03MY`)
+  is what `routers/sales._rate_steps` reads — no market branch in the router.
+  `MarketConfig.risk_free_max_gap_days` (US 10, EG None): a sale dated more
+  than that past the series' last stored day is graded on the scalar —
+  a daily yield that stopped being stored is stale, not flat. EG keeps the
+  step-function reading (a policy rate holds until the next decision).
+  Tests: `tests/test_dated_risk_free_us.py` (AST guards on the router).
+- **Portfolio P/E and dividend signals** (`portfolio_analysis.fundamental_signals`,
+  pure) take their thresholds from `for_market(market).fundamentals`:
+  implausibly low < `pe_bands[0]` upper, undervalued < `pe_bands[1]`, overvalued
+  ≥ `pe_bands[3]`, solid yield ≥ `dy_bands[1]`, extreme ≥ `dy_bands[3]`; copy
+  names `the {label} median of ~{pe_median}` and the market currency. US: 7.8 /
+  17.8 / 37.9 and 2.27 / 8.02, "the US median of ~24". "Loses to the cash rate"
+  appears only when `dy_mid_under_risk_free`. EG text and thresholds are pinned
+  literally in `tests/test_portfolio_fundamental_signals.py`.
+- **Dividends.** Yahoo's code is a market fact (`MarketConfig.yahoo_suffix`,
+  `yahoo_class_separator`): EG `COMI.CA`; US bare, class shares with a dash
+  (`BRK.B` → `BRK-B`); rows are stored under our symbol and market.
+  `scripts/backfill_dividends.py --market US` walks the index members in
+  `market_universe`. The mobile dividend calendar and Dividend History card
+  show on US; US copy states no EGX/Egypt fact.
+- **News market half.** `MarketConfig.news_index` (EG `EGX30` file list; US
+  `SPX`). US fans out over the `NEWS_MARKET_INDEX_SIZE` (30) largest SPX members
+  by `pe_data.market_cap` (`universe.largest_members`, read-only, cached), each
+  on its own exchange from `market_universe`. Same `NEWS_MAX_SYMBOLS` cap and
+  `NEWS_DEADLINE_SECONDS`; Arab Finance stays EG-only. Measured: 30 in 1.55s.
+- **Macro card, DISPLAY ONLY.** `macro_fetch.fetch_macro_display(db, market)`:
+  the benchmark's level and 20-session trend (`_index_reading`, the EGX30 card's
+  maths moved verbatim) plus the risk-free rate with `MarketConfig.risk_free_label`
+  ("3-month T-bill"), `scoring: false`. In-memory cache only — never
+  `macro_data`, which is the EG regime the alert cron reads. Served by
+  `/api/macro?market=US` and `portfolio_analysis.macro` (US). **US scores are
+  NOT macro-modulated and must not be:** the US calibration backtest ran without
+  modulation, so modulating would detach US scores from their calibration.
+  `fetch_macro_for` stays None for US; `tests/test_us_macro_display.py` has an
+  AST guard that no `macro=` argument is ever the display reading.
+- **Score alerts** per market — see *Score alerts* (quiet hours in the market's
+  timezone, market-scoped queue, US cron schedule).
 
 **Deploying the market migration.** Deploy the backend in ONE step, not as a
 rolling mix: once the new code has migrated the keys, an old instance's
@@ -892,7 +941,9 @@ Trades held under 30 days report no annualized figure at all
 
 **Each trade is graded against the rate that prevailed while IT ran**, not
 today's. `compute_sale_metrics` takes `rate_steps` from
-`macro_series.get_risk_free_steps` and `returns.annualized_cash_rate_pct`
+`macro_series.get_risk_free_steps(db, market.risk_free_series)` (EGINTR for EG,
+the US03MY T-bill for US; `max_stale_days` = the market's
+`risk_free_max_gap_days`, see *US gaps*) and `returns.annualized_cash_rate_pct`
 compounds that step function across the holding window, annualizing back out —
 so a flat rate returns itself exactly, and every other case is a deviation from
 that anchor. The hurdle applied is returned as **`t_bill_hurdle_pct`**, because
@@ -964,12 +1015,18 @@ directly and never reaches it through holdings.
 **The heaviest endpoint.** Per-holding analysis + portfolio-level risk metrics + Monte Carlo + macro + signals.
 - Fetches OHLCV for each holding sequentially (cache helps)
 - Computes composite score per holding (divergence lookback = 30 bars; multi-timeframe skipped to stay within timeout; Risk-Adjusted requires ≥120-day history, else excluded)
-- Applies macro modulation (EGX30 regime) to every per-holding score
+- Applies macro modulation (EGX30 regime) to every per-holding score — EG only;
+  a US response's `macro` is the display-only reading (`scoring: false`), and
+  US scores are unmodulated
 - Risk: with 10+ holdings, can approach 30s timeout
 - Returns `PortfolioAnalysisResponse` (see types.ts)
 
 ### GET /api/macro
-Returns `{ egx30, usd_egp, interest_rate }`. 1-hour cache in `macro_data` table. Graceful degradation (returns null values if source fails).
+EG: returns `{ egx30, usd_egp, interest_rate }`. 1-hour cache in `macro_data` table. Graceful degradation (returns null values if source fails).
+Other markets (US): `{ egx30: null, usd_egp: null, benchmark: {value, change_pct,
+monthly_change_pct, direction, trend, label}, interest_rate: {value, direction,
+label}, scoring: false }` from `fetch_macro_display` — DISPLAY ONLY, never fed to
+scoring (see *US gaps*).
 
 ### GET /api/news
 
@@ -987,7 +1044,8 @@ succeed. **Do not re-propose scraping EGX from a serverless function.**
 **Two traps, both measured:**
 - **`?market=egypt` is SILENTLY IGNORED** and serves the global stock feed —
   200 items, **zero EGX symbols**, mostly Tesla and Santander. The market half
-  is built by fanning out over EGX30 constituents and deduping.
+  is built by fanning out over EGX30 constituents and deduping. (US: the 30
+  largest S&P 500 members by market cap — see *US gaps*.)
 - **The news host sends no `Access-Control-Allow-Origin`**, so a browser cannot
   fetch it. (The *scanner* host does reflect Origin.) This is why the work is
   server-side rather than a preference.
@@ -1076,7 +1134,8 @@ LEDGER routes — those record the USER's own payouts; these describe the MARKET
 dividend history plus a cadence estimate. **Persisted in the `dividend_events`
 table** (PK `(market, symbol, ex_date)`), which is:
 - **seeded deep from Yahoo** by `scripts/backfill_dividends.py` (all years —
-  `query1.finance.yahoo.com/v8/finance/chart/<SYM>.CA?events=div`, the ONLY
+  `query1.finance.yahoo.com/v8/finance/chart/<SYM>.CA?events=div` (US: the bare
+  ticker, `BRK.B` → `BRK-B`; `yahoo_symbol(symbol, market)`), the ONLY
   keyless source of DATED history — the scanner carries just the latest coupon,
   `fundamentals_annual.dps` has amounts but no ex-dates, egx.com.eg is bot-blocked);
 - **grown forward for free by the nightly refresh** — `refresh_pe_data` appends
@@ -1918,12 +1977,33 @@ in-progress bar** (`get_OHLCV_data(..., "Daily", 5)` returned a `2026-10-11` bar
 with partial volume for COMI, ETEL, FWRY), so scores move intraday and alerts
 fire mid-session.
 
+**Per market (since `feat/us-gaps`).** `run_alerts(..., market=)` runs for
+every market's risk_snapshot call. Detection, the dedupe and the daily cap are
+scoped to that market's session; baselines come from `score_baseline` keyed by
+market; EG blends both ends with the cached EGX30 regime, US with None (US
+scores take no modulation). `deliver_pending(..., market=)` holds during the
+MARKET's quiet hours (22:00-08:00 in its own timezone — America/New_York for
+US) and reclaims, expires (against that market's latest `risk_snapshot`
+session) and claims only that market's rows, so neither market's cron sends or
+expires the other's alerts. **Who hears:** a user's preferences apply to the
+markets they hold (quantity > 0) or watch something in, plus the market
+selected in the app (`user_settings.market`, absent = EG, which keeps EG users
+exactly as before). Push `data` carries `market`; the app opens
+`stock/[symbol]?market=` (never switching its selected market). The US summary
+reads "More US stocks moved today" (EG's is unchanged). `GET /api/alerts` rows
+carry `market`. Tests: `tests/test_us_alerts.py`.
+
 **Scheduling (external, cron-job.org).** For intraday alerts
 `POST /api/cron/risk_snapshot` must be called **every minute, Sun-Thu
 10:00-15:30 Africa/Cairo**, as well as on the existing post-close schedule.
 Use ONE cron-job.org job for this endpoint whose schedule is the SUPERSET of
 both (overlapping calls are safe - see the delivery claim below - but two jobs
-firing on the same minute just waste the scoring budget). The response carries
+firing on the same minute just waste the scoring budget).
+**US is a SEPARATE job:** `POST /api/cron/risk_snapshot?market=US&limit=30`
+**every minute 09:30-16:30 America/New_York, Mon-Fri** (pin the job's timezone
+to America/New_York so it follows US DST; it is the superset of the US
+intraday and post-close passes and replaces the earlier US job on the EG
+cadence). Same `X-Cron-Secret`. The response carries
 `alerts` = `{queued, sent, skipped, error}` (`skipped` is `"deadline"` or
 `"quiet-hours"`; `error` is the exception class name if alert code crashed).
 A crash in alert code never fails the scoring call.
@@ -1935,10 +2015,11 @@ Past that, alerts are skipped (`skipped: "deadline"`) and everything stays
 `pending` for the next call.
 
 **Limits and delivery.**
-- Quiet hours 22:00-08:00 Africa/Cairo (`tzdata` is in requirements so the zone
-  resolves on Vercel): nothing is sent; after quiet hours, pending rows from an
+- Quiet hours 22:00-08:00 in the MARKET's timezone (Africa/Cairo for EG,
+  America/New_York for US; `tzdata` is in requirements so the zones
+  resolve on Vercel): nothing is sent; after quiet hours, pending rows from an
   older session than the latest are marked `expired` (yesterday's move is not news).
-- Daily cap `ALERT_DAILY_CAP = 10` per user per session date; the next signal
+- Daily cap `ALERT_DAILY_CAP = 10` per user per market session date; the next signal
   becomes ONE summary alert (`symbol '*'`, `direction 'summary'`, opens the
   dashboard), further ones are `suppressed`.
 - Retries: an Expo failure leaves the row `pending` and bumps `attempts`;
@@ -2496,7 +2577,7 @@ Returned in `signals` array from portfolio_analysis. Sorted by priority:
 | Severity | Icon | Examples |
 |----------|------|----------|
 | `action_required` | `!!` | Stop-loss about to trigger, Death Cross, negative Sharpe, max drawdown > 20%, support broken, — |
-| `warning` | `!` | Sector/stock concentration, high correlation pairs, OBV bearish divergence, near resistance, big loss, **`cash_underperformer`** (held >90d, ann. return < T-bill), **`relative_strength_laggard`** (alpha < -10% vs EGX30), **`mfi_extreme`** at >80, **`low_liquidity_warning`** (thin volume relative to the stock's own index), **`exit_zone_active`** at medium/high confidence, **`pe_overvalued`** (P/E ≥ 25 — expensive vs the EGX median of ~12), **`pe_loss_making`** (diluted EPS < 0), **`pe_implausibly_low`** (P/E < 3 — one-off earnings or a collapsed price, NOT a bargain), **`dividend_yield_extreme`** (DY ≥ 15%) |
+| `warning` | `!` | Sector/stock concentration, high correlation pairs, OBV bearish divergence, near resistance, big loss, **`cash_underperformer`** (held >90d, ann. return < T-bill), **`relative_strength_laggard`** (alpha < -10% vs EGX30), **`mfi_extreme`** at >80, **`low_liquidity_warning`** (thin volume relative to the stock's own index), **`exit_zone_active`** at medium/high confidence, **`pe_overvalued`** (P/E ≥ 25 — expensive vs the EGX median of ~12), **`pe_loss_making`** (diluted EPS < 0), **`pe_implausibly_low`** (P/E < 3 — one-off earnings or a collapsed price, NOT a bargain), **`dividend_yield_extreme`** (DY ≥ 15%). The P/E and yield thresholds shown are EG's; each market's come from its bundle's band boundaries (see *US gaps*) |
 | `opportunity` | `$` | Golden Cross, RSI/Stochastic oversold+bullish crossover, near support, target approaching, divergence_bullish, **`relative_strength_leader`** (alpha > +5% vs EGX30), **`mfi_extreme`** at <20, **`entry_zone_active`** at medium/high confidence, **`pe_undervalued`** (P/E < 8) |
 | `info` | `i` | Beta context, ATR-based stop-loss suggestion, macro context, profit-taking reminder, **`very_strong_composite` / `strong_composite` / `weak_composite` / `very_weak_composite`** (condition readings — all `info` severity, never action_required, because the score is not predictive), **`adx_strong_trend`** (ADX > 30, direction from DI±), **`entry_zone_active` / `exit_zone_active` at LOW confidence** |
 
