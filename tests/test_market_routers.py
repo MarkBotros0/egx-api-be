@@ -351,15 +351,6 @@ def test_market_regime_refuses_unknown_market(client, regime_db):
     assert regime_db.log == []
 
 
-def test_market_regime_has_no_us_universe_yet(client, regime_db, monkeypatch):
-    monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
-    r = client.get("/api/market_regime", params={"market": "US"})
-    assert r.status_code == 200
-    assert r.json() == {"market": "US", "currency": "USD", "band": None,
-                        "stale": True, "n_symbols": 0}
-    assert regime_db.seen_markets == []
-
-
 # ===========================================================================
 # Task 7: feed routers, cron and alerts
 # ===========================================================================
@@ -728,12 +719,10 @@ def test_calibration_defaults_to_eg(client):
     assert r.json()["market"] == "EG" and r.json()["currency"] == "EGP"
 
 
-def test_calibration_refuses_unknown_and_non_eg_markets(client, monkeypatch):
+def test_calibration_refuses_unknown_markets(client):
+    # US is served from its own bundle since sub-project 3; see
+    # tests/test_us_calibration_routes.py (and the provisional-bundle 400).
     assert client.get("/api/calibration", params={"market": "XX"}).status_code == 400
-    monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
-    r = client.get("/api/calibration", params={"market": "US"})
-    assert r.status_code == 400
-    assert r.json()["detail"] == "Calibration is EGX-only until US is calibrated"
 
 
 # ---------------------------------------------------------------------------

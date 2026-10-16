@@ -109,6 +109,7 @@ def classify_regime(mean_score: Optional[float], n_symbols: int,
                 f"got {n_symbols}."
             ),
             "horizon_days": REGIME_HORIZON_DAYS,
+            "universe_label": regime.universe_label,
         }
 
     if mean_score < regime.weak_max:
@@ -129,6 +130,7 @@ def classify_regime(mean_score: Optional[float], n_symbols: int,
         "hist_positive_rate": band.positive_rate,
         "observations": band.observations,
         "horizon_days": REGIME_HORIZON_DAYS,
+        "universe_label": regime.universe_label,
         # The strength of the association, stated so the UI never implies
         # certainty. `association_significant` False must be honoured.
         "association_rho": regime.rho,

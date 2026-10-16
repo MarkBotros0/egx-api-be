@@ -36,8 +36,12 @@ def test_calibration_route_is_unchanged_for_eg():
 def test_regime_readings_are_unchanged_for_eg():
     from app.core.regime import classify_regime
     for mean, want in GOLDEN["regime"].items():
-        assert _j(classify_regime(float(mean), 40, EG_CAL.regime)) == want, mean
-    assert _j(classify_regime(52.0, 3, EG_CAL.regime)) == GOLDEN["regime_thin"]
+        got = classify_regime(float(mean), 40, EG_CAL.regime)
+        assert got.pop("universe_label") == "EGX30 and EGX70"
+        assert _j(got) == want, mean
+    thin = classify_regime(52.0, 3, EG_CAL.regime)
+    thin.pop("universe_label")
+    assert _j(thin) == GOLDEN["regime_thin"]
 
 
 def test_risk_payload_and_grades_are_unchanged_for_eg():

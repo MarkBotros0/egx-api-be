@@ -34,11 +34,14 @@ router = APIRouter()
 @router.get("/api/calibration")
 def get_calibration(user=Depends(get_current_user),
                     market: MarketConfig = Depends(market_param)):
-    """Every measured claim the app makes, with what it actually delivered."""
-    if market.code != "EG":
+    """Every measured claim the app makes for this market, with what it delivered."""
+    cal = for_market(market)
+    if cal.provisional:
+        # A provisional bundle is another market's fit standing in; quoting it
+        # as this market's record would be a claim nobody measured.
         raise HTTPException(status_code=400,
-                            detail="Calibration is EGX-only until US is calibrated")
-    return build_record(market, for_market(market))
+                            detail=f"Calibration for {market.code} is not fitted yet")
+    return build_record(market, cal)
 
 
 def build_record(market: MarketConfig, cal: Calibration) -> dict:
