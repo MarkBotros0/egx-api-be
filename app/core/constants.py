@@ -234,6 +234,11 @@ NEWS_RECENCY_DAYS = 30
 NEWS_MAX_SYMBOLS = 40
 NEWS_FETCH_WORKERS = 8
 
+# Size of the market half on a market whose index is too large to fan out over
+# whole (US: the S&P 500). The largest members by pe_data.market_cap, matching
+# the EGX30's 30 names, inside the same NEWS_MAX_SYMBOLS cap and deadline.
+NEWS_MARKET_INDEX_SIZE = 30
+
 # Wall clock for the whole fan-out, mirroring BATCH_DEADLINE_SECONDS. The
 # source is fast, but an unbounded fan-out is how the dashboard broke. This
 # doubles as the tripwire in the spec: routinely tripping it means the

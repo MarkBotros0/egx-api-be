@@ -132,6 +132,35 @@ def index_members(db, market: MarketConfig) -> Optional[frozenset]:
     return members
 
 
+_largest_cache: dict = {}
+
+
+def largest_members(db, market: MarketConfig, index_id: str, limit: int) -> list:
+    """
+    [(symbol, exchange)] for the `limit` largest members of one index, by
+    `pe_data.market_cap` (members without a cap sort last). READ-ONLY, cached
+    like `index_members`; [] when the table cannot be read. Feeds the US news
+    market half, which fetches each symbol on its OWN exchange from here.
+    """
+    key = (market.code, index_id, limit)
+    hit = _largest_cache.get(key)
+    if hit is not None and hit[0] and time.time() - hit[1] < _UNIVERSE_TTL:
+        return hit[0]
+    try:
+        rows = db.execute(
+            "SELECT u.symbol, u.exchange FROM market_universe u "
+            "LEFT JOIN pe_data p ON p.market = u.market AND p.symbol = u.symbol "
+            "WHERE u.market = %s AND %s = ANY(u.indices) AND u.exchange IS NOT NULL "
+            "ORDER BY p.market_cap DESC NULLS LAST, u.symbol LIMIT %s",
+            (market.code, index_id, limit),
+        ).fetchall()
+    except Exception:
+        return []
+    out = [(r[0].upper(), r[1]) for r in rows]
+    _largest_cache[key] = (out, time.time())
+    return out
+
+
 def _read(db, market: MarketConfig) -> list:
     rows = db.execute(
         "SELECT symbol, name, sector, exchange, kind, indices FROM market_universe "

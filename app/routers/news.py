@@ -16,7 +16,7 @@ from app.core import cache, universe
 from app.core.markets import MarketConfig, market_param
 from app.core.arabfinance import fetch_stories as fetch_arabfinance
 from app.core.auth import CurrentUser, get_current_user
-from app.core.constants import DEFAULT_CACHE_TTL_SECONDS
+from app.core.constants import DEFAULT_CACHE_TTL_SECONDS, NEWS_MARKET_INDEX_SIZE
 from app.core.db import get_db
 from app.core.holdings import fetch_open_holdings
 from app.core.index_membership import symbols_in_index
@@ -50,9 +50,18 @@ def get_news(user: CurrentUser = Depends(get_current_user),
         db = None
         holdings, watch = [], []
 
-    # The market half fans out over the EGX30 for EG. Other markets have no
-    # index constituents wired yet (sub-project 4), so their half is empty.
-    index_symbols = symbols_in_index("EGX30") if is_eg else []
+    # The market half fans out over the market's news index: the EGX30 file
+    # list for EG; for US the largest SPX members by market cap, each carrying
+    # its OWN exchange from market_universe (never the market's first exchange).
+    index_exchange: dict = {}
+    if is_eg:
+        index_symbols = symbols_in_index(market.news_index)
+    elif market.news_index and db is not None:
+        index_exchange = dict(universe.largest_members(
+            db, market, market.news_index, NEWS_MARKET_INDEX_SIZE))
+        index_symbols = list(index_exchange)
+    else:
+        index_symbols = []
     yours, market_half, dropped = select_news_symbols(holdings, watch, index_symbols)
 
     # `dropped` is baked into the cached payload (coverage.symbols_over_cap),
@@ -74,7 +83,7 @@ def get_news(user: CurrentUser = Depends(get_current_user),
         # Each symbol's news is keyed by its own listing exchange. One the
         # resolver cannot place is SKIPPED, never guessed: a wrong exchange
         # waits ~5.5s for nothing (see tests/test_exchange_guard.py).
-        exchange = universe.resolve_exchange(db, market, symbol)
+        exchange = index_exchange.get(symbol) or universe.resolve_exchange(db, market, symbol)
         if exchange is None:
             return []
         return fetch_symbol_news(symbol, exchange=exchange)

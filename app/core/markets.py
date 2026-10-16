@@ -68,6 +68,9 @@ class MarketConfig:
     # bare, with a class share's dot spelled as a dash (BRK.B -> BRK-B).
     yahoo_suffix: str = ""
     yahoo_class_separator: Optional[str] = None
+    # The index /api/news fans its market half out over (EG: the EGX30 file
+    # list; US: the largest SPX members by market cap, see universe.largest_members).
+    news_index: Optional[str] = None
 
     @property
     def primary_exchange(self) -> str:
@@ -99,7 +102,7 @@ EG = MarketConfig(
     benchmark_symbol="EGX30", benchmark_exchange="EGX", benchmark_label="EGX30",
     risk_free_fallback_pct=19,
     risk_free_series="EGINTR",
-    yahoo_suffix=".CA",
+    yahoo_suffix=".CA", news_index="EGX30",
     liquid_min_turnover=1_000_000, liquid_min_price=0.5,
     isin_prefix="EG",
     # Unverified: the `holidays` library ESTIMATES Islamic dates, and the old
@@ -121,7 +124,7 @@ US = MarketConfig(
     # 3-month T-bill fallback; live value from TVC:US03MY.
     risk_free_fallback_pct=4.0,
     risk_free_series="US03MY", risk_free_max_gap_days=10,
-    yahoo_class_separator="-",
+    yahoo_class_separator="-", news_index="SPX",
     # Fitted by scripts/calibrate.py --market US (app/core/calibration/us.py):
     # p5 of 60-day mean dollar turnover across SPX/NDX/DJI members, rounded
     # down; 5 USD is the usual penny-stock line.

@@ -587,6 +587,7 @@ def news_env(monkeypatch):
     monkeypatch.setattr(news_mod, "get_db", lambda: db)
     monkeypatch.setattr(news_mod, "fetch_arabfinance",
                         lambda: af_calls.append(1) or ([], None))
+    monkeypatch.setattr(news_mod.universe, "_largest_cache", {})
     db.urls, db.af_calls = urls, af_calls
     return db
 
@@ -623,10 +624,52 @@ def test_news_us_uses_the_us_exchange_and_skips_egyptian_sources(
     assert news_env.urls == [
         "https://news-headlines.tradingview.com/v2/headlines"
         "?client=web&lang=en&symbol=NASDAQ%3ACOMI"
-    ], "only the caller's own symbol: no EGX30 half for US"
+    ], "only the caller's own symbol: an empty universe gives no market half"
     assert news_env.af_calls == [], "Arab Finance is Egyptian press"
     _, params = news_env.statements("FROM watchlist")[0]
     assert params == ("u1", "US")
+
+
+def test_news_us_market_half_is_the_largest_spx_members_on_their_own_exchanges(
+        client, news_env, monkeypatch):
+    from app.core.constants import NEWS_MARKET_INDEX_SIZE
+    from app.routers import news as news_mod
+    monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
+    news_env.rows_for("FROM market_universe u", [("MSFT", "NASDAQ"), ("JPM", "NYSE")])
+    # The index rows carry the exchange: the resolver is never asked for them.
+    asked = []
+    monkeypatch.setattr(news_mod.universe, "resolve_exchange",
+                        lambda db, m, s: asked.append(s) or ("NASDAQ" if s == "COMI" else None))
+    r = client.get("/api/news", params={"market": "US"})
+    assert r.status_code == 200, r.text
+    assert sorted(news_env.urls) == sorted(
+        "https://news-headlines.tradingview.com/v2/headlines?client=web&lang=en&symbol=" + q
+        for q in ("NASDAQ%3ACOMI", "NASDAQ%3AMSFT", "NYSE%3AJPM"))
+    assert asked == ["COMI"]
+    [(sql, params)] = news_env.statements("FROM market_universe u")
+    assert "ORDER BY p.market_cap DESC" in sql
+    assert params == ("US", "SPX", NEWS_MARKET_INDEX_SIZE)
+    assert news_env.af_calls == [], "Arab Finance stays EG-only"
+
+
+def test_news_us_market_half_respects_the_symbol_cap(client, news_env, monkeypatch):
+    from app.core.constants import NEWS_MAX_SYMBOLS
+    from app.routers import news as news_mod
+    monkeypatch.setenv("ENABLED_MARKETS", "EG,US")
+    mine = [(f"S{i}",) for i in range(NEWS_MAX_SYMBOLS)]
+    news_env.responses.insert(0, ("FROM watchlist", mine))
+    news_env.rows_for("FROM market_universe u", [("MSFT", "NASDAQ")])
+    monkeypatch.setattr(news_mod.universe, "resolve_exchange", lambda db, m, s: "NYSE")
+    r = client.get("/api/news", params={"market": "US"})
+    assert r.status_code == 200, r.text
+    assert len(news_env.urls) == NEWS_MAX_SYMBOLS
+    assert not any("MSFT" in u for u in news_env.urls)
+
+
+def test_us_news_index_is_a_market_fact():
+    from app.core.markets import EG, US
+    assert EG.news_index == "EGX30" and US.news_index == "SPX"
+    assert any(i.id == US.news_index for i in US.indices)
 
 
 # ---------------------------------------------------------------------------
