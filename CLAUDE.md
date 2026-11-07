@@ -1858,6 +1858,26 @@ on the trailing 63-day sigma the quintile table was fitted on. Swapping the
 ranking input without refitting would leave the historical mapping describing a
 different variable.
 
+### Scheduling moved to the devbox (2026-11-07)
+
+Vercel Hobby paused the team for Fluid Active CPU; the every-minute
+risk_snapshot calls were ~79% of it. **All scheduled jobs now run on the devbox
+from the user's crontab**, not cron-job.org -> Vercel. Where this file says
+"cron-job.org" below, read "devbox crontab" for the schedule; the routes,
+limits and schedules themselves are unchanged.
+- `egx-api-be/scripts/devbox_cron.py`, run every minute, decides what is due on
+  market-local clocks (Africa/Cairo, America/New_York) and POSTs the routes
+  IN-PROCESS via FastAPI's TestClient (same code path, no HTTP, no Vercel).
+  Jobs: `eg_risk` (`?limit=6`, every minute Sun-Thu 10:00-15:30 + */5
+  15:00-16:55 Cairo), `us_risk` (`?market=US&limit=30`, every minute Mon-Fri
+  09:30-16:30 NY), `eg_pe` 04:00 Cairo, `us_universe` 17:15 NY, `us_pe` 17:45 NY.
+  `--job <name>` runs one now; `--due <ISO>` prints what would fire.
+  Tests: `tests/test_devbox_cron.py`.
+- Env comes from `egx-api-be/.env` (its Neon DB is PRODUCTION) or
+  `EGX_CRON_ENV_FILE`; the route secrets are a fresh random value per run.
+- One JSON line per job in `~/logs/egx-crons.log` (trimmed to 20k lines daily).
+- The cron-job.org jobs must stay DISABLED, or every call costs Vercel CPU again.
+
 ### POST /api/cron/risk_snapshot — chunked, externally scheduled
 
 **Scheduling is external (cron-job.org), not `vercel.json`.** That removes the
